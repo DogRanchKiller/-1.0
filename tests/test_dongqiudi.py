@@ -256,6 +256,22 @@ def test_requests_spaced_out(tmp_path):
     assert sleeps == [5]
 
 
+def test_two_programs_share_interval(tmp_path):
+    """两个程序（各开各的数据库连接）同时在跑：占的时间不会重复，合起来每 5 秒最多一次。
+    原来只看 fetch_log 最后一条，两个程序在请求前同时看，会算出同样的等待时间、同一秒一起请求。"""
+    t0 = datetime(2020, 1, 1, tzinfo=UTC)
+    make = lambda: Collector(connect(tmp_path / "t.db"), tmp_path / "raw", {**CFG, "min_interval_seconds": 5},
+                             session=FakeSite(), sleep=lambda s: None, now=lambda: t0)
+    a, b = make(), make()
+    # 请求还没发出去（fetch_log 里还没有记录）时，两个程序先后来占时间
+    waits = [a._reserve_slot(), b._reserve_slot(), a._reserve_slot(), b._reserve_slot()]
+    assert waits == [0, 5, 10, 15]
+    # 电脑时间往回调过、占下的时间很远：最多只等 12 个间隔
+    a.con.execute("update request_slots set next_at_utc = '2020-01-02T00:00:00+00:00'")
+    a.con.commit()
+    assert b._reserve_slot() == 60
+
+
 def test_backfill_progress_report(env):
     """回补进度：已抓 = 有文件的 + 网站说没有的；不在历届列表里的赛季标“懂球帝没有”；全程不联网。"""
     from src.jobs.dongqiudi_progress import report, run_state, season_rows

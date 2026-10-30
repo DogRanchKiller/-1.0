@@ -135,23 +135,51 @@ class Collector:
         self.now = now or (lambda: datetime.now(timezone.utc))
         self._last_request = None
         self.counts = {}
+        # 几个程序共用的“下一次最早什么时候可以请求”（见 _reserve_slot）
+        con.execute("create table if not exists request_slots (source text primary key, next_at_utc text not null)")
+        con.commit()
 
     # ---------- 网络 ----------
-    def _shared_wait(self) -> float:
-        """别的程序（例如定时任务和回补同时在跑）刚请求过懂球帝，也要等够间隔。用 fetch_log 里最后一条的时间判断。"""
-        row = self.con.execute("select max(fetched_at_utc) from fetch_log where source = ?", (SOURCE,)).fetchone()
-        if not row or not row[0]:
-            return 0
-        return self.min_interval - (self.now() - datetime.fromisoformat(row[0])).total_seconds()
+    def _reserve_slot(self) -> float:
+        """几个程序同时在跑（例如定时任务和两个回补）时，合起来也要每 min_interval 秒最多一次请求。
+
+        做法：数据库里 request_slots 表记着“下一次最早什么时候可以请求”。每次请求前，在数据库写锁里
+        读出这个时间、占下它、把它往后推 min_interval 秒，再等到占下的时间才发请求。
+        写锁同一时间只有一个程序拿得到，所以两个程序不会占到同一个时间（原来只看 fetch_log 最后一条，
+        两个程序同时看、同时等，会在同一秒一起请求，2026-10-31 发现后改的）。
+        返回要等几秒。
+        """
+        self.con.commit()                      # 先结束可能开着的事务，才能马上拿写锁
+        self.con.execute("begin immediate")    # 拿写锁：别的程序要占时间得等这里提交
+        try:
+            now = self.now()
+            start = now
+            row = self.con.execute("select next_at_utc from request_slots where source = ?", (SOURCE,)).fetchone()
+            if row:
+                start = max(start, datetime.fromisoformat(row[0]))
+            # 老版本的程序不占时间，只写 fetch_log：也照它最后一次请求的时间往后排
+            last = self.con.execute("select max(fetched_at_utc) from fetch_log where source = ?", (SOURCE,)).fetchone()
+            if last and last[0]:
+                start = max(start, datetime.fromisoformat(last[0]) + timedelta(seconds=self.min_interval))
+            # 电脑时间被往回调过时，占下的时间可能离现在很远；最多只排到 12 个间隔以后，免得一直等
+            start = min(start, now + timedelta(seconds=12 * self.min_interval))
+            self.con.execute("insert into request_slots (source, next_at_utc) values (?, ?)"
+                             " on conflict(source) do update set next_at_utc = excluded.next_at_utc",
+                             (SOURCE, (start + timedelta(seconds=self.min_interval)).isoformat(timespec="milliseconds")))
+            self.con.commit()
+        except BaseException:
+            self.con.rollback()
+            raise
+        return (start - now).total_seconds()
 
     def _get(self, url: str):
-        """低频请求：两次请求至少隔 min_interval 秒；连不上或服务器出错时等 30 秒重试，最多 3 次。"""
+        """低频请求：两次请求至少隔 min_interval 秒（几个程序合起来算）；连不上或服务器出错时等 30 秒重试，最多 3 次。"""
         for attempt in range(3):
-            wait = self._shared_wait()
+            wait = self._reserve_slot()
             if self._last_request is not None:
                 wait = max(wait, self.min_interval - (self.clock() - self._last_request))
             if wait > 0:
-                self.sleep(min(wait, self.min_interval))
+                self.sleep(wait)
             self._last_request = self.clock()
             try:
                 r = self.session.get(url, timeout=60)
