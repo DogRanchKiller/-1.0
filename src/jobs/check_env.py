@@ -81,9 +81,10 @@ def main():
     check("配置文件", settings_file)
     check("文件夹结构", folders)
     check("中文路径读写", chinese_path)
-    check("访问 football-data", network("https://www.football-data.co.uk/mmz4281/2425/E0.csv"))
-    check("访问 Understat", network("https://understat.com"))
+    # football-data、Understat 的 robots.txt 不允许 AI 程序访问，这里不检查它们（见需求文档 6.1）。
+    # football-data 能不能下载，由“下载历史数据.bat”运行时报告。
     check("访问 GitHub", network("https://github.com"))
+    check("访问清华 pip 镜像", network("https://pypi.tuna.tsinghua.edu.cn/simple/pandas/"))
 
     for name, ok, detail in results:
         print(f"[{'通过' if ok else '失败'}] {name}：{detail}")
