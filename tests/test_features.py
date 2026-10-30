@@ -42,8 +42,10 @@ def settings():
 def con():
     c = sqlite3.connect(":memory:")
     create_tables(c)
-    c.executemany("insert into teams values (?, null, 'England')", [(t,) for t in "ABCD"])
-    c.executemany("insert into matches values (?, ?, ?, ?, ?, ?, ?, 'finished')", MATCHES)
+    # 写明列名：A 给 matches 加 round、leg 列以后这里不用改
+    c.executemany("insert into teams (team_id, country) values (?, 'England')", [(t,) for t in "ABCD"])
+    c.executemany("insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc,"
+                  " status) values (?, ?, ?, ?, ?, ?, ?, 'finished')", MATCHES)
     c.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result, home_shots, away_shots,"
                   " home_corners, away_corners) values (?, 'football-data', ?, ?, ?, 10, 8, 5, 3)",
                   [(m, *s) for m, s in SCORES.items()])
