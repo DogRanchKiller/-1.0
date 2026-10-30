@@ -144,23 +144,53 @@ class FeatureStore:
                 f"  比赛 {mid}（{home} 对 {away}）最早可能的开球时间是 {kickoff} UTC，截止时间却是 {cutoff} UTC。\n"
                 f"  开球之后才去取本场的数据做赛前预测，就是偷看未来。只有日期没有开球时间的比赛，按当天 00:00（英国时间）开球算。")
         return {"season": season, "kickoff_earliest_utc": kickoff}
-    def _stats_columns(self, data_types: list[str]) -> list[str]:
-        """这几类数据在 match_stats 里对应的列（去重、保持顺序）；数据库里还没有的列跳过。"""
+    def _stats_groups(self, data_types: list[str]) -> list[tuple[str, list[str]]]:
+        """这几类数据在 match_stats 里对应的列，按类分组：[(类名, [列, ...]), ...]。
+        一列只放在第一个要它的类里；数据库里还没有的列跳过；一列都没有的类不要。"""
         existing = {r[1] for r in self.conn.execute("pragma table_info(match_stats)")}
-        cols: list[str] = []
+        seen: set[str] = set()
+        groups = []
         for d in data_types:
             item = self.usage.item(d)
             if not str(item.get("表", "")).startswith("match_stats"):
                 raise ValueError(f"「{d}」不在 match_stats 表里，不能用这个函数取（赔率用 historical_odds，杯赛赛程用 team_schedule）")
-            cols += [c for c in self.usage.columns(d) if c not in cols and c in existing]
-        return cols
+            cols = [c for c in self.usage.columns(d) if c not in seen and c in existing]
+            seen.update(cols)
+            if cols:
+                groups.append((d, cols))
+        return groups
 
-    def _query_past(self, cutoff: str, stat_cols: list[str], league: bool, competition=None,
+    def _stats_joins(self, groups: list[tuple[str, list[str]]]) -> tuple[str, str]:
+        """每一类数据各挑一个来源（match_stats 的主键是 match_id + source，直接 join 的话一场会变成几行）。
+
+        挑法：这类数据的列填得最全的来源先；一样全的，按 settings.yaml 的 stats_source_priority 的顺序。
+        例子：2025/26 的比赛 football-data 有比分、射门，没有 xG；懂球帝详情页有比分、射门、xG →
+        比分用 football-data（一样全，按顺序），射门和 xG 用懂球帝（它更全）。
+        返回（要加进 select 的列, join 语句）。第一类的来源叫 stats_source，后面每类的来源叫 stats_source_<类名>。
+        """
+        if not groups:   # 什么列都不要时，也照“比分”挑一个来源，好给出 stats_source
+            groups = [("比分", [])]
+        select, joins = [], []
+        for i, (name, cols) in enumerate(groups):
+            a = f"s{i}"
+            filled = " + ".join(f"(s2.{c} is not null)" for c in cols) or "0"
+            joins.append(f"""
+            left join match_stats {a}
+              on {a}.match_id = m.match_id
+             and {a}.source = (select s2.source from match_stats s2
+                               left join temp.{self._prio} p on p.source = s2.source
+                               where s2.match_id = m.match_id
+                               order by {filled} desc, coalesce(p.rank, 999), s2.source limit 1)""")
+            alias = "stats_source" if i == 0 else f"stats_source_{name}"
+            select.append(f'{a}.source as "{alias}"')   # 类名是中文、带顿号，要加引号
+            select += [f"{a}.{c}" for c in cols]
+        return ", " + ", ".join(select), "".join(joins)
+
+    def _query_past(self, cutoff: str, groups: list[tuple[str, list[str]]], league: bool, competition=None,
                     team: str | None = None, since=None, newest_first_limit: int | None = None) -> pd.DataFrame:
         """“以前的比赛”：已经踢完（finished），而且比分在截止时间之前已经能知道（result_known_utc ≤ 截止时间）。
 
-        同一场比赛有几个来源的统计时，按 settings.yaml 的 stats_source_priority 挑一个（match_stats 的主键是 match_id + source，
-        直接 join 的话一场会变成几行）。
+        同一场比赛有几个来源的统计时，每类数据各挑一个来源（见 _stats_joins）。
         """
         comp_sql, comp_params = self._competition_filter(competition, league)
         where = ["m.status = 'finished'", "k.result_known_utc <= ?", comp_sql]
@@ -171,19 +201,13 @@ class FeatureStore:
         if since is not None:
             where.append("k.kickoff_earliest_utc >= ?")
             params.append(to_utc_text(since))
-        stat_sql = "".join(f", s.{c}" for c in stat_cols)
+        stat_sql, join_sql = self._stats_joins(groups)
         order = "desc" if newest_first_limit else "asc"
         sql = f"""
-            select m.*, k.season_role, k.kickoff_earliest_utc, s.source as stats_source{stat_sql},
+            select m.*, k.season_role, k.kickoff_earliest_utc{stat_sql},
                    k.result_known_utc as known_at_utc
             from matches m
-            join temp.{self._kt} k using (match_id)
-            left join match_stats s
-              on s.match_id = m.match_id
-             and s.source = (select s2.source from match_stats s2
-                             left join temp.{self._prio} p on p.source = s2.source
-                             where s2.match_id = m.match_id
-                             order by coalesce(p.rank, 999), s2.source limit 1)
+            join temp.{self._kt} k using (match_id){join_sql}
             where {' and '.join(where)}
             order by k.kickoff_earliest_utc {order}, m.match_id {order}"""
         if newest_first_limit:
@@ -220,13 +244,14 @@ class FeatureStore:
         competition：联赛代码，例如 'E0' 或 ['E0', 'E1']；不给 = settings.yaml 里的全部联赛（不含杯赛）。
         data：要哪几类数据，名字按 data_usage.yaml，例如 ('比分', '射门、xG')。每一类都按用途检查。
         since：只要这个时间以后开球的（省时间用，不影响防偷看）。
-        返回 matches 表的全部列 + 要的统计列 + stats_source（统计来自哪个来源）+ known_at_utc（比分能知道的时间）。
+        返回 matches 表的全部列 + 要的统计列 + stats_source（第一类数据来自哪个来源）+ known_at_utc（比分能知道的时间）。
+        要了几类数据时，每类各挑一个来源，第二类起的来源在 stats_source_<类名> 列，例如 stats_source_射门、xG。
         """
         cutoff = to_utc_text(cutoff)
         data = list(data)
         for d in ["比赛信息", *data]:
             self.usage.check(d, PAST, usage)
-        df = self._query_past(cutoff, self._stats_columns(data), league=True, competition=competition, since=since)
+        df = self._query_past(cutoff, self._stats_groups(data), league=True, competition=competition, since=since)
         return self._check_rows_mode(df, usage)
 
     def team_recent_matches(self, team: str, cutoff, usage: str, n: int, competition=None,
@@ -247,7 +272,7 @@ class FeatureStore:
         if self.conn.execute("select 1 from matches where home_team = ? or away_team = ? limit 1",
                              (team, team)).fetchone() is None:
             raise ValueError(f"数据库里没有球队「{team}」（球队编号见 config/teams.yaml）")
-        df = self._query_past(cutoff, self._stats_columns(data), league=True, competition=competition,
+        df = self._query_past(cutoff, self._stats_groups(data), league=True, competition=competition,
                               team=team, newest_first_limit=int(n))
         df = self._check_rows_mode(df, usage)
         return _team_view(df, team)
@@ -388,17 +413,12 @@ class FeatureStore:
         """本场的比分（答案）。只能用于评估、机器人结算、复盘；截止时间之前比分还不能知道时，返回空表。"""
         cutoff = to_utc_text(cutoff)
         self._target(match_id, cutoff, usage, ["比分"])
-        cols = "".join(f", s.{c}" for c in self._stats_columns(["比分"]))
+        stat_sql, join_sql = self._stats_joins(self._stats_groups(["比分"]))
         sql = f"""
-            select m.match_id, s.source as stats_source{cols}, k.result_known_utc as known_at_utc
+            select m.match_id{stat_sql}, k.result_known_utc as known_at_utc
             from matches m
-            join temp.{self._kt} k using (match_id)
-            join match_stats s
-              on s.match_id = m.match_id
-             and s.source = (select s2.source from match_stats s2
-                             left join temp.{self._prio} p on p.source = s2.source
-                             where s2.match_id = m.match_id order by coalesce(p.rank, 999), s2.source limit 1)
-            where m.match_id = ? and m.status = 'finished' and k.result_known_utc <= ?"""
+            join temp.{self._kt} k using (match_id){join_sql}
+            where m.match_id = ? and m.status = 'finished' and k.result_known_utc <= ? and s0.source is not null"""
         return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff])
     def prediction_targets(self, start, end, usage: str, competition=None) -> pd.DataFrame:
         """开球时间在 [start, end) 之间的联赛比赛，当作要预测的目标（回测时一场一场拿出来预测）。
@@ -455,7 +475,7 @@ class FeatureStore:
         """以前的杯赛、欧战比分（预留位置）。按数据用途字典，第 8 阶段前不能当模型输入，调用会报错。"""
         cutoff = to_utc_text(cutoff)
         self.usage.check("杯赛欧战比分", PAST, usage)
-        df = self._query_past(cutoff, self._stats_columns(["杯赛欧战比分"]), league=False,
+        df = self._query_past(cutoff, self._stats_groups(["杯赛欧战比分"]), league=False,
                               competition=competition, team=team, since=since)
         return self._check_rows_mode(df, usage)
 

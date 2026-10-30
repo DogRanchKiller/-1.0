@@ -225,6 +225,61 @@ def test_played_score_fills_in_before_football_data(env):
     assert (row.home_goals, row.stats_source) == (3, "football-data")
     assert len(hist[hist.match_id == mid]) == 1
 
+def detail_page(page_id, hg, ag, xg=(0.83, 0.76), shots=(15, 11), on_target=(4, 4)):
+    """假的比赛详情页（和 tests/test_dongqiudi.py 里的一样的样子）。xg=None：这场没有 xG。"""
+    pairs = [("射门", shots), ("射正", on_target), ("角球", (4, 5))] + ([("预期进球(xG)", xg)] if xg else [])
+    state = {"matchContentStore": {"matchDetailHeaderData": {
+        "match": {"id": str(page_id - 50000000), "status": "Played",
+                  "team_A": {"name": "主", "fs": str(hg)}, "team_B": {"name": "客", "fs": str(ag)}},
+        "info": {"statistics": {"list": [{"type": t, "team_A": {"value": a}, "team_B": {"value": b}}
+                                         for t, (a, b) in pairs]}}}}}
+    return (f'<html><div data-id="{page_id}" class="matchd"></div><script>window.__INITIAL_STATE__='
+            f'{json.dumps(state, ensure_ascii=False)};</script></html>')
+
+
+def test_match_detail_stats(env):
+    """详情页的射门、xG：别的来源也有的比赛另写一行懂球帝的；比分对不上的不导入；当前赛季的加到懂球帝那行上。"""
+    con, raw, reports, s = env
+    d = raw / "dongqiudi" / "match_detail" / "E0"
+    gz(d / "2023" / "1001.html.gz", detail_page(1001, 1, 0))                 # 第 1 场 1-0：对得上
+    gz(d / "2023" / "1002.html.gz", detail_page(1002, 0, 0, xg=None))        # 第 2 场应该 2-0：对不上
+    gz(d / "2023" / "1003.html.gz", detail_page(1004, 3, 0))                 # 页面是别的比赛
+    gz(d / "2023" / "1005.suspicious.html.gz", "<html>请验证</html>")        # 可疑文件不读
+    gz(d / "2026" / "901.html.gz", detail_page(901, 2, 0, xg=(1.75, 0.40)))
+    out = go(env)
+    rows = {r[0]: r[1:] for r in con.execute(
+        "select match_id, home_goals, away_goals, result, home_shots, away_shots, home_shots_on_target, home_xg, away_xg"
+        " from match_stats where source = 'dongqiudi'")}
+    mid901 = out["ids"][901]
+    assert rows[1] == (1, 0, "H", 15, 11, 4, 0.83, 0.76)
+    assert 2 not in rows and 3 not in rows                     # 对不上的、页面是别的比赛的，都不写
+    assert rows[mid901] == (2, 0, "H", 15, 11, 4, 1.75, 0.40)
+    assert len(rows) == 2
+    assert out["counts"]["详情页比分和赛程不一样（统计不导入）"] == 1
+    assert len(out["detail_mismatches"]) == 1 and "1002" in out["detail_mismatches"][0]
+    report = (reports / "dongqiudi_导入.md").read_text(encoding="utf-8")
+    assert "## 比赛详情页（射门、xG）" in report and "详情页：页面是别的比赛，跳过 | 1" in report
+    # football-data 那行还在（一场两行，取数时每类数据各挑一个来源）
+    assert con.execute("select count(*) from match_stats where match_id = 1").fetchone()[0] == 2
+
+    s = copy.deepcopy(s)
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["features"]["stats_source_priority"] = ["football-data", "dongqiudi"]
+    con.execute("update match_stats set result = 'H' where source = 'football-data' and match_id = 1")
+    con.execute("update match_stats set home_shots = 9, away_shots = 9 where source = 'football-data' and match_id = 1")
+    fs = FeatureStore(con, "实时", s)
+    hist = fs.historical_matches("2024-06-01", "A版输入", competition="E0", data=("比分", "射门、xG"))
+    row = hist[hist.match_id == 1].iloc[0]
+    # 比分两边一样全 → 按顺序用 football-data；射门、xG 懂球帝更全 → 用懂球帝
+    assert (row.stats_source, row["stats_source_射门、xG"]) == ("football-data", "dongqiudi")
+    assert (row.home_goals, row.home_shots, row.home_xg) == (1, 15, 0.83)
+    assert len(hist[hist.match_id == 1]) == 1
+    # 只有 football-data 的比赛：两类都用它
+    row2 = hist[hist.match_id == 2].iloc[0]
+    assert (row2.stats_source, row2["stats_source_射门、xG"]) == ("football-data", "football-data")
+    assert row2.home_xg is None or row2.home_xg != row2.home_xg   # 空值
+
+
 def test_fill_teams_yaml(tmp_path):
     p = tmp_path / "teams.yaml"
     p.write_text("球队:\n  - {英文: \"Man City\", 中文: '', 国家: 英格兰}  # 注释\n"

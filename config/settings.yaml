@@ -50,6 +50,11 @@ dongqiudi:
   # 赛前赔率快照的间隔：离开球越近抓得越勤。[离开球不到几小时, 至少隔几小时抓一次]，从近到远排
   odds_snapshot_rules: [[6, 1], [48, 3], [192, 12]]
   final_after_hours: 3       # 开球后几小时，比赛算踢完，抓一次“最终赔率”（以后不再变）
+  # 比赛详情页（xG、射门等技术统计，需求文档 6.1、6.2）：开球后几小时再抓（只抓一次）。
+  # 统计赛后多久定下来没有核实过，先留宽一点；要在 upcoming_lookback_days 之内，否则比赛已经不在“即将开赛”看的范围里了
+  detail_after_hours: 6
+  # 详情页补抓从哪天起：懂球帝的 xG 英超 2025-12-03 起有（11-30 还没有），别的联赛没逐场查，往前多留两周
+  detail_backfill_from: "2025-11-15"
   backfill_first_season: 2018  # 历史回补最早的赛季（2026-10-31 定：只补赔率比较全的 2018/19 起；试验时用的是 2010，见 6.2.1）
   probe_matches_per_season: 3  # 试验模式：每个赛季抽几场看有没有赔率
   # 导入数据库（src/clean/dongqiudi_import.py）：
@@ -111,8 +116,9 @@ features:                    # 取数层 src/features（需求文档第 16、17 
   date_only_timezone: Europe/London
   # 只知道“这一轮从哪天开始”的杯赛（date_precision = round），按这一轮最长持续几天算最晚开球（比分晚知道，不偷看）
   round_date_window_days: 7
-  # 同一场比赛有几个来源的比分统计时，按这个顺序挑第一个有的。
-  # 懂球帝只有比分（没有射门等），只在 football-data 还没更新的当前赛季比赛上补（2026-10-31 加）
+  # 同一场比赛有几个来源的统计时，每一类数据（比分、射门和 xG……，按数据用途字典分）各挑一个来源：
+  # 先挑这类数据填得最全的来源，一样全的按这个顺序。例如 2025/26 的比分用 football-data、xG 用懂球帝（football-data 没有）。
+  # 懂球帝的比分在 football-data 还没更新的当前赛季比赛上补；xG、射门来自懂球帝的比赛详情页（2025-12 起有 xG）
   stats_source_priority: [football-data, dongqiudi]
 
 backtest:                    # 回测框架 src/evaluate/backtest.py（需求文档第 5 节“按时间滚动回测”“回测的计算量”）

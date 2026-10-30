@@ -132,20 +132,27 @@ def test_reimport_keeps_match_id(settings, slots):
 
 
 def test_replaces_dongqiudi_stand_in_score(settings, slots):
-    """懂球帝先顶上的比分：football-data 有了这场，就删掉懂球帝那份；它没有的场次不动。"""
+    """懂球帝先顶上的比分：football-data 有了这场，就删掉懂球帝那份只有比分的行；
+    它没有的场次不动；带 xG 的懂球帝行也不动。"""
     con = sqlite3.connect(":memory:")
     import_into(con, settings, slots, small_table())
     mid = con.execute("select match_id from matches where home_team = 'Arsenal'").fetchone()[0]
+    xg_mid = con.execute("select match_id from matches where home_team != 'Arsenal'").fetchone()[0]
     con.execute("insert into matches (competition, season, home_team, away_team, match_date, status, round, leg)"
                 " values ('E0', 2025, 'Chelsea', 'Arsenal', '2025-12-01', 'finished', '', 0)")
     other = con.execute("select match_id from matches where home_team = 'Chelsea' and away_team = 'Arsenal'").fetchone()[0]
     con.execute("insert into match_sources values (?, 'dongqiudi', '1', 'x', 'y')", (other,))
     con.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result)"
                     " values (?, 'dongqiudi', 1, 1, 'D')", [(mid,), (other,)])
+    con.execute("insert into match_stats (match_id, source, home_goals, away_goals, result, home_xg, away_xg)"
+                " values (?, 'dongqiudi', 1, 1, 'D', 1.2, 0.8)", (xg_mid,))
     con.commit()
     import_into(con, settings, slots, small_table())
-    assert con.execute("select match_id, source from match_stats where source = 'dongqiudi'").fetchall() == [(other, "dongqiudi")]
+    assert sorted(con.execute("select match_id from match_stats where source = 'dongqiudi'").fetchall()) == \
+        sorted([(other,), (xg_mid,)])
     assert con.execute("select source from match_stats where match_id = ?", (mid,)).fetchall() == [("football-data",)]
+    assert sorted(con.execute("select source from match_stats where match_id = ?", (xg_mid,)).fetchall()) == \
+        [("dongqiudi",), ("football-data",)]
 
 # ---------- 质量检查 ----------
 def test_current_season():

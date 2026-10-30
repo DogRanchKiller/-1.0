@@ -11,10 +11,11 @@ m.dongqiudi.com 只禁 /_s/，api.dongqiudi.com 全部允许），有 20 家左�
   遇到验证码、拦截页面就停下来记“内容可疑”，不绕过。
 - 每次请求都记进数据库的 fetch_log 表（来源 dongqiudi）。
 
-三种运行方式（Claude 运行，或者由定时任务运行）：
+几种运行方式（Claude 运行，或者由定时任务运行）：
     .venv\Scripts\python -m src.collect.dongqiudi upcoming     # 即将开赛：抓赛程和赛前赔率快照（每小时运行）
     .venv\Scripts\python -m src.collect.dongqiudi probe        # 试验：每个赛季抽几场，看赔率能往回补到哪年
     .venv\Scripts\python -m src.collect.dongqiudi backfill --leagues E0 --from 2019   # 历史回补（可中途停、下次接着来）
+    .venv\Scripts\python -m src.collect.dongqiudi detail_backfill --limit 3   # 补抓比赛详情页（xG 等技术统计）
 
 原始文件放在哪（都是 gzip 压缩，内容原样不改）：
     history/<联赛>/<日期>.html.gz                  历届赛季页（变了才存新的一份）
@@ -22,6 +23,7 @@ m.dongqiudi.com 只禁 /_s/，api.dongqiudi.com 全部允许），有 20 家左�
     fixtures/<联赛>/<抓取时间>.json.gz             赛程接口（和上一次同一网址内容一样就不存）
     odds_final/<联赛>/<赛季>/<比赛编号>.json.gz    踢完以后的赔率（初盘 + 收盘，只存一次）
     odds_live/<联赛>/<比赛编号>/<抓取时间>.json.gz  赛前赔率快照（变了才存）
+    match_detail/<联赛>/<赛季>/<比赛编号>.html.gz  踢完以后的比赛详情页（xG、射门等技术统计，只存一次）
     *.suspicious.*                                  内容可疑的文件（例如返回了别的比赛），照存方便查，清洗时不用
 """
 import argparse
@@ -31,7 +33,7 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -48,6 +50,7 @@ SEASON_URL = "https://m.dongqiudi.com/zhanbao/saiji/{season_id}"
 FIXTURES_URL = "https://api.dongqiudi.com/data/tab/league/new/{league_id}?start={start}&version=576&init=1"
 ODDS_URL = ("https://sport-data.dongqiudi.com/soccer/biz/dqd/v1/match/odds/index/{match_id}"
             "?app=dqd&lang=zh-cn&cmp_type=&platform=android")
+DETAIL_URL = "https://m.dongqiudi.com/matchDetail/{match_id}"   # 比赛详情页（公开网页，robots.txt 允许）
 
 log = logging.getLogger("dongqiudi")
 
@@ -86,6 +89,16 @@ def check_odds(content: bytes, match_id: int) -> str | None:
         return "JSON 里没有赔率"
     if str(data.get("matchId")) != str(match_id):
         return f"返回了另一场比赛 {data.get('matchId')}"
+    return None
+
+
+def check_detail(content: bytes, match_id: int) -> str | None:
+    """比赛详情页：开头要有 <div data-id="这场的编号" class="matchd">，还要有页面数据（window.__INITIAL_STATE__）。
+    没有说明是拦截页、错误页，或者网站给了另一场比赛。"""
+    if b"window.__INITIAL_STATE__=" not in content:
+        return "页面里没有比赛数据，可能是拦截页或错误页"
+    if f'data-id="{match_id}" class="matchd"'.encode() not in content:
+        return "页面不是这一场比赛"
     return None
 
 
@@ -250,6 +263,13 @@ class Collector:
                                lambda c: check_odds(c, match_id), once=True, retry_bad=retry_bad)
         return status
 
+    def match_detail(self, league: str, season: int, match_id: int, retry_bad=False) -> str:
+        """踢完以后的比赛详情页（技术统计，含 xG），只存一次。"""
+        target = self.out / "match_detail" / league / str(season) / f"{match_id}.html.gz"
+        status, _ = self.fetch(DETAIL_URL.format(match_id=match_id), "match_detail", target,
+                               lambda c: check_detail(c, match_id), once=True, retry_bad=retry_bad)
+        return status
+
     def odds_live(self, league: str, match_id: int) -> str:
         """赛前赔率快照，变了才存。"""
         target = self.out / "odds_live" / league / str(match_id) / f"{stamp(self.now())}.json.gz"
@@ -287,16 +307,19 @@ class Collector:
         return self.now() - datetime.fromisoformat(last[2]) >= timedelta(hours=gap_hours) - timedelta(minutes=10)
 
     def _final_if_done(self, league, season, f) -> bool:
-        """比赛踢完且开球已过 final_after_hours 小时 → 抓最终赔率。返回是否处理了。"""
+        """比赛踢完且开球已过 final_after_hours 小时 → 抓最终赔率；过了 detail_after_hours 小时 → 再抓一次详情页（xG 等）。
+        返回是否已经踢完（踢完的不再抓快照）。"""
         if f.status == "Played" and f.kickoff_utc and \
                 self.now() - f.kickoff_utc >= timedelta(hours=self.cfg["final_after_hours"]):
             self.odds_final(league, season, f.match_id)
+            if self.now() - f.kickoff_utc >= timedelta(hours=self.cfg["detail_after_hours"]):
+                self.match_detail(league, season, f.match_id)
             return True
         return False
 
     # ---------- 三种模式 ----------
     def upcoming(self, leagues: list[str]):
-        """即将开赛：抓赛程；快开球的比赛按“离开球越近越勤”抓赔率快照；刚踢完的抓一次最终赔率。"""
+        """即将开赛：抓赛程；快开球的比赛按“离开球越近越勤”抓赔率快照；刚踢完的抓一次最终赔率和详情页。"""
         now = self.now()
         season = current_season(now)
         rules = self.cfg["odds_snapshot_rules"]
@@ -348,6 +371,50 @@ class Collector:
                 log.info("%s %d/%d：%d 场；这次 %s", lg, y, y + 1, len(ids),
                          "，".join(f"{STATUS_NAMES[k]} {v}" for k, v in new.items()) or "都已有")
 
+    def detail_backfill(self, leagues: list[str], since: date, retry_bad=False, limit: int | None = None):
+        """补抓比赛详情页（xG 等技术统计）：since 那天以后已经踢完的比赛，每场只抓一次。可以中途停、下次接着来。
+
+        懂球帝的 xG 大约 2025 年 12 月起才有，更早的不抓（since 默认是 settings.yaml 的 dongqiudi.detail_backfill_from）。
+        当前赛季的比赛从赛程接口拿，以前的赛季从赛季页拿；从近往远抓。
+        limit：小批量试验用，每个联赛最多新抓几场（已经有的不算）。
+        连着 3 场“内容可疑”就停：多半是被拦截了，不硬试。
+        """
+        now = self.now()
+        this = current_season(now)
+        after = timedelta(hours=self.cfg["detail_after_hours"])
+        first = since.year if since.month >= 7 else since.year - 1   # since 那天属于哪个赛季
+        for lg in leagues:
+            seasons = self.history(lg)
+            todo = []   # (赛季, 比赛编号)，从近往远
+            for y in range(this, first - 1, -1):
+                if y == this:
+                    games = self.fixtures(lg, datetime(y, 7, 1, tzinfo=timezone.utc), now, max_pages=30)  # 一个赛季约 9 页
+                    games = [f for f in games if f.status == "Played" and f.kickoff_utc
+                             and now - f.kickoff_utc >= after and f.kickoff_utc.date() >= since]
+                    todo += [(y, f.match_id) for f in sorted(games, key=lambda f: f.kickoff_utc, reverse=True)]
+                elif y in seasons:
+                    # 赛季页的日期是北京时间的“月-日”，没有年份：7 月起是赛季开始那年，1~6 月是下一年
+                    games = [g for g in self.season_games(lg, y, seasons[y])
+                             if date(y if g.month >= 7 else y + 1, g.month, g.day) >= since]
+                    games.sort(key=lambda g: (g.month < 7, g.month, g.day), reverse=True)
+                    todo += [(y, g.match_id) for g in games]
+                else:
+                    log.info("%s %d/%d：历届赛季页里没有这个赛季，跳过", lg, y, y + 1)
+            before = dict(self.counts)
+            fetched = bad_in_row = 0
+            for y, mid in todo:
+                if limit is not None and fetched >= limit:
+                    break
+                status = self.match_detail(lg, y, mid, retry_bad=retry_bad)
+                if status != "skipped":
+                    fetched += 1
+                bad_in_row = bad_in_row + 1 if status == "suspicious" else 0
+                if bad_in_row >= 3:
+                    raise Blocked(f"连着 3 场详情页内容可疑（最后一场 {DETAIL_URL.format(match_id=mid)}）")
+            new = {k: v - before.get(k, 0) for k, v in self.counts.items() if v - before.get(k, 0)}
+            log.info("%s 详情页：%s 以后踢完的 %d 场；这次 %s", lg, since, len(todo),
+                     "，".join(f"{STATUS_NAMES[k]} {v}" for k, v in new.items()) or "都已有")
+
     def probe(self, leagues: list[str], first: int, per_season: int) -> list[dict]:
         """试验：每个联赛每个已结束赛季抽几场，看懂球帝有没有赔率、有几家公司。返回每个赛季一行。"""
         rows = []
@@ -392,12 +459,13 @@ def setup_logging(log_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="懂球帝采集（只存原始层）")
-    parser.add_argument("mode", choices=["upcoming", "probe", "backfill"])
+    parser.add_argument("mode", choices=["upcoming", "probe", "backfill", "detail_backfill"])
     parser.add_argument("--leagues", nargs="*", help="联赛代码，例如 E0 SP1；不写就是全部五大联赛")
     parser.add_argument("--from", dest="first", type=int, help="从哪个赛季开始（开始年份）")
     parser.add_argument("--to", dest="last", type=int, help="到哪个赛季为止（开始年份），不写就是到当前赛季")
     parser.add_argument("--retry-bad", action="store_true", help="以前“网站没有”“内容可疑”的也重新试一次")
-    parser.add_argument("--limit", type=int, help="小批量试验：回补时每个赛季最多新抓几场")
+    parser.add_argument("--limit", type=int, help="小批量试验：回补时每个赛季（补详情页时每个联赛）最多新抓几场")
+    parser.add_argument("--since", help="补详情页：从哪天以后踢完的比赛开始，例如 2025-11-15；不写用 settings.yaml 的")
     args = parser.parse_args()
 
     s = load_settings()
@@ -412,6 +480,9 @@ def main():
     try:
         if args.mode == "upcoming":
             c.upcoming(leagues)
+        elif args.mode == "detail_backfill":
+            since = date.fromisoformat(args.since or str(cfg["detail_backfill_from"]))
+            c.detail_backfill(leagues, since, retry_bad=args.retry_bad, limit=args.limit)
         elif args.mode == "backfill":
             c.backfill(leagues, args.first or cfg["backfill_first_season"], args.last, retry_bad=args.retry_bad,
                        limit=args.limit)

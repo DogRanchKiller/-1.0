@@ -17,6 +17,11 @@ r"""读懂球帝的原始文件（需求文档 6.2、第 17 节）。这里只�
 - 赔率时间 ts 是北京时间“月-日 时:分”，没有年份，要按开球时间推年份（resolve_ts）。
 - 请求某些编号时，网站会返回另一场比赛（例如要 3000000 返回 53000000）。
   所以返回的 matchId 必须和请求的一样，不一样就当“内容可疑”（采集程序里检查）。
+5. 比赛详情页 /matchDetail/<比赛编号>（网页）：页面里有一段 window.__INITIAL_STATE__ = {...} 的 JSON，
+   其中 matchContentStore.matchDetailHeaderData 有比分和“技术统计”（射门、射正、预期进球 xG 等 30 多项）。
+   team_A 是主队、team_B 是客队。页面开头的 <div data-id="比赛编号" class="matchd"> 用来确认是不是这一场。
+   JSON 里的 match.id 比网址里的编号少 50000000（例如网址 54483744，里面写 4483744），不用它对。
+   xG 大约从 2025 年 12 月起才有（英超 2025-11-30 没有、12-03 起有；别的联赛没逐场查），更早的比赛统计里没有这一项。
 """
 import gzip
 import json
@@ -212,3 +217,77 @@ def next_start(data: dict) -> str | None:
     """赛程接口的“下一页”从哪天开始：nextDate 形如 '2026-11-30 00:00:00next'，原样作为下次的 start。"""
     nd = data.get("nextDate") or ""
     return nd if nd.endswith("next") else None
+
+
+# ---------- 比赛详情页 ----------
+STATE_MARK = "window.__INITIAL_STATE__="
+DETAIL_ID_RE = re.compile(r'<div data-id="(\d+)" class="matchd"')
+# 技术统计里我们要的几项：懂球帝的名字 → match_stats 的列名（去掉 home_/away_ 前缀）。
+# 角球、黄牌等页面上也有，但第 10 阶段才进模型，原始网页都留着，以后要用再加这里
+DETAIL_STATS = {"射门": "shots", "射正": "shots_on_target", "预期进球(xG)": "xg"}
+
+
+@dataclass
+class MatchDetail:
+    page_id: int | None             # 页面开头 data-id 写的比赛编号（和网址里的一样）
+    status: str                     # Played 踢完 / Fixture 没踢 / ……
+    home: str                       # 中文队名（team_A 主队、team_B 客队）
+    away: str
+    home_goals: int | None
+    away_goals: int | None
+    stats: dict[str, tuple]         # 技术统计 {懂球帝的名字: (主队, 客队)}，例如 {"预期进球(xG)": (0.83, 0.76)}
+
+
+def initial_state(html: str) -> dict | None:
+    """网页里的 window.__INITIAL_STATE__ JSON；没有或读不出来返回 None。"""
+    i = html.find(STATE_MARK)
+    if i < 0:
+        return None
+    try:
+        data, _ = json.JSONDecoder().raw_decode(html, i + len(STATE_MARK))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _int(v) -> int | None:
+    return int(v) if str(v).isdigit() else None
+
+
+def _stat(v):
+    """统计值：数字原样（整数、小数），空的或不是数字的返回 None。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    try:
+        f = float(str(v).rstrip("%"))
+    except ValueError:
+        return None
+    return int(f) if f.is_integer() else f
+
+
+def parse_match_detail(html: str) -> MatchDetail | None:
+    """比赛详情页 → MatchDetail；页面里没有比赛数据（拦截页、错误页）返回 None。"""
+    state = initial_state(html)
+    header = ((state or {}).get("matchContentStore") or {}).get("matchDetailHeaderData") or {}
+    match = header.get("match")
+    if not isinstance(match, dict):
+        return None
+    m = DETAIL_ID_RE.search(html)
+    a, b = match.get("team_A") or {}, match.get("team_B") or {}
+    stats = {}
+    for item in ((header.get("info") or {}).get("statistics") or {}).get("list") or []:
+        name = item.get("type")
+        if name:
+            stats[name] = (_stat((item.get("team_A") or {}).get("value")), _stat((item.get("team_B") or {}).get("value")))
+    return MatchDetail(int(m.group(1)) if m else None, str(match.get("status", "")), a.get("name", ""), b.get("name", ""),
+                       _int(a.get("fs")), _int(b.get("fs")), stats)
+
+
+def detail_columns(d: MatchDetail) -> dict[str, float | int | None]:
+    """详情页的技术统计 → match_stats 的列，例如 {"home_xg": 0.83, "away_xg": 0.76, "home_shots": 15, ...}。
+    页面上没有的项（例如 2025 年 12 月以前的比赛没有 xG）是 None。"""
+    out = {}
+    for name, col in DETAIL_STATS.items():
+        h, a = d.stats.get(name, (None, None))
+        out[f"home_{col}"], out[f"away_{col}"] = h, a
+    return out

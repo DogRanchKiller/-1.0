@@ -14,15 +14,20 @@ r"""把懂球帝的原始文件导入数据库（需求文档 6.2、6.3、6.4、
    对上的写进 match_sources（来源 dongqiudi，编号是懂球帝的比赛编号）。
    - 以前的赛季：只对照，不新增比赛（以前的比赛以 football-data 为准）。
    - 当前赛季：数据库里没有的比赛（还没踢、football-data 还没更新）新增一行，状态记“未赛”。
-     比分、“已赛”状态不从懂球帝来：等 football-data 更新后重导，它会把同一行改成已赛（比赛编号不变）。
+     懂球帝显示踢完、有比分的记“已赛”，比分先用懂球帝的（第 5 步）；football-data 更新后重导，同一行比赛编号不变。
      只有懂球帝一个来源的比赛，开球时间按懂球帝最新的赛程更新（改期了也跟着改）。
 3. 变盘记录（odds_changes 表）：赔率文件里每家公司的初盘（begin）和最新（now）各一行，带网站显示的变盘时间。
    我们每小时存的快照里，同一个价格会重复出现很多次，只留第一次看到的那行。
    公司名按 config/bookmakers_dongqiudi.yaml 换成我们的写法（例如 Bet3** → Bet365）。
 4. 彩票赔率（lottery_odds 表）：竞彩胜平负、竞彩让球、北单，只显示不进模型。没有变盘时间，按“我们第一次看到”的时间算。
-5. 报告：data/reports/dongqiudi_导入.md，另有没对上的比赛、队名对照两个 CSV。
+5. 比赛统计（match_stats 表，来源 dongqiudi）：
+   - 只有懂球帝一个来源的已赛比赛：比分（football-data 还没更新时先顶上）。
+   - 有比赛详情页的比赛：再加上射门、射正、xG（详情页的“技术统计”；xG 大约 2025 年 12 月起才有）。
+     football-data 也有这场时两份都留，取数层每类数据各挑填得最全的来源（2025/26 的 xG 只有懂球帝有）。
+     比分仍然用赛程 / 赛季页的；详情页的比分和它不一样时，这场的统计不导入（可能对错了比赛），记进报告。
+6. 报告：data/reports/dongqiudi_导入.md，另有没对上的比赛、队名对照两个 CSV。
 
-只删、只写来源是 dongqiudi 的行（match_sources、odds_changes、lottery_odds、team_names），不碰别的来源。
+只删、只写来源是 dongqiudi 的行（match_sources、match_stats、odds_changes、lottery_odds、team_names），不碰别的来源。
 采集程序（每小时任务、历史回补）可以同时运行：写数据库的那一步放在一个很短的事务里。
 """
 import argparse
@@ -38,7 +43,8 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from src.clean.dongqiudi_match import decide, load_db_matches, load_dqd_seasons, vote, write_csv
-from src.clean.dongqiudi_reader import SeasonGame, parse_fixtures, parse_odds, read_json, resolve_ts
+from src.clean.dongqiudi_reader import (DETAIL_STATS, MatchDetail, SeasonGame, detail_columns, parse_fixtures,
+                                        parse_match_detail, parse_odds, read_json, read_text, resolve_ts)
 from src.clean.schema import create_tables
 from src.collect.dongqiudi import current_season
 from src.common.config import PROJECT_ROOT, load_settings, resolve_path
@@ -51,7 +57,7 @@ log = logging.getLogger(__name__)
 # 懂球帝赛程的状态 → 我们 matches.status。
 # 踢完了（Played）而且有比分的记“已赛”，比分写进 match_stats（来源 dongqiudi）：football-data 一周只更新两三次，
 # 不用懂球帝的比分，Elo 就要等好几天才知道最近的结果（2026-10-31 改）。
-# 只对“只有懂球帝一个来源”的比赛这样做；football-data 有了这场就以它为准（取数层按 stats_source_priority 先用它）。
+# 只对“只有懂球帝一个来源”的比赛这样做；football-data 有了这场，比分以它为准（取数层一样全时按 stats_source_priority 先用它）。
 # 正在踢（Playing）的比分还会变，记“未赛”。
 STATUS = {"Fixture": "scheduled", "Uncertain": "scheduled", "Playing": "scheduled", "Played": "finished",
           "Postponed": "postponed", "Cancelled": "cancelled", "Cancel": "cancelled"}
@@ -274,6 +280,26 @@ def odds_files(raw: Path, leagues: list[str], fetched: dict) -> list[OddsFile]:
     return sorted(out, key=lambda o: (o.fetched_at, str(o.path)))
 
 
+def load_details(raw: Path, leagues: list[str]) -> tuple[dict[int, MatchDetail], Counter]:
+    """原始层里全部比赛详情页 → {懂球帝比赛编号: 读出来的详情}。内容可疑的文件跳过；页面编号和文件名对不上的不要。"""
+    out, stats = {}, Counter()
+    for lg in leagues:
+        for f in (raw / "dongqiudi" / "match_detail" / lg).glob("*/*.html.gz"):
+            if ".suspicious." in f.name:
+                continue
+            dqd_id = int(f.name.split(".")[0])
+            d = parse_match_detail(read_text(f))
+            if d is None:
+                stats["详情页：读不出比赛数据，跳过"] += 1
+            elif d.page_id != dqd_id:
+                stats["详情页：页面是别的比赛，跳过"] += 1
+            else:
+                stats["详情页：读到"] += 1
+                stats["详情页：其中有 xG"] += d.stats.get("预期进球(xG)", (None,))[0] is not None
+                out[dqd_id] = d
+    return out, stats
+
+
 @dataclass
 class Ref:
     """推变盘时间的年份、判断“开球后的价格”要用的开球时间。"""
@@ -420,11 +446,47 @@ def chinese_names(links: list[Link], mapping: dict) -> dict[str, str]:
     return {en: zh for en, (_k, zh) in latest.items()}
 
 
+STAT_COLS = ["match_id", "source", "home_goals", "away_goals", "result",
+             *[f"{side}_{col}" for col in DETAIL_STATS.values() for side in ("home", "away")]]
+
+
+def stat_row(mid: int, goals: tuple | None, detail: MatchDetail | None, only_dqd: bool, counts: Counter,
+             mismatches: list, c: Candidate) -> tuple | None:
+    """一场比赛的 match_stats 行（按 STAT_COLS 的顺序）；不用写的返回 None。
+
+    只有懂球帝的已赛比赛：一定写（比分先顶上），有详情页再加统计。
+    别的来源也有的比赛：只有详情页有统计时才写（不然这一行和 football-data 的比分重复，没有用处）。
+    详情页的比分和赛程 / 赛季页的不一样：统计不要（可能对错了比赛），记进报告。
+    """
+    if goals is None:
+        return None
+    extra = {}
+    if detail is not None and detail.status == "Played":
+        if (detail.home_goals, detail.away_goals) != goals:
+            counts["详情页比分和赛程不一样（统计不导入）"] += 1
+            mismatches.append(f"{c.league} {c.season} {c.dqd_id} {c.home_zh} {goals[0]}-{goals[1]} {c.away_zh}，"
+                              f"详情页 {detail.home_goals}-{detail.away_goals}")
+        else:
+            extra = {k: v for k, v in detail_columns(detail).items() if v is not None}
+    if not extra and not only_dqd:
+        return None
+    if extra:
+        counts["有详情页统计的比赛"] += 1
+        counts["其中有 xG"] += "home_xg" in extra and "away_xg" in extra
+    if only_dqd:
+        counts["用懂球帝比分的已赛比赛（football-data 还没有）"] += 1
+    vals = {"match_id": mid, "source": SOURCE, "home_goals": goals[0], "away_goals": goals[1],
+            "result": result_letter(*goals), **extra}
+    return tuple(vals.get(k) for k in STAT_COLS)
+
+
 def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: list, lottery: list,
-             back_days: int, tz: ZoneInfo) -> dict:
-    """在一个事务里写完。返回 {懂球帝比赛编号: 我们的比赛编号} 和几个计数。"""
+             back_days: int, tz: ZoneInfo, details: dict[int, MatchDetail] | None = None) -> dict:
+    """在一个事务里写完。返回 {懂球帝比赛编号: 我们的比赛编号}、几个计数、详情页比分对不上的比赛。"""
+    details = details or {}
     others = {r[0] for r in con.execute("select distinct match_id from match_sources where source != ?", (SOURCE,))}
     counts = Counter()
+    mismatches: list[str] = []
     started = time.perf_counter()
     with con:
         con.execute("begin immediate")   # 一开始就占住写锁，免得中途和采集程序抢
@@ -455,18 +517,27 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
                                   " and away_team = ? and round = '' and leg = 0",
                                   (c.league, c.season, home, away)).fetchone()[0]
                 counts["只有懂球帝的比赛（新增或更新）"] += 1
-                if status == "finished":
-                    fx = c.seen.fx
-                    stats.append((mid, SOURCE, fx.home_goals, fx.away_goals, result_letter(fx.home_goals, fx.away_goals)))
+                # 已赛的比分用赛程里的；没踢完的不写统计（详情页有也不写）
+                goals = (c.seen.fx.home_goals, c.seen.fx.away_goals) if status == "finished" else None
+                only_dqd = True
+            else:
+                # 别的来源也有的比赛：比分用赛季页 / 赛程的（只在有详情页的统计时才写这一行）
+                goals = (c.home_goals, c.away_goals) if c.home_goals is not None and c.away_goals is not None else None
+                if c.seen is not None and not has_score(c.seen.fx):
+                    goals = None   # 赛程里还没踢完（正在踢的比分还会变）
+                only_dqd = False
+            row = stat_row(mid, goals, details.get(c.dqd_id), only_dqd, counts, mismatches, c)
+            if row is not None:
+                stats.append(row)
             ids[c.dqd_id] = mid
             sources.append((mid, SOURCE, str(c.dqd_id), c.raw_file, c.fetched_at))
         con.execute("delete from match_sources where source = ?", (SOURCE,))
         con.executemany("insert into match_sources (match_id, source, source_key, raw_file, fetched_at_utc)"
                         " values (?, ?, ?, ?, ?)", sources)
         con.execute("delete from match_stats where source = ?", (SOURCE,))
-        con.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result) values (?, ?, ?, ?, ?)",
+        con.executemany(f"insert into match_stats ({', '.join(STAT_COLS)}) values ({', '.join('?' * len(STAT_COLS))})",
                         stats)
-        counts["用懂球帝比分的已赛比赛"] = len(stats)
+        counts["比赛统计（行）"] = len(stats)
         con.execute("delete from odds_changes where source = ?", (SOURCE,))
         con.executemany("insert into odds_changes (match_id, source, bookmaker, bookmaker_raw, market, line, home, draw,"
                         " away, over, under, changed_at_utc, fetched_at_utc, raw_file)"
@@ -480,7 +551,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
         cur = con.execute("delete from matches where match_id not in (select match_id from match_sources)")
         counts["删掉的没有来源的比赛"] = cur.rowcount
     counts["写数据库用时（秒）"] = round(time.perf_counter() - started, 1)
-    return {"ids": ids, "counts": counts}
+    return {"ids": ids, "counts": counts, "detail_mismatches": mismatches}
 
 
 def fill_teams_yaml(path: Path, zh_names: dict) -> int:
@@ -520,8 +591,44 @@ def season_table(con, leagues: list[str], first_season: int) -> list[str]:
     return out
 
 
+def detail_report(con, leagues: list[str], detail_stats: Counter, mismatches: list[str]) -> list[str]:
+    """比赛详情页（xG）那一节：每个联赛、赛季有几场有 xG、最早哪天；和 football-data 的 xG、射门对一对。"""
+    ph = ",".join("?" * len(leagues))
+    rows = con.execute(f"""
+        select m.competition, m.season, count(*), sum(s.home_shots is not null), sum(s.home_xg is not null),
+               min(case when s.home_xg is not null then m.match_date end)
+        from matches m join match_stats s on s.match_id = m.match_id and s.source = ?
+        where m.competition in ({ph}) and m.round = '' and m.status = 'finished'
+          and (s.home_shots is not null or s.home_xg is not null)
+        group by m.competition, m.season order by m.competition, m.season""", [SOURCE, *leagues]).fetchall()
+    out = ["## 比赛详情页（射门、xG）", "", "| 项目 | 数量 |", "|---|---|"]
+    out += [f"| {k} | {v} |" for k, v in sorted(detail_stats.items())]
+    out += ["", "| 联赛 | 赛季 | 有详情页统计的场数 | 有射门 | 有 xG | 最早有 xG 的日期 |", "|---|---|---|---|---|---|"]
+    out += [f"| {c} | {s}/{(s + 1) % 100:02d} | {n} | {sh} | {x} | {first or ''} |" for c, s, n, sh, x, first in rows]
+    # 和 football-data 对一对（2026/27 起 football-data 也有 xG；看两边是不是同一份数据）
+    both = con.execute(f"""
+        select d.home_xg, d.away_xg, f.home_xg, f.away_xg, d.home_shots, d.away_shots, f.home_shots, f.away_shots,
+               d.home_shots_on_target, d.away_shots_on_target, f.home_shots_on_target, f.away_shots_on_target
+        from match_stats d join match_stats f on f.match_id = d.match_id and f.source = 'football-data'
+        join matches m on m.match_id = d.match_id
+        where d.source = ? and m.competition in ({ph})""", [SOURCE, *leagues]).fetchall()
+    xg = [r for r in both if None not in r[0:4]]
+    xg_same = sum(abs(r[0] - r[2]) <= 0.005 and abs(r[1] - r[3]) <= 0.005 for r in xg)
+    xg_gap = max((max(abs(r[0] - r[2]), abs(r[1] - r[3])) for r in xg), default=0)
+    sh = [r for r in both if None not in r[4:12]]
+    sh_same = sum(r[4:6] == r[6:8] and r[8:10] == r[10:12] for r in sh)
+    out += ["", "和 football-data 对比（同一场两边都有的）：",
+            f"- xG：{len(xg)} 场两边都有，完全一样 {xg_same} 场，最大相差 {xg_gap:.2f}",
+            f"- 射门、射正：{len(sh)} 场两边都有，完全一样 {sh_same} 场"]
+    if mismatches:
+        out += ["", f"详情页比分和赛程 / 赛季页不一样的比赛（{len(mismatches)} 场，统计没导入）："]
+        out += [f"- {x}" for x in mismatches[:30]]
+    return out
+
+
 def write_report(path: Path, links: list[Link], mapping: dict, table: list[dict], stats: Counter,
-                 unknown_books: Counter, written: dict, lottery_n: int, changes_n: int, con, leagues, first_season):
+                 unknown_books: Counter, written: dict, lottery_n: int, changes_n: int, con, leagues, first_season,
+                 detail_lines: list[str] | None = None):
     res = Counter(ln.result for ln in links)
     pending = [r for r in table if r["结果"] != "定下"]
     lines = ["# 懂球帝导入数据库", "",
@@ -542,6 +649,8 @@ def write_report(path: Path, links: list[Link], mapping: dict, table: list[dict]
     if unknown_books:
         lines += ["", "没在公司对照表里的公司名（照原样导入）：" +
                   "、".join(f"{k}（{v} 行）" for k, v in unknown_books.most_common())]
+    if detail_lines:
+        lines += [""] + detail_lines
     lines += ["", "## 每个赛季", ""] + season_table(con, leagues, first_season)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -568,7 +677,9 @@ def run(con, raw: Path, reports: Path, s: dict, now: datetime | None = None, tea
     log.info("队名定下 %d 个；要导入的比赛 %d 场；赔率文件 %d 个", len(mapping), len(refs), len(files))
     changes, lottery, stats, unknown = build_odds(files, refs, books, products, q)
     zh_names = chinese_names(links, mapping)
-    written = write_db(con, links, mapping, zh_names, changes, lottery, back_days, tz)
+    details, detail_stats = load_details(raw, leagues)
+    log.info("比赛详情页 %d 个（有 xG 的 %d 个）", len(details), detail_stats["详情页：其中有 xG"])
+    written = write_db(con, links, mapping, zh_names, changes, lottery, back_days, tz, details)
     n_changes = sum(1 for r in changes if r[0] in written["ids"])
     n_lottery = sum(1 for r in lottery if r[0] in written["ids"])
     log.info("写好了：变盘记录 %d 行，彩票赔率 %d 行，用时 %s 秒", n_changes, n_lottery,
@@ -585,7 +696,8 @@ def run(con, raw: Path, reports: Path, s: dict, now: datetime | None = None, tea
                 "结果": ln.result, "原始文件": ln.cand.raw_file}
                for ln in links if ln.result not in ("对上", "新增（当前赛季）")])
     write_report(reports / "dongqiudi_导入.md", links, mapping, table, stats, unknown, written,
-                 n_lottery, n_changes, con, leagues, int(dq["backfill_first_season"]))
+                 n_lottery, n_changes, con, leagues, int(dq["backfill_first_season"]),
+                 detail_report(con, leagues, detail_stats, written["detail_mismatches"]))
     log.info("报告：%s", reports / "dongqiudi_导入.md")
     return {"links": links, "mapping": mapping, "stats": stats, **written}
 

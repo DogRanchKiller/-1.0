@@ -6,10 +6,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.clean.dongqiudi_reader import (asia_line, count_game_rows, next_start, ou_line, parse_fixtures, parse_history,
-                                        parse_odds, parse_season_page, resolve_ts)
-from src.collect.dongqiudi import (FIXTURES_URL, HISTORY_URL, ODDS_URL, SEASON_URL, Blocked, Collector, check_odds,
-                                   snapshot_gap, spread)
+from src.clean.dongqiudi_reader import (asia_line, count_game_rows, detail_columns, next_start, ou_line, parse_fixtures,
+                                        parse_history, parse_match_detail, parse_odds, parse_season_page, resolve_ts)
+from src.collect.dongqiudi import (DETAIL_URL, FIXTURES_URL, HISTORY_URL, ODDS_URL, SEASON_URL, Blocked, Collector,
+                                   check_detail, check_odds, snapshot_gap, spread)
 from src.common.db import connect
 
 UTC = timezone.utc
@@ -148,7 +148,8 @@ class Clock:
 
 
 CFG = {"min_interval_seconds": 0, "league_ids": {"E0": 4}, "upcoming_lookback_days": 3, "upcoming_ahead_days": 8,
-       "max_fixture_pages": 4, "odds_snapshot_rules": [[6, 1], [48, 3], [192, 12]], "final_after_hours": 3}
+       "max_fixture_pages": 4, "odds_snapshot_rules": [[6, 1], [48, 3], [192, 12]], "final_after_hours": 3,
+       "detail_after_hours": 6}
 
 
 @pytest.fixture
@@ -291,3 +292,86 @@ def test_backfill_limit_and_no_half_files(env):
     c.backfill(["E0"], 2023, 2023, limit=2)
     assert sorted(p.name for p in (out / "odds_final/E0/2023").iterdir()) == ["101.json.gz", "102.json.gz", "103.json.gz"]
     assert not list(out.rglob("*.tmp"))
+
+
+# ---------- 比赛详情页（xG） ----------
+def detail_html(page_id, xg=True, home="桑德兰", away="利兹联", hg="0", ag="0"):
+    """假的比赛详情页：和真网页一样，开头有 data-id，数据在 window.__INITIAL_STATE__ 里（JSON 里的编号少 50000000）。"""
+    stats = [{"type": "射门", "team_A": {"value": 15}, "team_B": {"value": 11}},
+             {"type": "射正", "team_A": {"value": 4}, "team_B": {"value": 4}},
+             {"type": "角球", "team_A": {"value": 4}, "team_B": {"value": 5}}]
+    if xg:
+        stats.append({"type": "预期进球(xG)", "team_A": {"value": 0.83}, "team_B": {"value": 0.76}})
+    state = {"matchContentStore": {"matchDetailHeaderData": {
+        "match": {"id": str(page_id - 50000000), "status": "Played",
+                  "team_A": {"name": home, "fs": hg}, "team_B": {"name": away, "fs": ag}},
+        "info": {"statistics": {"list": stats}}}}}
+    return (f'<html><div data-id="{page_id}" class="matchd"></div><script>window.__INITIAL_STATE__='
+            f'{json.dumps(state, ensure_ascii=False)};(function(){{}})()</script></html>').encode()
+
+
+def test_parse_match_detail():
+    d = parse_match_detail(detail_html(54483744).decode())
+    assert (d.page_id, d.status, d.home, d.away, d.home_goals, d.away_goals) == (54483744, "Played", "桑德兰", "利兹联", 0, 0)
+    assert detail_columns(d) == {"home_shots": 15, "away_shots": 11, "home_shots_on_target": 4,
+                                 "away_shots_on_target": 4, "home_xg": 0.83, "away_xg": 0.76}
+    old = detail_columns(parse_match_detail(detail_html(54483744, xg=False).decode()))
+    assert old["home_xg"] is None and old["home_shots"] == 15          # 2025 年 12 月以前的比赛没有 xG
+    assert parse_match_detail("<html>请验证</html>") is None
+    assert check_detail(detail_html(54483744), 54483744) is None
+    assert check_detail(detail_html(54483744), 54483745) == "页面不是这一场比赛"
+    assert check_detail(b"<html>please verify</html>", 54483744).startswith("页面里没有比赛数据")
+
+
+def test_upcoming_fetches_detail_after_hours(env):
+    """踢完 3 小时抓最终赔率；6 小时后才抓详情页（统计定下来要一点时间），只抓一次。"""
+    con, site, clock, c, out = env
+    now = clock.t
+    site.pages[fixtures_url("2026-10-27 00:00:00")] = (200, {"list": [
+        fixture_item(1, now - timedelta(hours=20), "Played"),
+        fixture_item(2, now - timedelta(hours=4), "Played"),     # 4 小时前开球：有最终赔率，详情页还不抓
+    ], "nextDate": ""})
+    for mid in (1, 2):
+        site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
+        site.pages[DETAIL_URL.format(match_id=mid)] = (200, detail_html(mid))
+    c.upcoming(["E0"])
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=1)]
+    assert (out / "match_detail/E0/2026/1.html.gz").exists()
+    site.requests.clear()
+    clock.t = now + timedelta(hours=3)
+    c.upcoming(["E0"])
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=2)]
+
+
+def test_detail_backfill_since_and_stop(env):
+    """补详情页：只要 since 以后踢完的（赛季页的“月-日”按赛季推年份），从近往远；连着 3 场可疑就停。"""
+    con, site, clock, c, out = env
+    clock.t = datetime(2026, 2, 1, 8, 0, tzinfo=UTC)        # 2025/26 赛季进行中
+    site.pages[HISTORY_URL.format(league_id=4)] = (200, HISTORY_HTML.encode())
+    site.pages[SEASON_URL.format(season_id=21198)] = (200, SEASON_HTML.encode())  # 2023/24（since 之前，不抓）
+    start = clock.t.replace(year=2025, month=7, day=1, hour=0)
+    site.pages[fixtures_url(start.strftime("%Y-%m-%d 00:00:00"))] = (200, {"list": [
+        fixture_item(11, datetime(2025, 11, 1, 15, tzinfo=UTC), "Played"),   # since 之前
+        fixture_item(12, datetime(2025, 12, 6, 15, tzinfo=UTC), "Played"),
+        fixture_item(13, datetime(2026, 1, 20, 15, tzinfo=UTC), "Played"),
+        fixture_item(14, datetime(2026, 2, 7, 15, tzinfo=UTC)),               # 还没踢
+    ], "nextDate": ""})
+    for mid in (12, 13):
+        site.pages[DETAIL_URL.format(match_id=mid)] = (200, detail_html(mid))
+    from datetime import date
+    c.detail_backfill(["E0"], date(2025, 11, 15))
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=13), DETAIL_URL.format(match_id=12)]
+    assert sorted(p.name for p in (out / "match_detail/E0/2025").iterdir()) == ["12.html.gz", "13.html.gz"]
+
+    # 已结束的赛季用赛季页：2023/24 赛季页里 08-12、08-13 是 2023 年，01-02 是 2024 年
+    clock.t = datetime(2026, 10, 30, 8, 0, tzinfo=UTC)
+    site.pages[fixtures_url("2026-07-01 00:00:00")] = (200, {"list": [], "nextDate": ""})
+    for mid in (101, 102, 103):
+        site.pages[DETAIL_URL.format(match_id=mid)] = (200, b"<html>please verify</html>")
+    site.requests.clear()
+    c.detail_backfill(["E0"], date(2023, 8, 13), limit=5)   # 101（2023-08-12）在 since 之前
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=103), DETAIL_URL.format(match_id=102)]
+    site.requests.clear()
+    with pytest.raises(Blocked):                             # 再加上 101：连着 3 场拦截页 → 停
+        c.detail_backfill(["E0"], date(2023, 8, 1), retry_bad=True)
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=m) for m in (103, 102, 101)]
