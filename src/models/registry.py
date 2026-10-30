@@ -21,16 +21,22 @@ def available(settings: dict | None = None) -> list[str]:
     return ["frequency", "frequency_poisson", "elo", *s.get("elo_variants", {})]
 
 
-def build_model(name: str, settings: dict | None = None) -> Model:
-    """按名字造一个新的模型对象（每次回测都要新造，模型里有状态，不能两次回测共用一个）。"""
+def model_config(name: str, settings: dict | None = None) -> dict:
+    """这个名字的模型实际用的全部设置（存预测时记下来，设置一改就能看出是不同版本的模型）。"""
     s = (settings or load_settings())["models"]
-    min_matches = s["min_matches"]
-    if name == "frequency":
-        return FrequencyModel(window_days=s["frequency"]["window_days"], min_matches=min_matches)
-    if name == "frequency_poisson":
-        return FrequencyPoissonModel(window_days=s["frequency_poisson"]["window_days"], min_matches=min_matches)
+    if name in ("frequency", "frequency_poisson"):
+        return {"window_days": s[name]["window_days"], "min_matches": s["min_matches"]}
     variants = s.get("elo_variants", {}) or {}
     if name == "elo" or name in variants:
-        cfg = {**s["elo"], **(variants.get(name) or {})}
-        return EloModel(name=name, min_matches=min_matches, **cfg)
+        return {**s["elo"], **(variants.get(name) or {}), "min_matches": s["min_matches"]}
     raise ValueError(f"没有叫「{name}」的模型。能用的：{'、'.join(available(settings))}")
+
+
+def build_model(name: str, settings: dict | None = None) -> Model:
+    """按名字造一个新的模型对象（每次回测都要新造，模型里有状态，不能两次回测共用一个）。"""
+    cfg = model_config(name, settings)
+    if name == "frequency":
+        return FrequencyModel(**cfg)
+    if name == "frequency_poisson":
+        return FrequencyPoissonModel(**cfg)
+    return EloModel(name=name, **cfg)

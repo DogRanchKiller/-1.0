@@ -133,6 +133,29 @@ create table if not exists lottery_odds (
     raw_file       text not null
 );
 create index if not exists lottery_odds_match on lottery_odds (match_id, product, fetched_at_utc);
+
+-- 预测存档：每次出的预测都存一行，只加不改不删（需求文档第 17 节“预测存档”）。
+-- 为什么不能改、不能删：赛前做的预测过了开球就再也做不出来了（当时的数据、当时的模型都变了），
+-- 以后复盘“模型赛前到底怎么说的”只能靠这张表。重新导入比赛数据的程序也不碰这张表。
+-- 除了 match_id，还另存联赛、赛季、主客队、开球时间：万一以后比赛编号变了，也能按这些对回去。
+create table if not exists predictions (
+    prediction_id   integer primary key,
+    match_id        integer not null,
+    competition     text not null,
+    season          integer not null,
+    home_team       text not null,
+    away_team       text not null,
+    kickoff_utc     text,            -- 出预测时知道的开球时间（标准时间）；只知道日期的是空
+    match_date      text not null,
+    kind            text not null,   -- 哪一种预测：preview 预览页；以后 T-24 / T-6 / T-1
+    model           text not null,   -- 模型名字，例如 elo
+    model_version   text not null,   -- 模型版本：名字 + 设置的指纹（设置一改指纹就变）
+    cutoff_utc      text not null,   -- 截止时间：只用了这个时间之前能知道的数据（标准时间）
+    created_at_utc  text not null,   -- 存进来的时间（标准时间）
+    p_home real, p_draw real, p_away real,  -- 主胜 平 客胜的概率
+    detail          text             -- 其他信息（JSON）：模型设置、代码版本、当时的赔率概率等
+);
+create index if not exists predictions_match on predictions (match_id, kind, model, created_at_utc);
 """
 
 
