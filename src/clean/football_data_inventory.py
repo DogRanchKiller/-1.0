@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.clean.football_data_reader import read_football_data_csv
+from src.clean.football_data_reader import keep_league_rows, read_football_data_csv
 from src.common.config import load_football_data_columns, load_settings, resolve_path
 
 log = logging.getLogger("inventory")
@@ -114,7 +114,10 @@ def run(settings: dict | None = None):
     for lg in leagues:
         for season, path in season_files(raw_dir, lg).items():
             r = read_football_data_csv(path)
-            t = r.table
+            t = keep_league_rows(r.table, lg, r.issues)
+            if len(t) == 0:
+                issues += [f"{lg} {season_label(season)}：{i}" for i in r.issues]
+                continue                                   # 整个文件都不是这个联赛的，不算这一季
             where = f"{lg} {season_label(season)}"
             issues += [f"{where}：{i}" for i in r.issues]
             for c in t.columns:

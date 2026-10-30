@@ -90,3 +90,18 @@ def read_football_data_csv(path: Path) -> ReadResult:
 
     table = pd.DataFrame(records, columns=[header[i] for i in keep], dtype=object)
     return ReadResult(Path(path), table, encoding, issues)
+
+
+def keep_league_rows(table: pd.DataFrame, league: str, issues: list[str]) -> pd.DataFrame:
+    """只留下 Div（联赛代码）和文件所属联赛一致的行。
+
+    为什么要这一步：网站上西乙（SP2）1993/94–1995/96 的三个文件，内容其实是西甲（SP1）同一季的比赛，
+    Div 一列写的也是 SP1。不去掉的话，同一场西甲比赛会被算两次，还会被当成西乙比赛。
+    """
+    if len(table) == 0 or "Div" not in table.columns:
+        return table
+    wrong = table["Div"] != league
+    if wrong.any():
+        seen = sorted(set(table.loc[wrong, "Div"].fillna("空")))
+        issues.append(f"{int(wrong.sum())} 行的联赛代码是 {seen}，不是 {league}，已去掉")
+    return table[~wrong].reset_index(drop=True)

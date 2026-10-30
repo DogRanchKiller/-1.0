@@ -8,6 +8,7 @@ paths:
   notes: 学习笔记
   reports: data/reports       # 程序生成的统计报告（从原始层算出来，能重新生成）
   football_data_columns: config/football_data_columns.yaml  # football-data 的数据字典
+  teams: config/teams.yaml   # 球队对照表
   # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
   backup: D:/足球预测系统_备份
 
@@ -28,8 +29,24 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
   top: {E0: 英超, SP1: 西甲, D1: 德甲, I1: 意甲, F1: 法甲}
   second: {E1: 英冠, SP2: 西乙, D2: 德乙, I2: 意乙, F2: 法乙}
 
+football_data:
+  timezone: Europe/London    # football-data 的开球时间是英国当地时间（已核对，见需求文档 6.1）
+
 scrape:
   min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）
 
 inventory:
   full_coverage: 0.9         # 覆盖表里，一个赛季有数据的比赛占多少以上算“有”
+
+quality:                     # 数据质量检查的界限（需求文档第 16 节）；超出就列进质量报告
+  min_odds: 1.01             # 赔率低于这个当作错误值，导入时不要
+  max_handicap: 5            # 亚盘盘口绝对值超过这个当作错误值
+  # 赔率倒数之和（含抽水）的正常范围。范围是 2026-10-30 按 football-data 189 万组赔率的实际分布定的：
+  # 普通公司 99.9% 的数据都落在范围里，超出的多半是录错。
+  overround:
+    1x2: [1.0, 1.25]         # 普通公司 胜平负（三个倒数相加）
+    2way: [1.0, 1.15]        # 普通公司 大小球、亚盘（两个倒数相加）
+    exchange: [0.97, 1.10]   # 交易所：不是公司定价，是玩家互相挂单，抽水接近 0，冷门比赛挂单少时会偏离
+    best: [0.85, 1.25]       # 多家最高：每个结果各挑一家最高的，倒数之和低于 1 很正常，低太多才是录错
+  exchanges: [Betfair 交易所]
+  best_of: [多家最高]
