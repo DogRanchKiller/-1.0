@@ -4,7 +4,9 @@
 这一页把“每个采集程序上次成功是什么时候、最近有没有失败”放在一起看，有问题就弹窗。
 
 做什么：
-1. 只读抓取记录（fetch_log）、备份文件夹和数据库，不联网，不改任何数据。
+1. 只读抓取记录（fetch_log）、备份文件夹、数据库、懂球帝导入报告和 teams.yaml，不联网，不改任何数据。
+   懂球帝导入报告（data/reports/dongqiudi_导入_队名对照.csv、dongqiudi_导入_没对上.csv）是另一个程序写的，
+   以后列可能会变：文件不在、列名不对时，页面上写“读不到”，不让整页出错。
 2. 生成网页 data/reports/status.html（双击“查看数据状态.bat”打开；页面开着时每 10 分钟自己刷新）。
    只是一个本机文件，没有开网站服务，别的电脑访问不到。
 3. 当天的报告另存一份 data/reports/抓取日报/日期.md（一天里多次运行就覆盖，留下的是当天最后一次的）。
@@ -13,6 +15,7 @@
 运行：.venv\\Scripts\\python -m src.jobs.status_page
 由 Windows 定时任务“足球预测_数据状态”每小时自动运行。
 """
+import csv
 import html
 import json
 import subprocess
@@ -20,6 +23,8 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import yaml
 
 from src.clean.dongqiudi_reader import BEIJING
 from src.common.config import load_settings, resolve_path
@@ -41,6 +46,17 @@ class Check:
     name: str    # 检查项
     level: str   # ok 正常 / warn 注意 / error 出错
     text: str    # 给人看的说明
+
+
+@dataclass
+class Listing:
+    """页面下半部分的一张清单（待确认的队名、没对上的比赛）。"""
+    title: str
+    columns: list[str]       # 表头
+    rows: list[list]         # 只放要显示的前几行
+    total: int               # 一共有几条（可能比 rows 多）
+    unit: str                # “个”“场”
+    errors: list[str]        # 读不到的文件和原因，页面上照写
 
 
 def bj(t: datetime) -> str:
@@ -154,6 +170,135 @@ def check_football_data(con, now: datetime) -> Check:
     return Check("football_data", "football-data 联赛文件", "ok", text + "。这个不定时自动下载，需要新数据时让 Claude 运行")
 
 
+# ---------- 懂球帝导入留下的问题（待确认队名、没对上的比赛） ----------
+def read_report_csv(path: Path, need: list[str]) -> tuple[list[dict] | None, str | None]:
+    """读导入程序写的 CSV。返回（每行一个字典, None）；读不到返回（None, 原因）。
+
+    这些 CSV 是 src/clean/dongqiudi_import.py 写的，以后列可能会改。所以这里不信任文件：
+    文件不在、打不开、编码不对、缺了要用的列，都只返回原因，由页面写“读不到”。
+    """
+    try:
+        # utf-8-sig：导入程序写的文件开头带 BOM（让 Excel 认出中文），这样读时会去掉
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            missing = [c for c in need if c not in (reader.fieldnames or [])]
+            if missing:
+                return None, f"{path.name} 里没有这些列：{'、'.join(missing)}（导入程序的报告格式可能改了）"
+            return list(reader), None
+    except FileNotFoundError:
+        return None, f"{path.name} 不存在（懂球帝导入还没运行过，或者报告改名了）"
+    except (OSError, UnicodeDecodeError, csv.Error) as err:
+        return None, f"{path.name} 打不开：{err}"
+
+
+def season_text(s: str) -> str:
+    """赛季开始年份 → “2016/17”。不是年份就原样显示。"""
+    return f"{s}/{(int(s) + 1) % 100:02d}" if s.isdigit() else s
+
+
+def cell(row: dict, col: str) -> str:
+    """取 CSV 一行里的一格。行比表头短时那一格是 None，当作空文字。"""
+    return str(row.get(col) or "").strip()
+
+
+def blank_chinese_names(path: Path) -> tuple[list[dict] | None, str | None]:
+    """teams.yaml 里“中文”还空着的球队。返回（[{英文, 国家}], None）；读不到返回（None, 原因）。"""
+    try:
+        teams = yaml.safe_load(path.read_text(encoding="utf-8"))["球队"]
+        return [{"英文": str(t["英文"]), "国家": str(t.get("国家") or "")} for t in teams
+                if not str(t.get("中文") or "").strip()], None
+    except FileNotFoundError:
+        return None, f"{path.name} 不存在"
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError) as err:
+        return None, f"{path.name} 读不懂：{err!r}"
+
+
+def recent_top_teams(con, dq_cfg: dict) -> set[str]:
+    """懂球帝要抓的联赛里，回补起始赛季以来出场过的球队。这些球队没有中文名，网页上就只能显示英文。"""
+    leagues = list(dq_cfg["league_ids"])
+    ph = ",".join("?" * len(leagues))
+    args = [*leagues, int(dq_cfg["backfill_first_season"])]
+    try:
+        return {t for (t,) in con.execute(
+            f"select home_team from matches where competition in ({ph}) and season >= ?"
+            f" union select away_team from matches where competition in ({ph}) and season >= ?", args + args)}
+    except Exception:   # 数据库还没有这些列（例如测试用的小数据库）：当作没有，不影响别的检查
+        return set()
+
+
+def check_team_names(con, reports: Path, teams_yaml: Path, settings: dict) -> tuple[Check, Listing]:
+    """待确认的队名，两个来源：
+    1. 懂球帝导入的队名对照里“结果”不是“定下”的：这些中文名没对上我们的球队，它们的比赛没导入。
+    2. teams.yaml 里中文名还空着的：大多是次级联赛、以前的球队，网页暂时用不到；
+       只有最近几季在五大联赛出场的（例如刚升级的）才要尽快补，超过界限才标出来。
+    """
+    cfg, limit = settings["status"], settings["status"]["list_rows"]
+    name = "待确认的队名"
+    rows, errors, parts = [], [], []
+    # 1. 懂球帝队名对照里没定下来的
+    table, err_csv = read_report_csv(reports / "dongqiudi_导入_队名对照.csv", ["中文名", "英文名", "得票", "结果"])
+    pending = [] if err_csv else [r for r in table if cell(r, "结果") != "定下"]
+    if err_csv:
+        errors.append(err_csv)
+    else:
+        parts.append(f"懂球帝队名对照里没定下来的 {len(pending)} 个")
+        rows += [["懂球帝队名对照", cell(r, "中文名"),
+                  f"最像 {cell(r, '英文名')}（{cell(r, '得票')} 票），{cell(r, '结果') or '没写结果'}"] for r in pending]
+    # 2. teams.yaml 里中文名空着的；最近在五大联赛出场的排前面
+    blank, err_yaml = blank_chinese_names(teams_yaml)
+    relevant = []
+    if err_yaml:
+        errors.append(err_yaml)
+    else:
+        used = recent_top_teams(con, settings["dongqiudi"])
+        since = int(settings["dongqiudi"]["backfill_first_season"])
+        relevant = [b for b in blank if b["英文"] in used]
+        parts.append(f"teams.yaml 中文名空着 {len(blank)} 个（其中 {since}/{(since + 1) % 100:02d} 起在五大联赛出场的"
+                     f" {len(relevant)} 个）")
+        for b in sorted(blank, key=lambda b: b["英文"] not in used):
+            note = "最近在五大联赛出场过，要补" if b["英文"] in used else "最近没在五大联赛出场，暂时用不到"
+            rows.append(["teams.yaml 中文名空着", b["英文"], f"{b['国家']}，{note}"])
+
+    text = "；".join(parts)
+    listing = Listing(name, ["来源", "队名", "说明"], rows[:limit], len(rows), "个", errors)
+    # 读不到和数量超了用不同的编号：从一种情况变成另一种时，会重新弹窗
+    if errors:
+        return Check("team_names_unreadable", name, "warn",
+                     (text + "。" if text else "") + "读不到：" + "；".join(errors)), listing
+    if len(pending) > cfg["max_pending_team_names"] or len(relevant) > cfg["max_blank_recent_team_names"]:
+        return Check("team_names_pending", name, "warn",
+                     text + "。没定下来的队名，它们的比赛没导入；最近出场的没中文名，网页上只能显示英文。"
+                     "告诉 Claude，你认中文队名，可以一起确认"), listing
+    return Check("team_names", name, "ok", text), listing
+
+
+def check_unmatched(reports: Path, settings: dict) -> tuple[Check, Listing]:
+    """懂球帝导入时没对上的比赛（比分不同、重复、队名没对上、数据库里没有这场）。
+
+    现在的几场都查过原因（判罚比分、附加赛，见进度记录），所以界限不是 0：超过界限多半是出了新情况
+    （例如某个队改了名、某个赛季整季对不上），要看一下。
+    """
+    cfg, limit = settings["status"], settings["status"]["list_rows"]
+    name = "懂球帝没对上的比赛"
+    table, err = read_report_csv(reports / "dongqiudi_导入_没对上.csv", ["联赛", "赛季", "主队", "客队", "结果"])
+    if err:
+        return (Check("unmatched_unreadable", name, "warn", "读不到：" + err),
+                Listing(name, [], [], 0, "场", [err]))
+    by_result: dict[str, int] = {}
+    for r in table:
+        k = cell(r, "结果") or "没写结果"
+        by_result[k] = by_result.get(k, 0) + 1
+    text = f"一共 {len(table)} 场" + ("：" + "，".join(f"{k} {v} 场" for k, v in by_result.items()) if table else "")
+    rows = [[cell(r, "联赛"), season_text(cell(r, "赛季")), f"{cell(r, '主队')} 对 {cell(r, '客队')}", cell(r, "比分"),
+             cell(r, "结果")] for r in table]
+    listing = Listing(name, ["联赛", "赛季", "比赛", "懂球帝比分", "结果"], rows[:limit], len(rows), "场", [])
+    if len(table) > cfg["max_unmatched_matches"]:
+        return (Check("unmatched_many", name, "warn",
+                      text + f"。超过 {cfg['max_unmatched_matches']} 场，可能有队改了名或整季对不上，告诉 Claude 一起看"),
+                listing)
+    return Check("unmatched", name, "ok", text), listing
+
+
 # ---------- 抓取次数和最近的问题 ----------
 def count_table(con, since: datetime) -> dict[str, dict[str, int]]:
     """从 since 到现在，每种数据各个结果几次：{数据类型: {结果: 次数}}。"""
@@ -221,8 +366,22 @@ def backfill_html(rows: list[dict]) -> str:
     return out + "</table>"
 
 
+def listing_html(lst: Listing) -> str:
+    """一张清单：读不到的原因、表格（只列前几行）、“一共几个，只列了前几个”。里面的文字都来自外部文件，全部转义。"""
+    out = "".join(f"<p class='warn'>读不到：{e(x)}</p>" for x in lst.errors)
+    if lst.rows:
+        head = "".join(f"<th>{e(c)}</th>" for c in lst.columns)
+        body = "".join("<tr>" + "".join(f"<td>{e(v)}</td>" for v in r) + "</tr>" for r in lst.rows)
+        out += f"<table><tr>{head}</tr>{body}</table>"
+        more = f"，只列了前 {len(lst.rows)} {lst.unit}" if lst.total > len(lst.rows) else ""
+        out += f"<p class='small'>一共 {lst.total} {lst.unit}{more}。</p>"
+    elif not lst.errors:
+        out += "<p class='small'>没有。</p>"
+    return out
+
+
 def render_html(checks: list[Check], today: dict, day: dict, problems: list[tuple], rows: list[dict],
-                now: datetime) -> str:
+                now: datetime, lists: list[Listing] = ()) -> str:
     worst = max(checks, key=lambda c: ["ok", "warn", "error"].index(c.level)).level
     summary = {"ok": "一切正常", "warn": "有需要注意的地方", "error": "有地方出错了"}[worst]
     items = "".join(f"<tr><td><span class='dot {c.level}'></span>{e(c.name)}</td>"
@@ -244,6 +403,9 @@ def render_html(checks: list[Check], today: dict, day: dict, problems: list[tupl
 <h2>今天的抓取次数（北京时间 0 点起）</h2>{counts_html(today)}
 <h2>最近 24 小时的抓取次数</h2>{counts_html(day)}
 <h2>最近 24 小时的问题</h2>{probs_html}
+{"".join(f"<h2>{e(lst.title)}</h2>{listing_html(lst)}" for lst in lists)}
+<p class="small">来源：data/reports/dongqiudi_导入_队名对照.csv、dongqiudi_导入_没对上.csv（懂球帝导入时生成，
+重新导入才会更新）和 config/teams.yaml。</p>
 <h2>懂球帝历史回补</h2>{backfill_html(rows)}
 <p class="small">逐赛季明细：data/reports/dongqiudi_回补进度.md（双击“查看懂球帝回补进度.bat”）。<br>
 “已保存”= 拿到了新内容存下来；“没变化”= 和上次一样，没重复存；“网站没有”= 懂球帝那边没有这场；
@@ -252,7 +414,8 @@ def render_html(checks: list[Check], today: dict, day: dict, problems: list[tupl
 """
 
 
-def render_markdown(checks: list[Check], today: dict, problems: list[tuple], now: datetime) -> str:
+def render_markdown(checks: list[Check], today: dict, problems: list[tuple], now: datetime,
+                    lists: list[Listing] = ()) -> str:
     """当天的抓取日报（Markdown）。同一天内每小时覆盖一次，所以最后一版就是全天的结果。"""
     lines = [f"# 抓取日报 {now.astimezone(BEIJING):%Y-%m-%d}", "",
              f"最后更新 {now.astimezone(BEIJING):%H:%M}（北京时间）", "", "## 各项检查", "",
@@ -268,6 +431,15 @@ def render_markdown(checks: list[Check], today: dict, problems: list[tuple], now
     lines += ["", "## 最近 24 小时的问题", ""]
     lines += [f"- {bj(datetime.fromisoformat(p[0]))} {p[1]} {DATA_TYPE_NAMES.get(p[2], p[2])} "
               f"{STATUS_NAMES.get(p[3], p[3])} {p[4] or ''} {p[5]} {p[6] or ''}".rstrip() for p in problems] or ["没有。"]
+    for lst in lists:
+        lines += ["", f"## {lst.title}", ""]
+        lines += [f"读不到：{x}" for x in lst.errors]
+        lines += ["- " + "，".join(str(v) for v in r if v != "") for r in lst.rows]
+        if lst.rows:
+            more = f"，只列了前 {len(lst.rows)} {lst.unit}" if lst.total > len(lst.rows) else ""
+            lines += ["", f"一共 {lst.total} {lst.unit}{more}。"]
+        elif not lst.errors:
+            lines.append("没有。")
     return "\n".join(lines) + "\n"
 
 
@@ -295,17 +467,20 @@ def new_alerts(checks: list[Check], state_file: Path) -> list[Check]:
 
 
 # ---------- 主程序 ----------
-def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, list[tuple], list[dict]]:
+def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, list[tuple], list[dict], list[Listing]]:
     """做全部检查、统计次数。网页和日报都用这一份结果。"""
     cfg = settings["status"]
     raw = resolve_path(settings["paths"]["raw"]) / "dongqiudi"
+    reports = resolve_path(settings["paths"]["reports"])
     backfill, rows = check_backfill(con, raw, settings["dongqiudi"], now)
+    names, names_list = check_team_names(con, reports, resolve_path(settings["paths"]["teams"]), settings)
+    unmatched, unmatched_list = check_unmatched(reports, settings)
     checks = [check_dongqiudi_hourly(con, now, cfg), check_blocked(con, now), check_failures(con, now, cfg),
               backfill, check_backup(resolve_path(settings["paths"]["backup"]), now, cfg),
-              check_database(con), check_football_data(con, now)]
+              check_database(con), check_football_data(con, now), names, unmatched]
     today = count_table(con, today_start(now))
     day = count_table(con, now - timedelta(hours=24))
-    return checks, today, day, recent_problems(con, now), rows
+    return checks, today, day, recent_problems(con, now), rows, [names_list, unmatched_list]
 
 
 def main(now: datetime | None = None, notify=popup) -> list[Check]:
@@ -313,16 +488,16 @@ def main(now: datetime | None = None, notify=popup) -> list[Check]:
     now = now or datetime.now(timezone.utc)
     con = connect()
     try:
-        checks, today, day, problems, rows = build(con, s, now)
+        checks, today, day, problems, rows, lists = build(con, s, now)
     finally:
         con.close()
     reports = resolve_path(s["paths"]["reports"])
     reports.mkdir(parents=True, exist_ok=True)
     page = reports / "status.html"
-    page.write_text(render_html(checks, today, day, problems, rows, now), encoding="utf-8")
+    page.write_text(render_html(checks, today, day, problems, rows, now, lists), encoding="utf-8")
     daily = reports / "抓取日报" / f"{now.astimezone(BEIJING):%Y-%m-%d}.md"
     daily.parent.mkdir(parents=True, exist_ok=True)
-    daily.write_text(render_markdown(checks, today, problems, now), encoding="utf-8")
+    daily.write_text(render_markdown(checks, today, problems, now, lists), encoding="utf-8")
     fresh = new_alerts(checks, reports / "status_alerts.json")
     if fresh:
         notify("足球预测：数据有问题",

@@ -67,6 +67,15 @@ status:
   hourly_stale_hours: 2      # 懂球帝每小时任务超过几小时没成功，算出错（关机、睡眠或程序坏了）
   max_failures_24h: 3        # 最近 24 小时失败超过几次算“注意”（偶尔一两次多半是网络抖动）
   backup_stale_hours: 30     # 最新备份超过几小时，算“注意”（每天 3:30 备份一次，留一点余地）
+  # 懂球帝导入留下的问题（读 data/reports/dongqiudi_导入_*.csv 和 config/teams.yaml）。超过界限算“注意”，弹窗一次
+  list_rows: 30              # 清单在页面上最多列几行，多的只写总数
+  max_pending_team_names: 0  # 懂球帝队名对照里没定下来的中文名超过几个（没定下的队，比赛不导入，有一个就要看）
+  # teams.yaml 中文名空着、而且回补起始赛季（dongqiudi.backfill_first_season）起在五大联赛出场过的球队超过几个。
+  # 只看这些：其余 200 多个是次级联赛和以前的球队，网页暂时用不到，只列出来不报警
+  max_blank_recent_team_names: 0
+  # 没对上的比赛超过几场。2026-10-31 第一次导入有 5 场，都查过原因（判罚比分、附加赛，见进度记录），
+  # 所以不是 0；超过多半是出了新情况（某个队改名、整季对不上）。这是先定的数，以后按实际情况调
+  max_unmatched_matches: 10
 
 # 预测页预览版 src/predict/preview.py + src/web/preview_page.py（需求文档第 8 节“早期简易页”，2026-10-31 提前到第 2 阶段）
 preview:
