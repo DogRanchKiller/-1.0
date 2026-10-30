@@ -207,3 +207,23 @@ crosscheck:
       DFB:  [deutschland, cup.txt, 2018, 2025]
       CDR:  [espana, cup.txt, 2020, 2024]
       CI:   [italy, cup.txt, 2020, 2024]
+
+# ---------- 赛前积分榜和复盘自动标签（第 1 阶段，需求文档第 15 节“标签和备注”） ----------
+standings:
+  rules: config/league_rules.yaml           # 各联赛积分规则、同分排名规则、降级 / 争冠名额（每条写了来源）
+  deductions: config/points_deductions.yaml # 扣分记录（football-data 没有扣分，手工录入，每条写来源）
+
+labels:
+  derbies: config/derbies.yaml   # 德比对阵名单
+  output_dir: data/labels        # 算好的标签存在这里（data/ 不进 Git），每个联赛一个文件
+  # 赛前积分榜按“开球前多少小时”截止。0 = 开球那一刻：只算开球前已经知道比分的比赛（复盘用）。
+  # 以后要当模型特征，改成预测时点（24 / 6 / 1），和 T-24 / T-6 / T-1 一致。
+  cutoff_hours_before_kickoff: 0
+  race:                          # 争冠战 / 保级战（定义见 src/review/labels.py 开头）
+    last_rounds: 10              # 只看赛季最后几轮：每队分开看，这场赛前它自己的剩余场次（含本场）≤ 这个数
+    gap_points: 6                # 和关键名次的分差不超过几分（还要剩余场次在数学上追得上）
+
+standings_check:                 # 用维基百科赛季最终积分榜核对（src/review/standings_check.py）
+  raw_dir: data/raw/wikipedia/standings
+  first_season: 1993
+  last_season: 2025              # 2026/27 还没踢完，不核对

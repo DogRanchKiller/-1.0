@@ -6,5 +6,5 @@ scipy       # 统计分布（泊松等）和参数拟合
 requests    # 下载网页和文件
 PyYAML      # 读配置文件
 pytest      # 自动检查（tests/ 文件夹）
-beautifulsoup4  # 读维基百科网页（HTML），找出比赛框和表格
+beautifulsoup4  # 读维基百科网页（HTML）：杯赛比赛框和表格、赛季最终积分榜
 lxml        # beautifulsoup4 用的 HTML 解析器，比自带的快、容错好
