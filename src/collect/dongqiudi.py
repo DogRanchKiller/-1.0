@@ -429,6 +429,11 @@ def main():
     except Blocked as e:
         log.error("懂球帝拒绝访问或返回了拦截页，程序已停止（不会绕过）：%s", e)
         sys.exit(2)
+    except Exception:
+        # 其他意外错误（例如数据库被别的程序占用太久）：定时任务和后台回补用 pythonw 运行，没有窗口，
+        # 出错信息不写进日志就看不到了，所以先把出错的位置写进日志，再照常报错停下
+        log.exception("程序出错停止，下面是出错的位置")
+        raise
     finally:
         con.close()
         log.info("本次请求：%s", "，".join(f"{STATUS_NAMES[k]} {v}" for k, v in c.counts.items()) or "没有新的请求")

@@ -30,7 +30,9 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     """打开数据库（不存在就新建），并确保公共表存在。"""
     path = db_path or resolve_path(load_settings()["paths"]["database"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    # timeout：别的程序正在写数据库时，最多等几秒再报“数据库被锁住”。默认只等 5 秒；
+    # 后台回补一直在写抓取记录，导入程序一次写入要几秒，所以多等一会儿（2026-10-31 加）
+    con = sqlite3.connect(path, timeout=60)
     con.execute(FETCH_LOG_SCHEMA)
     con.commit()
     return con

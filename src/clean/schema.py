@@ -1,7 +1,7 @@
 """数据库里清洗层的正式表（需求文档第 17 节“统一标准”“按数据类型放进正式表”）。
 
 历史数据和以后爬到的实时数据放在同一套表里，用“来源”字段区分，不分两个数据库。
-这一版只有 football-data 用得到的表；变盘记录、首发、伤停、竞彩等表到第 1b 阶段再加。
+football-data、维基百科（杯赛）、懂球帝（变盘记录、彩票赔率）用到的表；首发、伤停等表以后再加。
 
 比赛编号（match_id）一旦分配就不变：以后的预测存档要用它找到比赛。
 所以重建数据时，比赛表是“有就更新、没有才新增”，不是删掉重来；
@@ -100,6 +100,39 @@ create table if not exists odds (
 -- without rowid：数据直接按主键排好存放，不再另存一份主键索引。
 -- 实测（2026-10-30，189 万组赔率）这张表从约 330 MB 降到 135 MB。
 -- 没有另建“按公司查”的索引：现在按公司统计都要扫整张表，索引帮不上忙，只占地方。
+
+-- 变盘记录：一行是“一场比赛 × 一家公司 × 一种玩法”在某个时间的一组价格（需求文档第 17 节“变盘记录”）。
+-- 和 odds 表的区别：odds 只有“赛前”“收盘”两个固定时点；这里每行带网站显示的变盘时间，
+-- 同一家公司同一场可以有很多行（懂球帝的初盘、最新，加上我们每小时存的快照里看到的每个价格）。
+-- 赔率都是小数赔率（含本金），盘口写法和 odds 表一样。
+create table if not exists odds_changes (
+    match_id       integer not null references matches(match_id),
+    source         text not null,   -- 来源，例如 dongqiudi
+    bookmaker      text not null,   -- 公司名，按公司对照表换过（config/bookmakers_dongqiudi.yaml）；没对照的照原样
+    bookmaker_raw  text not null,   -- 网站上原样的公司名（例如 Bet3**），以后改对照表时有据可查
+    market         text not null,   -- 1x2 胜平负 / ou 大小球 / ah 亚盘
+    line           real,            -- 盘口：大小球是几球；亚盘是主队让球数，负数 = 主队让球；胜平负是空
+    home real, draw real, away real,-- 胜平负：主胜 平 客胜；亚盘：home = 主队，away = 客队
+    over real, under real,          -- 大小球：大 小
+    changed_at_utc text not null,   -- 网站显示的变盘时间（标准时间 yyyy-mm-dd HH:MM:SS，网站只到分钟）。取数层按它算能不能用
+    fetched_at_utc text not null,   -- 我们第一次看到这个价格的时间（标准时间 yyyy-mm-dd HH:MM:SS）
+    raw_file       text not null    -- 第一次看到它的原始文件
+);
+-- 同一个价格在好几个快照里重复出现时只留一行（比赛 + 公司 + 玩法 + 盘口 + 时间 + 赔率都一样算重复，导入程序里去重）
+create index if not exists odds_changes_match on odds_changes (match_id, bookmaker, market, changed_at_utc);
+
+-- 彩票赔率（竞彩、北单）：只显示，不进模型（数据用途字典“竞彩赔率”）。
+-- 懂球帝的彩票赔率没有变盘时间，只能按“我们什么时候看到的”算能不能知道。
+create table if not exists lottery_odds (
+    match_id       integer not null references matches(match_id),
+    source         text not null,
+    product        text not null,   -- 竞彩胜平负 / 竞彩让球 / 北单
+    handicap       integer not null,-- 主队让几球，写法和亚盘一样：-1 = 主队让 1 球，+1 = 主队受让 1 球；不让球是 0
+    home real, draw real, away real,-- 主胜 平 客胜（让球的按让球后的结果算）
+    fetched_at_utc text not null,   -- 我们第一次看到这组赔率的时间（标准时间 yyyy-mm-dd HH:MM:SS）。取数层按它算能不能用
+    raw_file       text not null
+);
+create index if not exists lottery_odds_match on lottery_odds (match_id, product, fetched_at_utc);
 """
 
 

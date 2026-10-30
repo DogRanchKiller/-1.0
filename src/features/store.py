@@ -303,6 +303,55 @@ class FeatureStore:
             order by o.bookmaker, o.market"""
         return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff, *params])
 
+    def odds_changes(self, match_id: int, cutoff, usage: str, bookmaker=None, market=None) -> pd.DataFrame:
+        """本场的变盘记录（odds_changes 表，懂球帝），截止时间之前已经变过的每一组价格，按时间从早到晚排。
+
+        能知道的时间 = 网站显示的变盘时间（changed_at_utc）。另外一律只给开球之前的价格：
+        懂球帝的“最新”价格在比赛踢完后可能是开球后（滚球）的价格，不是赛前的东西；
+        只有日期的比赛按当天 00:00（英国时间）开球算，宁早勿晚。
+        bookmaker：公司名，按 config/bookmakers_dongqiudi.yaml 换过的写法，例如 'Bet365'、'平博 Pinnacle'。
+        """
+        cutoff = to_utc_text(cutoff)
+        self._target(match_id, cutoff, usage, ["变盘记录"])
+        where, params = self._odds_filters(bookmaker, market)
+        sql = f"""
+            select o.match_id, o.source, o.bookmaker, o.bookmaker_raw, o.market, o.line, o.home, o.draw, o.away,
+                   o.over, o.under, o.changed_at_utc, o.fetched_at_utc, o.changed_at_utc as known_at_utc
+            from odds_changes o join temp.{self._kt} k on k.match_id = o.match_id
+            where o.match_id = ? and o.changed_at_utc <= ? and o.changed_at_utc < k.kickoff_earliest_utc
+            {''.join(' and ' + w for w in where)}
+            order by o.changed_at_utc, o.rowid"""
+        return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff, *params])
+
+    def latest_odds(self, match_id: int, cutoff, usage: str, bookmaker=None, market=None) -> pd.DataFrame:
+        """截止时间那一刻每家公司每种玩法的“当时价格”：odds_changes 里最后一次变盘的那组。
+
+        让球、大小球同一家公司有时同时开几条盘口，这里只取最后变的那一条（一般就是主盘口）。
+        """
+        df = self.odds_changes(match_id, cutoff, usage, bookmaker, market)
+        # 同一时间有两行（初盘和最新的时间一样）时，后导入的是“最新”，取后面那行
+        return df.groupby(["bookmaker", "market"], sort=True).tail(1).sort_values(["bookmaker", "market"]).reset_index(drop=True)
+
+    def lottery_odds(self, match_id: int, cutoff, usage: str, product=None) -> pd.DataFrame:
+        """本场的彩票赔率（竞彩胜平负、竞彩让球、北单），只能显示。
+
+        懂球帝的彩票赔率没有变盘时间，能知道的时间 = 我们第一次抓到的时间（fetched_at_utc）。
+        product：'竞彩胜平负' / '竞彩让球' / '北单'；不给 = 全部。
+        """
+        cutoff = to_utc_text(cutoff)
+        self._target(match_id, cutoff, usage, ["竞彩赔率"])
+        where, params = ["o.match_id = ?", "o.fetched_at_utc <= ?"], [int(match_id), cutoff]
+        products = _as_list(product)
+        if products:
+            where.append(f"o.product in ({','.join('?' * len(products))})")
+            params += products
+        sql = f"""
+            select o.match_id, o.source, o.product, o.handicap, o.home, o.draw, o.away, o.fetched_at_utc,
+                   o.fetched_at_utc as known_at_utc
+            from lottery_odds o where {' and '.join(where)}
+            order by o.product, o.handicap, o.fetched_at_utc, o.rowid"""
+        return pd.read_sql(sql, self.conn, params=params)
+
     def historical_odds(self, cutoff, usage: str, timing: str = "pre", competition=None, bookmaker=None,
                         market=None, since=None) -> pd.DataFrame:
         """以前比赛的赔率（截止时间之前已经踢完、比分已经能知道的联赛比赛）。B 版训练、回测里选融合权重用。

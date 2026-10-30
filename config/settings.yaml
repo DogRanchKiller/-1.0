@@ -10,6 +10,7 @@ paths:
   football_data_columns: config/football_data_columns.yaml  # football-data 的数据字典
   teams: config/teams.yaml   # 球队对照表
   team_aliases_wikipedia: config/team_aliases_wikipedia.yaml  # 维基百科条目名 → teams.yaml 的球队
+  bookmakers_dongqiudi: config/bookmakers_dongqiudi.yaml  # 懂球帝的公司名（打了星号）→ 我们的公司名
   # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
   backup: D:/足球预测系统_备份
 
@@ -51,6 +52,10 @@ dongqiudi:
   final_after_hours: 3       # 开球后几小时，比赛算踢完，抓一次“最终赔率”（以后不再变）
   backfill_first_season: 2018  # 历史回补最早的赛季（2026-10-31 定：只补赔率比较全的 2018/19 起；试验时用的是 2010，见 6.2.1）
   probe_matches_per_season: 3  # 试验模式：每个赛季抽几场看有没有赔率
+  # 导入数据库（src/clean/dongqiudi_import.py）：
+  # 懂球帝“时间待定”（Uncertain）的比赛，开球时间是占位的（同一轮都写成同一个时间，常常是这一轮靠后的日子），
+  # 所以日期往前挪几天，当作“这一轮从哪天开始”（date_precision = round），宁早勿晚，取数层就不会让赛前预测看到开球后的东西
+  uncertain_back_days: 3
 
 # 数据状态页 src/jobs/status_page.py（需求文档第 6.2、8 节）：超过这些界限就在网页上标出来，并弹窗提醒一次
 status:
