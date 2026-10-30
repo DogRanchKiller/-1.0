@@ -58,3 +58,18 @@ calc:                        # 纯计算工具（src/common/odds.py、settlement
   prob_sum_tol: 1.0e-6       # 概率加起来和 1 差多少以内算正常（比分矩阵、每场的胜平负概率）；差得更多说明算错了，报错
   logloss_eps: 1.0e-15       # log loss：概率低于这个按这个算，避免 log(0) = 负无穷（写成 1.0e-15，YAML 才认成数字）
   calibration_bins: 10       # 校准表分几个箱（0–10%、10–20%……）
+
+features:                    # 取数层 src/features（需求文档第 16、17 节“不偷看未来”“数据用途”）
+  data_usage: config/data_usage.yaml   # 数据用途字典：每类数据什么时候能知道、允许用在哪里
+  current_stage: 2           # 现在做到第几阶段。数据用途字典里“模型输入从第几阶段起”和它比（角球黄牌 10、欧战比分 8）
+  # 比分、统计开球后几个小时才算“能知道”：90 分钟 + 中场 15 分钟 + 补时，约 2 小时踢完，再留 1 小时给数据更新。
+  # 要模拟“football-data 过几天才更新”的延迟（需求文档 6.2），把这个数调大再回测。
+  result_available_after_kickoff_hours: 3
+  # 赛前赔率开球前几个小时算“能知道”（按来源分）。football-data 实际是周五 / 周二下午采集的（开赛前约 1–3 天），
+  # 按需求文档第 17 节第 3 步的约定，当作 T-24 版的赔率，所以写 24。没登记的来源一律拿不到。
+  pre_odds_hours_before_kickoff:
+    football-data: 24
+  # 只有日期、没有开球时间的比赛，日期按哪个时区的“一天”算（football-data 的日期是英国当地日期）
+  date_only_timezone: Europe/London
+  # 同一场比赛有几个来源的比分统计时，按这个顺序挑第一个有的
+  stats_source_priority: [football-data]
