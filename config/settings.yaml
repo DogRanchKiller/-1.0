@@ -50,3 +50,11 @@ quality:                     # 数据质量检查的界限（需求文档第 16 
     best: [0.85, 1.25]       # 多家最高：每个结果各挑一家最高的，倒数之和低于 1 很正常，低太多才是录错
   exchanges: [Betfair 交易所]
   best_of: [多家最高]
+
+calc:                        # 纯计算工具（src/common/odds.py、settlement.py、markets.py，src/evaluate/metrics.py）
+  devig_method: proportional # 默认去水方法：proportional 按比例（需求文档第 16 节）；第 3 阶段比较 shin、power
+  solver_tol: 1.0e-12        # Shin 法、幂函数法解方程的精度（去水后概率之和与 1 的差距不超过这个）
+  max_goals: 10              # 比分矩阵每队算到几球（需求文档第 3 节：内部算到每队 10 球）；超过的概率并进最后一行/列
+  prob_sum_tol: 1.0e-6       # 概率加起来和 1 差多少以内算正常（比分矩阵、每场的胜平负概率）；差得更多说明算错了，报错
+  logloss_eps: 1.0e-15       # log loss：概率低于这个按这个算，避免 log(0) = 负无穷（写成 1.0e-15，YAML 才认成数字）
+  calibration_bins: 10       # 校准表分几个箱（0–10%、10–20%……）
