@@ -16,7 +16,8 @@ from scipy.optimize import approx_fprime
 
 from src.common.config import load_settings
 from src.common.markets import poisson_score_matrix
-from src.models.goals import (FitData, GoalsModel, _nll, fit_league, goal_probs, score_matrices, time_weights)
+from src.models.goals import (FitData, GoalsModel, _nll, fit_league, goal_probs, rho_range, score_matrices,
+                              time_weights)
 from src.models.registry import available, build_model
 
 
@@ -137,6 +138,54 @@ def test_likelihood_equals_matrix_cell(dc, nb):
     m = score_matrices(lh, la, rho, alpha, n=40)
     brute = -np.log(m[np.arange(len(f.x)), f.x, f.y]).sum()
     assert _nll(th, f)[0] == pytest.approx(brute, rel=1e-9)
+
+
+def test_rho_range_hand_calculation():
+    """一场 λ主 = e^(0.5+0.3+0.4) ≈ 3.32、λ客 = e^0.5 ≈ 1.65：
+    下限 = (0.05 − 1) ÷ 3.32 ≈ −0.286（强队主场 0:1 先撑不住）；上限 = min(0.95 ÷ (3.32 × 1.65), 0.95) ≈ 0.173。"""
+    f = FitData(hi=np.array([0]), ai=np.array([1]), x=np.array([0]), y=np.array([0]), w=np.ones(1), n_teams=2,
+                center_a=np.zeros(2), center_d=np.zeros(2), ridge=0.0, dc=True, nb=False)
+    th = np.array([0.5, 0.3, 0.4, 0.0, 0.0, 0.0, -0.1])
+    lo, hi = rho_range(th, f)
+    lh, la = np.exp(1.2), np.exp(0.5)
+    assert lo == pytest.approx(-0.95 / lh) and hi == pytest.approx(0.95 / (lh * la))
+
+
+def test_clipped_tau_has_zero_slope():
+    """0:1 的系数 1 + λ主ρ 被压到下限的那场：数值和斜率要一致（斜率用数值差分核对）。"""
+    f = FitData(hi=np.array([0, 1]), ai=np.array([1, 0]), x=np.array([0, 1]), y=np.array([1, 1]), w=np.ones(2),
+                n_teams=2, center_a=np.zeros(2), center_d=np.zeros(2), ridge=0.0, dc=True, nb=False)
+    th = np.array([0.5, 0.3, 0.9, 0.0, 0.0, 0.0, -0.3])           # λ主 ≈ 5.5，1 + 5.5 × (−0.3) < 0
+    _, g = _nll(th, f)
+    num = approx_fprime(th, lambda t: _nll(t, f)[0], 1e-7)
+    assert np.allclose(g, num, rtol=1e-4, atol=1e-4)
+
+
+def test_fit_keeps_rho_in_valid_range():
+    """造一个联赛：T0 主场总是 4–6 : 0 大胜（从来没有 0:1），其他比赛全是 0:0、1:1、1:0、0:1 的小比分。
+    只看似然 rho 会一直往 −0.3 跑（强队主场 0:1 的格子变成负数也没人管）；拟合要停在合法范围里。"""
+    rng = np.random.default_rng(0)
+    n, hi, ai, x, y = 8, [], [], [], []
+    for _ in range(6):
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                hi.append(i)
+                ai.append(j)
+                if i == 0:
+                    x.append(int(rng.choice([4, 5, 6]))), y.append(0)
+                elif j == 0:
+                    x.append(0), y.append(int(rng.choice([2, 3])))
+                else:
+                    k = rng.choice(4, p=[0.4, 0.35, 0.15, 0.1])
+                    x.append([0, 1, 1, 0][k]), y.append([0, 1, 0, 1][k])
+    f = FitData(hi=np.array(hi), ai=np.array(ai), x=np.array(x), y=np.array(y), w=np.ones(len(x)), n_teams=n,
+                center_a=np.zeros(n), center_d=np.zeros(n), ridge=0.5, dc=True, nb=False)
+    th = fit_league(f, np.concatenate([[0, 0.2], np.zeros(2 * n), [-0.05]]))
+    lo, hi_ = rho_range(th, f)
+    assert lo - 1e-9 <= th[-1] <= hi_ + 1e-9
+    assert th[-1] > -0.25                              # 没有跑到 −0.3
 
 
 def test_time_weight_half_life():

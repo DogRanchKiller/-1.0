@@ -62,6 +62,8 @@ from src.models.base import Model, window_start
 ALPHA_MIN = 1e-6      # 负二项离散度的下限：0 就是泊松，但公式里要除以 α，所以留一点点（1e-6 和泊松的差别小到看不出）
 TAU_FLOOR = 1e-10     # DC 系数 τ 的下限（防止极端参数下出现 0 或负数，取 log 出错）
 SERIES_U = 1e-3       # α·λ 小于这个数时，用级数展开算（直接算会因为两个很接近的数相减而丢精度）
+RHO_LIMIT = 0.3       # DC 的 rho 最多到 ±0.3（文献里的估计一般在 −0.2 到 0 之间）
+TAU_MIN = 0.05        # DC 修正后，窗口里每场的 4 个小比分格子至少留原来概率的 5%（见 rho_range）
 
 
 # ======================= 一队进球数的概率 =======================
@@ -201,6 +203,9 @@ def _nll(theta: np.ndarray, f: FitData) -> tuple[float, np.ndarray]:
         dt_r[m10] = la[m10]
         tau[m11] = 1 - rho
         dt_r[m11] = -1.0
+        # τ 被压到下限的场次：这一小段里对数似然是平的，斜率也要是 0（否则数值和斜率对不上，拟合程序会卡住）
+        clipped = tau < TAU_FLOOR
+        dt_h[clipped] = dt_a[clipped] = dt_r[clipped] = 0.0
         tau = np.maximum(tau, TAU_FLOOR)
         ll = ll + np.log(tau)
         gh = gh + dt_h / tau
@@ -243,17 +248,55 @@ def _nll(theta: np.ndarray, f: FitData) -> tuple[float, np.ndarray]:
     return float(value), np.concatenate(grad)
 
 
-def fit_league(f: FitData, start: np.ndarray, maxiter: int = 500) -> np.ndarray:
-    """一个联赛的最大似然拟合。start 是起点（上一次拟合的参数或默认值）。rho、alpha 有上下限。"""
+def rho_range(theta: np.ndarray, f: FitData) -> tuple[float, float]:
+    """按现在的参数，窗口里每一场的 4 个小比分格子都还留着至少 TAU_MIN 倍的概率时，rho 能取的范围。
+
+    4 个系数：0:0 是 1 − λ主λ客ρ，0:1 是 1 + λ主ρ，1:0 是 1 + λ客ρ，1:1 是 1 − ρ。要每个都 ≥ TAU_MIN：
+      ρ ≥ (TAU_MIN − 1) ÷ λ主、ρ ≥ (TAU_MIN − 1) ÷ λ客（ρ 是负数时，强队主场的 0:1 先撑不住）；
+      ρ ≤ (1 − TAU_MIN) ÷ (λ主λ客)、ρ ≤ 1 − TAU_MIN。
+    """
     n = f.n_teams
-    bounds = [(None, None)] * (2 + 2 * n)
-    if f.dc:
-        bounds.append((-0.3, 0.3))
-    if f.nb:
-        bounds.append((ALPHA_MIN, 1.0))
-    res = minimize(_nll, start, args=(f,), jac=True, method="L-BFGS-B", bounds=bounds,
-                   options={"maxiter": maxiter, "ftol": 1e-10, "gtol": 1e-6})
-    return res.x
+    mu, home, a, d, _, _ = _unpack(theta, n, f.dc, f.nb)
+    lh = np.exp(mu + home + a[f.hi] - d[f.ai])
+    la = np.exp(mu + a[f.ai] - d[f.hi])
+    lo = float(np.max(np.maximum((TAU_MIN - 1) / lh, (TAU_MIN - 1) / la)))
+    hi = float(min(np.min((1 - TAU_MIN) / (lh * la)), 1 - TAU_MIN))
+    return lo, hi
+
+
+def fit_league(f: FitData, start: np.ndarray, maxiter: int = 500) -> np.ndarray:
+    """一个联赛的最大似然拟合。start 是起点（上一次拟合的参数或默认值）。rho、alpha 有上下限。
+
+    Dixon-Coles 的 rho 还有一个“合法范围”（rho_range）：超出了，强弱悬殊的比赛里某个小比分格子会变成 0 甚至负数。
+    只有真的出现过的比分才进似然，所以似然本身拦不住（例如强队主场 0:1 很少真的发生）。
+    做法：拟合完检查一下，超出了就把 rho 的上下限收到合法范围，再拟合一次（球队实力几乎不变，一两次就够）。
+    """
+    n = f.n_teams
+    rho_lo, rho_hi = -RHO_LIMIT, RHO_LIMIT
+    x = np.asarray(start, dtype=float).copy()
+    for _ in range(4):
+        bounds = [(None, None)] * (2 + 2 * n)
+        if f.dc:
+            bounds.append((rho_lo, rho_hi))
+            x[2 + 2 * n] = np.clip(x[2 + 2 * n], rho_lo, rho_hi)
+        if f.nb:
+            bounds.append((ALPHA_MIN, 1.0))
+        res = minimize(_nll, x, args=(f,), jac=True, method="L-BFGS-B", bounds=bounds,
+                       options={"maxiter": maxiter, "ftol": 1e-10, "gtol": 1e-6})
+        x = res.x
+        if not f.dc:
+            return x
+        lo, hi = rho_range(x, f)
+        rho = x[2 + 2 * n]
+        if lo - 1e-9 <= rho <= hi + 1e-9:
+            return x
+        rho_lo, rho_hi = max(rho_lo, lo), min(rho_hi, hi)
+        if rho_lo > rho_hi:            # 不会发生（ρ = 0 总是合法的），防万一
+            rho_lo = rho_hi = 0.0
+    # 4 次还差一点（实测只在半衰期 90 天、有效场数很少时偶尔出现）：直接把 rho 放回合法范围
+    lo, hi = rho_range(x, f)
+    x[2 + 2 * n] = np.clip(x[2 + 2 * n], lo, hi)
+    return x
 
 
 # ======================= 模型 =======================
