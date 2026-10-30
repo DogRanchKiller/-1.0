@@ -9,6 +9,7 @@ paths:
   reports: data/reports       # 程序生成的统计报告（从原始层算出来，能重新生成）
   football_data_columns: config/football_data_columns.yaml  # football-data 的数据字典
   teams: config/teams.yaml   # 球队对照表
+  team_aliases_wikipedia: config/team_aliases_wikipedia.yaml  # 维基百科条目名 → teams.yaml 的球队
   # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
   backup: D:/足球预测系统_备份
 
@@ -93,6 +94,8 @@ features:                    # 取数层 src/features（需求文档第 16、17 
     football-data: 24
   # 只有日期、没有开球时间的比赛，日期按哪个时区的“一天”算（football-data 的日期是英国当地日期）
   date_only_timezone: Europe/London
+  # 只知道“这一轮从哪天开始”的杯赛（date_precision = round），按这一轮最长持续几天算最晚开球（比分晚知道，不偷看）
+  round_date_window_days: 7
   # 同一场比赛有几个来源的比分统计时，按这个顺序挑第一个有的
   stats_source_priority: [football-data]
 
@@ -133,3 +136,74 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     elo_k30: {k: 30}
     elo_gd: {goal_diff: true}
     elo_reg50: {season_regression: 0.5}
+
+# 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
+# robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。
+# 所以下载程序只请求 https://en.wikipedia.org/wiki/条目名（不带问号参数），一次一个，间隔下面的秒数。
+wikipedia:
+  base_url: https://en.wikipedia.org/wiki/
+  user_agent: "FootballLearningProject/0.1 (personal study; https://github.com/DogRanchKiller/-1.0) python-requests"
+  min_interval_seconds: 3     # 两次请求之间至少隔几秒
+  retry_waits: [30, 120, 600] # 失败（连不上 / 5xx）后等几秒再试；429 按网站给的 Retry-After 等
+  first_season: 2000          # 最早下载哪个赛季（2000 = 2000/01）
+  max_subpages: 15            # 一个赛事一个赛季最多跟进几个子页面（防止链接越跟越多）
+  # 子页面：主页面里链接到“主页面标题 + 空格 + ……”的页面（例如 “2008–09 UEFA Cup group stage”）。
+  # “……”部分（小写后）符合下面任何一条规则（正则表达式）的不跟进：决赛单场页（主页面里已经有）、名单、统计等
+  skip_subpages: ['^final$', 'squads', 'statistics', 'broadcast', 'disciplinary', 'top ?scorers', 'preliminary rounds',
+                  'women', 'frauen', 'féminine', 'water polo', 'serie c', 'serie d', 'lega pro', 'dilettanti']
+  # 清洗时也按 skip_subpages 跳过这些页面（第一次下载时还没有女子、低级别赛事这几条规则，那时下载的页面留在原始层，但不导入）。
+  # 法国杯第 7 轮以前是业余球队的地区赛（我们的球队从第 7、8 轮才参加），这些页面也不导入：
+  import_skip_pages: ['coupe de france (qualifying rounds|preliminary round|[1-6](st|nd|rd|th) (round|through))']
+  # 每个赛事：代码 → 名称、页面标题。标题里 {season} = “2008–09” 这种写法，{year} = 赛季开始年份。
+  # 一个赛事可以有几种标题（改过名），按 [第一个赛季, 最后一个赛季, 标题] 写；同一赛季有几种就依次试。
+  # 重赛: true = 平局要重赛（英足总杯）：同一轮同一对球队的第二场是重赛，不是第 2 回合。
+  # 单场: true = 超级杯，一年一场（西班牙 2019/20 起是四队小赛会），赛季按比赛日期算。
+  # skip_subpages_extra：这个赛事另外不跟进的子页面（规则写法同上。例如足总杯资格赛：几百场业余比赛，我们的球队不参加）
+  competitions:
+    UCL:  {名称: 欧冠, 国家: 欧洲, titles: [[2000, 2100, "{season} UEFA Champions League"]]}
+    UEL:  {名称: 欧联（2008/09 以前叫联盟杯）, 国家: 欧洲,
+           titles: [[2000, 2008, "{season} UEFA Cup"], [2009, 2100, "{season} UEFA Europa League"]]}
+    UECL: {名称: 欧协联, 国家: 欧洲,
+           titles: [[2021, 2023, "{season} UEFA Europa Conference League"], [2024, 2100, "{season} UEFA Conference League"]]}
+    FAC:  {名称: 英足总杯, 国家: 英格兰, 重赛: true, titles: [[2000, 2100, "{season} FA Cup"]], skip_subpages_extra: [qualifying rounds]}
+    ELC:  {名称: 英联赛杯, 国家: 英格兰,
+           titles: [[2000, 2015, "{season} Football League Cup"], [2016, 2100, "{season} EFL Cup"]]}
+    DFB:  {名称: 德国杯, 国家: 德国, titles: [[2000, 2100, "{season} DFB-Pokal"]]}
+    CI:   {名称: 意大利杯, 国家: 意大利, titles: [[2000, 2100, "{season} Coppa Italia"]]}
+    CDR:  {名称: 国王杯, 国家: 西班牙, titles: [[2000, 2100, "{season} Copa del Rey"]]}
+    CDF:  {名称: 法国杯, 国家: 法国, titles: [[2000, 2100, "{season} Coupe de France"]]}
+    CDL:  {名称: 法国联赛杯（2019/20 后停办）, 国家: 法国, titles: [[2000, 2019, "{season} Coupe de la Ligue"]]}
+    # 超级杯：一年一场（西班牙 2019/20 起四队），页面标题用年份。赛季按比赛日期算（7 月起算新赛季）
+    UESC: {单场: true, 名称: 欧洲超级杯, 国家: 欧洲, titles: [[2000, 2100, "{year} UEFA Super Cup"]]}
+    ECS:  {单场: true, 名称: 英格兰社区盾杯, 国家: 英格兰, titles: [[2000, 2001, "{year} FA Charity Shield"], [2002, 2100, "{year} FA Community Shield"]]}
+    DSC:  {单场: true, 名称: 德国超级杯, 国家: 德国, titles: [[2010, 2100, "{year} DFL-Supercup"]]}
+    # 维基百科改过标题写法：意大利超级杯 2025 起用 “2025–26”；西班牙超级杯 2024/25 起用比赛那年（2025 年 1 月踢 → “2025”）。
+    # {next_year} = 赛季开始年份 + 1
+    ISC:  {单场: true, 名称: 意大利超级杯, 国家: 意大利, titles: [[2000, 2024, "{year} Supercoppa Italiana"], [2025, 2100, "{season} Supercoppa Italiana"]]}
+    SSC:  {单场: true, 名称: 西班牙超级杯, 国家: 西班牙, titles: [[2000, 2018, "{year} Supercopa de España"], [2019, 2023, "{season} Supercopa de España"],
+                                              [2024, 2100, "{next_year} Supercopa de España"]]}
+    FSC:  {单场: true, 名称: 法国超级杯, 国家: 法国, titles: [[2000, 2100, "{year} Trophée des Champions"]]}
+
+# 交叉核对用的两个开放数据集（只用来检查维基百科解析得对不对，不导入数据库）。
+# 都在 GitHub 上（raw.githubusercontent.com 没有 robots.txt 限制）。文件不大，每个只下载一次。
+#   engsoccerdata（GPL 许可，R 语言数据包）：英足总杯、英联赛杯、欧冠的历史比分
+#   openfootball（CC0 公有领域）：欧冠 / 欧联 / 欧协联、各国杯赛，纯文本 Football.TXT 格式
+crosscheck:
+  user_agent: "FootballLearningProject/0.1 (personal study; https://github.com/DogRanchKiller/-1.0) python-requests"
+  min_interval_seconds: 3
+  retry_waits: [30, 120, 600]
+  engsoccerdata:
+    base_url: https://raw.githubusercontent.com/jalapic/engsoccerdata/master/data-raw/
+    files: {UCL: champs.csv, FAC: facup.csv, ELC: leaguecup.csv}
+  openfootball:
+    base_url: https://raw.githubusercontent.com/openfootball/
+    # 赛事代码 → [仓库, 文件名, 第一个赛季, 最后一个赛季]；网址 = base_url + 仓库/master/2018-19/文件名
+    files:
+      UCL:  [champions-league, cl.txt, 2011, 2025]
+      UEL:  [champions-league, el.txt, 2020, 2024]
+      UECL: [champions-league, conf.txt, 2021, 2024]
+      FAC:  [england, facup.txt, 2018, 2024]
+      ELC:  [england, eflcup.txt, 2018, 2024]
+      DFB:  [deutschland, cup.txt, 2018, 2025]
+      CDR:  [espana, cup.txt, 2020, 2024]
+      CI:   [italy, cup.txt, 2020, 2024]

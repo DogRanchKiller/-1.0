@@ -75,7 +75,9 @@ class FeatureStore:
     # ================= 准备 =================
     def refresh(self) -> None:
         """重算每场比赛“什么时候能知道”，放进临时表。数据库里的比赛有变动后要调用一次。"""
-        m = pd.read_sql("select match_id, season, match_date, kickoff_utc from matches", self.conn)
+        cols = {r[1] for r in self.conn.execute("pragma table_info(matches)")}
+        extra = ", date_precision" if "date_precision" in cols else ""   # 旧版比赛表没有这一列
+        m = pd.read_sql(f"select match_id, season, match_date, kickoff_utc{extra} from matches", self.conn)
         kt = compute_known_times(m, self.fs)
         roles = {s: season_role(int(s), self.settings) for s in m["season"].unique()}
         kt["season_role"] = m["season"].map(roles).to_numpy()

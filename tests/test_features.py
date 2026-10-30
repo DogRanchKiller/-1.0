@@ -104,6 +104,17 @@ def test_date_only_summer_time():
     assert kt["result_known_utc"] == "2023-08-13 02:00:00"
 
 
+def test_round_precision_known_after_round_window():
+    """只知道轮次开始日（2024-01-06 冬令时）的杯赛：最早开球当天 00:00；最晚开球推到这一轮第 7 天（01-12）的 24:00。"""
+    m = pd.DataFrame({"match_id": [1, 2], "match_date": ["2024-01-06"] * 2, "kickoff_utc": [None, None],
+                      "date_precision": ["day", "round"]})
+    kt = compute_known_times(m, load_settings()["features"]).set_index("match_id")
+    assert kt.loc[1, "kickoff_latest_utc"] == "2024-01-07 00:00:00"
+    assert kt.loc[2, "kickoff_earliest_utc"] == "2024-01-06 00:00:00"
+    assert kt.loc[2, "kickoff_latest_utc"] == "2024-01-13 00:00:00"
+    assert kt.loc[2, "result_known_utc"] == "2024-01-13 03:00:00"
+
+
 def test_date_only_match_pre_match_cutoff(dev):
     """只有日期的比赛，T-24 从当天 00:00 往前算；当天早上 8 点再做赛前预测就算开球后（宁早勿晚）。"""
     assert dev.cutoff_before(2, 24, "A版输入") == "2024-01-09 00:00:00"
@@ -274,7 +285,8 @@ def test_team_view_and_same_pair_twice(dev):
 
 def test_optional_round_column_and_source_priority(con, settings):
     """matches 加了 round 列照样能用并带出来；同一场有两个来源的比分时只出一行，用优先的来源。"""
-    con.execute("alter table matches add column round text")
+    if "round" not in {r[1] for r in con.execute("pragma table_info(matches)")}:  # 新版建表已经有 round
+        con.execute("alter table matches add column round text")
     con.execute("update matches set round = '第 3 轮' where match_id = 4")
     con.execute("insert into match_stats (match_id, source, home_goals, away_goals, result) "
                 "values (1, 'wikipedia', 9, 9, 'D')")

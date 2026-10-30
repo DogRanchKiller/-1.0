@@ -16,6 +16,11 @@
   所以同一天晚些时候的其他比赛，用不到它的比分（实际上同一天的比赛本来就几乎同时开球）。
 有开球时间的比赛，最早、最晚开球都等于真实开球时间。
 
+只知道“这一轮从哪天开始”的杯赛（matches.date_precision = 'round'，维基百科早年的英足总杯、法国杯等），
+match_date 是这一轮的第一天，比赛可能是这一轮里的任何一天：
+- 最早开球：这一轮第一天 00:00（同上）。
+- 最晚开球：这一轮第 round_date_window_days 天（默认第 7 天）的 24:00。比分要到那以后才能用，宁可晚知道，不偷看。
+
 所有时间都是 UTC，写成文字 'YYYY-MM-DD HH:MM:SS'。这种写法按文字排序就是按时间排序，数据库里可以直接比大小。
 """
 import pandas as pd
@@ -53,7 +58,8 @@ def _local_midnight_utc(dates: pd.Series, tz: str, ambiguous_early: bool) -> pd.
 def compute_known_times(matches: pd.DataFrame, feature_settings: dict) -> pd.DataFrame:
     """给每场比赛算出几个关键时间点。
 
-    输入：matches 表的 match_id、match_date（当地日期）、kickoff_utc（可能为空）。
+    输入：matches 表的 match_id、match_date（当地日期）、kickoff_utc（可能为空），
+         可以带 date_precision（'day' / 'round'；没有这一列时都当 'day'）。
     输出（每场一行，都是 UTC 文字）：
       kickoff_earliest_utc  最早可能的开球时间 —— “开球前”的判断、赛前赔率的时间都从它算
       kickoff_latest_utc    最晚可能的开球时间 —— “比赛已经踢了”、收盘赔率从它算
@@ -67,6 +73,11 @@ def compute_known_times(matches: pd.DataFrame, feature_settings: dict) -> pd.Dat
     day_start = _local_midnight_utc(matches["match_date"], tz, ambiguous_early=True)
     next_day = (pd.to_datetime(matches["match_date"], format="%Y-%m-%d") + pd.Timedelta(days=1)).dt.strftime("%Y-%m-%d")
     day_end = _local_midnight_utc(next_day, tz, ambiguous_early=False)
+    if "date_precision" in matches.columns:
+        # 只知道轮次开始日的：最晚开球再往后推（第一天已经算在 day_end 里，所以推 窗口 - 1 天）
+        extra_days = float(feature_settings.get("round_date_window_days", 7)) - 1
+        is_round = (matches["date_precision"] == "round").to_numpy()
+        day_end = day_end.where(~is_round, day_end + pd.Timedelta(days=extra_days))
     earliest = kick.fillna(day_start)
     latest = kick.fillna(day_end)
 

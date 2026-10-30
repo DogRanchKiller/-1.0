@@ -268,14 +268,17 @@ def write_database(con: sqlite3.Connection, teams: list[dict], names: dict[str, 
         con.executemany("insert into team_names (source, name, team_id) values (?, ?, ?)",
                         [(SOURCE, n, tid) for n, tid in names.items()])
 
-        # 比赛：有就更新（编号不变），没有才新增
+        # 比赛：有就更新（编号不变），没有才新增。
+        # 联赛比赛的 round 固定是 ''、leg 固定是 0（杯赛才有轮次、回合），所以唯一键里这两列对联赛不起作用
         con.executemany(
-            "insert into matches (competition, season, home_team, away_team, match_date, kickoff_utc, status) "
-            "values (?, ?, ?, ?, ?, ?, ?) on conflict(competition, season, home_team, away_team) do update set "
+            "insert into matches (competition, season, home_team, away_team, match_date, kickoff_utc, status, "
+            "round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, '', 0, 'day') "
+            "on conflict(competition, season, home_team, away_team, round, leg) do update set "
             "match_date = excluded.match_date, kickoff_utc = coalesce(excluded.kickoff_utc, matches.kickoff_utc), "
             "status = excluded.status",
             rows_of(matches, ["competition", "season", "home_team", "away_team", "match_date", "kickoff_utc", "status"]))
-        ids = pd.read_sql("select match_id, competition, season, home_team, away_team from matches", con)
+        ids = pd.read_sql("select match_id, competition, season, home_team, away_team from matches "
+                          "where round = '' and leg = 0", con)
         matches = matches.merge(ids, on=["competition", "season", "home_team", "away_team"], how="left")
         row_to_id = matches.set_index("row")["match_id"]
 
