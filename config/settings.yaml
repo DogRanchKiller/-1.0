@@ -73,3 +73,41 @@ features:                    # 取数层 src/features（需求文档第 16、17 
   date_only_timezone: Europe/London
   # 同一场比赛有几个来源的比分统计时，按这个顺序挑第一个有的
   stats_source_priority: [football-data]
+
+backtest:                    # 回测框架 src/evaluate/backtest.py（需求文档第 5 节“按时间滚动回测”“回测的计算量”）
+  output_dir: data/backtest  # 回测结果放这里（data/ 不进 Git）；每次运行一个子文件夹
+  horizons: [24, 6, 1]       # 预测时点：开球前几小时（T-24 / T-6 / T-1）
+  refit_days: 7              # 参数每隔几天重新拟合一次（第 5 节：按周，不按每场）。Elo 评分本身每场赛后都更新，这里管的是“评分 → 概率”的换算参数
+  eval_after_kickoff_hours: 72  # 打分时“站在”开球后几小时取本场比分和收盘赔率（比 features 的 3 小时缓冲、只有日期时的 27 小时都长）
+  benchmark_bookmaker: 平博 Pinnacle  # 参考标杆：这家公司的收盘胜平负赔率按比例去水（第 5 节标杆 1）
+  window_start_md: "06-15"   # 按赛季取预测目标时，日期窗口从这年的几月几日开始（再按 season 列筛，窗口只是为了少查）
+  window_end_md: "07-01"     # 窗口到下一年的几月几日（2019/20 疫情延期的赛季按 season 列筛，不受影响）
+
+compare:                     # 两个模型比较 src/evaluate/compare.py（第 5 节“怎么算真的更准”）
+  n_boot: 2000               # bootstrap 重复抽样次数
+  confidence: 0.95           # 可信区间的置信水平：95% 区间
+  seed: 20261030             # 随机种子：同样的数据每次算出同样的区间
+  block: week                # 按什么成块抽样：week 按周（同一周的比赛一起抽）/ day 按比赛日 / match 每场单独抽
+  primary_metric: log_loss   # 下结论主要看哪个分数（另外两个也列出来）
+
+models:                      # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
+  min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
+  frequency:                 # 历史频率基线：按联赛的主胜 / 平 / 客胜比例
+    window_days: 1095        # 只看截止前最近 3 年（约 3 个赛季）的比赛。主场优势在变（2020/21 空场降到 40.8%），太久远的不用
+  frequency_poisson:         # 按联赛的场均进球 → 独立泊松比分矩阵
+    window_days: 1095
+  elo:
+    initial: 1500            # 一个联赛第一个有数据的赛季，所有队都从这个分开始
+    k: 20                    # 每场赛后评分最多变多少（K 值）
+    home_advantage: 65       # 主场加多少分再算“预期得分”
+    goal_diff: false         # true：净胜球越多评分变得越多（K 乘一个系数）
+    season_regression: 0.33  # 新赛季开始时，留队的球队把评分往联赛平均拉回这么多（1/3）
+    promoted_default: -100   # 升班马的初始分 = 联赛平均 + 这个数；有往年升班马的记录后，改用往年升班马的平均
+    promoted_history_seasons: 5  # 往年升班马的平均水平看最近几个赛季
+    burn_in_seasons: 2       # 每个联赛有数据的头几个赛季评分还没稳定，不用来拟合“评分 → 概率”
+    logit_window_days: 1825  # “评分 → 概率”（有序 logit）用截止前最近 5 年的比赛拟合
+  # 事先写下要试的 Elo 设置（第 5 节：先写下要试哪几种，不临时加）。上面是默认组；这里每组只写和默认不同的数
+  elo_variants:
+    elo_k30: {k: 30}
+    elo_gd: {goal_diff: true}
+    elo_reg50: {season_regression: 0.5}
