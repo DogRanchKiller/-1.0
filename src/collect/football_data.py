@@ -114,8 +114,9 @@ class Downloader:
         if isinstance(r, str):
             self._record(url, data_type, "failed", note=r)
             return "failed"
-        if r.status_code == 404:
-            self._record(url, data_type, "not_found", http_status=404)
+        if r.status_code in (300, 404, 410):
+            # 这个网站对不存在的文件有时回 300（“有多个相近文件”）而不是 404，一样当作“网站没有”
+            self._record(url, data_type, "not_found", http_status=r.status_code)
             return "not_found"
         content = r.content
         if r.status_code != 200:

@@ -82,7 +82,7 @@ def main():
     check("文件夹结构", folders)
     check("中文路径读写", chinese_path)
     # football-data、Understat 的 robots.txt 不允许 AI 程序访问，这里不检查它们（见需求文档 6.1）。
-    # football-data 能不能下载，由“下载历史数据.bat”运行时报告。
+    # football-data 能不能下载，由下载程序 src.collect.football_data 运行时报告。
     check("访问 GitHub", network("https://github.com"))
     check("访问清华 pip 镜像", network("https://pypi.tuna.tsinghua.edu.cn/simple/pandas/"))
 

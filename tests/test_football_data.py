@@ -99,3 +99,14 @@ def test_every_request_logged(setup):
     d.run(["E0"], date(2026, 10, 30))
     n_logged = con.execute("select count(*) from fetch_log").fetchone()[0]
     assert n_logged == len(site.requests)                       # 每次请求都有记录，包括 404
+
+
+def test_http_300_counts_as_missing(setup):
+    """真网站对不存在的早期赛季（如意乙 1993/94）回 HTTP 300，要当成“网站没有”，下次不再请求。"""
+    con, out, make = setup
+    site, d = make({url("2425"): CSV})
+    site.get = lambda u, timeout: (site.requests.append(u), FakeResponse(300) if "9394" in u else FakeResponse(404))[1]
+    d.fetch(url("9394"), "league_csv", out / "E0" / "9394.csv")
+    assert con.execute("select status, http_status from fetch_log").fetchone() == ("not_found", 300)
+    assert d.fetch(url("9394"), "league_csv", out / "E0" / "9394.csv") == "skipped"
+    assert site.requests.count(url("9394")) == 1
