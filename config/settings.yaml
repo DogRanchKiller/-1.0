@@ -120,7 +120,11 @@ backtest:                    # 回测框架 src/evaluate/backtest.py（需求文
   horizons: [24, 6, 1]       # 预测时点：开球前几小时（T-24 / T-6 / T-1）
   refit_days: 7              # 参数每隔几天重新拟合一次（第 5 节：按周，不按每场）。Elo 评分本身每场赛后都更新，这里管的是“评分 → 概率”的换算参数
   eval_after_kickoff_hours: 72  # 打分时“站在”开球后几小时取本场比分和收盘赔率（比 features 的 3 小时缓冲、只有日期时的 27 小时都长）
-  benchmark_bookmaker: 平博 Pinnacle  # 参考标杆：这家公司的收盘胜平负赔率按比例去水（第 5 节标杆 1）
+  benchmark_bookmaker: 平博 Pinnacle  # 参考标杆 1：这家公司的收盘胜平负赔率去水（第 5 节标杆 1）
+  # 参考标杆 2：多家公司平均的收盘胜平负赔率去水（football-data 2019/20 起才有）。
+  # 没有收盘平均的比赛（2018/19 及以前）用同一个“多家平均”的赛前赔率代替，结果里时点写“赛前代替”
+  benchmark_avg_bookmaker: 多家平均
+  benchmark_devig_method: proportional  # 两个标杆用哪种去水。只管回测标杆，不影响 calc.devig_method（预测页用的）
   window_start_md: "06-15"   # 按赛季取预测目标时，日期窗口从这年的几月几日开始（再按 season 列筛，窗口只是为了少查）
   window_end_md: "07-01"     # 窗口到下一年的几月几日（2019/20 疫情延期的赛季按 season 列筛，不受影响）
 
@@ -130,6 +134,19 @@ compare:                     # 两个模型比较 src/evaluate/compare.py（第 
   seed: 20261030             # 随机种子：同样的数据每次算出同样的区间
   block: week                # 按什么成块抽样：week 按周（同一周的比赛一起抽）/ day 按比赛日 / match 每场单独抽
   primary_metric: log_loss   # 下结论主要看哪个分数（另外两个也列出来）
+
+devig_compare:                # 去水方法比较 src/evaluate/devig_compare.py（需求文档第 16 节“去水方法比较”，比较前写下，不临时加）
+  output_dir: data/backtest/devig_compare   # 结果放这里（data/ 不进 Git）
+  leagues: [top, second]     # leagues 段里的哪几组联赛：五大联赛 + 次级联赛
+  methods: [proportional, shin, power]
+  pairs:                     # 比哪几组：[基准, 新]，差 = 新 − 基准，小于 0 = 新的更准
+    - [proportional, shin]
+    - [proportional, power]
+    - [shin, power]
+  sources:                   # 用哪几组收盘胜平负赔率，分开比
+    pinnacle_close: {bookmaker: 平博 Pinnacle, first: 2012}   # 平博收盘 2012/13 起
+    avg_close: {bookmaker: 多家平均, first: 2019}             # 多家平均收盘 2019/20 起
+  longshot_below: 0.20       # 只看不下结论：按比例去水后概率低于这个的选项算“冷门”，比较各方法给冷门的概率和实际发生比例
 
 models:                      # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）

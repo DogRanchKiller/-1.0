@@ -332,6 +332,80 @@ def test_week_blocks_start_on_monday():
     assert len(set(cmp.block_ids(pd.Series(["2024-01-13", "2024-01-14"]), "day"))) == 2
 
 
+# ======================= 两个标杆、分段统计 =======================
+# 2022/23 每轮第 1 场有平博收盘（上面的 ODDS）。再给“多家平均”造几种情况，覆盖每个分段：
+#   第 0–3 轮第 1 场：多家平均收盘 + 赛前都有 → 用收盘（有收盘就不用赛前）→ 平博收盘+平均收盘
+#   第 6–9 轮第 1 场：只有多家平均赛前 → 赛前代替 → 平博收盘+平均赛前
+#   第 0–3 轮第 2 场：只有多家平均收盘 → 只有平均收盘
+#   第 6–9 轮第 2 场：只有多家平均赛前 → 只有平均赛前
+#   其余：没有标杆（第 5 轮第 1 场改期，第 4 轮第 1 场只有平博收盘）
+AVG_CLOSE = [2022_000 + r * 10 + i for r in range(4) for i in (0, 1)]
+AVG_PRE = [2022_000 + r * 10 + i for r in (0, 1, 2, 3, 6, 7, 8, 9) for i in (0,)] + \
+          [2022_000 + r * 10 + 1 for r in (6, 7, 8, 9)]
+
+
+@pytest.fixture
+def fs_two(fs):
+    c = fs.conn
+    c.executemany("insert into odds (match_id, source, bookmaker, market, timing, line, home, draw, away)"
+                  " values (?, 'football-data', '多家平均', '1x2', 'close', null, 1.8, 3.6, 4.5)",
+                  [(m,) for m in AVG_CLOSE])
+    c.executemany("insert into odds (match_id, source, bookmaker, market, timing, line, home, draw, away)"
+                  " values (?, 'football-data', '多家平均', '1x2', 'pre', null, 2.2, 3.3, 3.4)",
+                  [(m,) for m in AVG_PRE])
+    c.commit()
+    fs.refresh()
+    return fs
+
+
+def test_two_benchmarks_and_periods(fs_two, settings):
+    from src.evaluate import backtest as bt
+
+    res = run_backtest(fs_two, "E0", 2022, 2022, [build_model("frequency", settings)])
+    p = res.predictions
+    avg = p[p["model"] == bt.BENCHMARK_AVG].set_index("match_id")
+    # 有收盘平均就用收盘，没有才用赛前代替；两种时点分开写
+    assert set(avg.index[avg["horizon"] == bt.CLOSE]) == set(AVG_CLOSE)
+    assert set(avg.index[avg["horizon"] == bt.PRE_SUBSTITUTE]) == set(AVG_PRE) - set(AVG_CLOSE)
+    np.testing.assert_allclose(avg.loc[2022_000, RESULT_COLS_T], devig_proportional(np.array([1.8, 3.6, 4.5])))
+    np.testing.assert_allclose(avg.loc[2022_060, RESULT_COLS_T], devig_proportional(np.array([2.2, 3.3, 3.4])))
+    # 每场的分段
+    period = p.drop_duplicates("match_id").set_index("match_id")["benchmark_period"]
+    assert period[2022_000] == bt.PERIOD_BOTH and period[2022_060] == bt.PERIOD_PIN_PRE
+    assert period[2022_001] == bt.PERIOD_AVG and period[2022_061] == bt.PERIOD_PRE
+    assert period[2022_040] == bt.PERIOD_PIN and period[2022_002] == bt.PERIOD_NONE
+    # 分段汇总：每一段里模型和这一段的标杆在同一批比赛上（n 一样）
+    s = res.summary_by_period
+    top = s[(s["level"] == "全部") & s["horizon"].isin(["T-24", bt.CLOSE, bt.PRE_SUBSTITUTE])]
+    for per, n in [(bt.PERIOD_BOTH, 4), (bt.PERIOD_PIN_PRE, 4), (bt.PERIOD_AVG, 4), (bt.PERIOD_PRE, 4)]:
+        part = top[top["benchmark_period"] == per]
+        assert (part["n"] == n).all() and len(part) == (3 if per in (bt.PERIOD_BOTH, bt.PERIOD_PIN_PRE) else 2), per
+    assert res.info["多家平均用收盘的比赛数"] == 8 and res.info["多家平均用赛前代替的比赛数"] == 8
+    # 默认比较：两个标杆各时点分开比模型；两个都有收盘时再比平博 vs 多家平均
+    pairs = cmp.default_pairs(p)
+    assert ("frequency", bt.BENCHMARK_AVG, "T-24", bt.PRE_SUBSTITUTE) in pairs
+    assert ("frequency", bt.BENCHMARK_AVG, "T-24", bt.CLOSE) in pairs
+    assert (bt.BENCHMARK_AVG, bt.BENCHMARK, bt.CLOSE, bt.CLOSE) in pairs
+    assert all(base not in bt.BENCHMARKS for base, _, base_hz, _ in pairs if base_hz == "T-24")
+    out = save(res, "two", settings)
+    assert (out / "summary_by_benchmark_period.csv").exists()
+
+
+def test_benchmark_devig_method_setting(fs_two, settings):
+    """标杆的去水方法按 backtest.benchmark_devig_method；不影响 calc.devig_method。"""
+    from src.common.odds import devig_shin
+    from src.evaluate import backtest as bt
+
+    settings["backtest"]["benchmark_devig_method"] = "shin"
+    res = run_backtest(fs_two, "E0", 2022, 2022, [build_model("frequency", settings)])
+    pin = res.predictions[res.predictions["model"] == bt.BENCHMARK]
+    np.testing.assert_allclose(pin[RESULT_COLS_T].to_numpy()[0], devig_shin(np.array([2.0, 3.5, 4.0])))
+    assert res.info["标杆去水方法"] == "shin"
+
+
+RESULT_COLS_T = ["p_home", "p_draw", "p_away"]
+
+
 def test_week_blocks_give_wider_interval_when_weeks_share_luck():
     """同一周的比赛分数差有共同的波动（例如某周冷门特别多）时，按单场抽样会把区间算得太窄；按周抽才对。"""
     rng = np.random.default_rng(11)
