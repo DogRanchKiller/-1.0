@@ -51,6 +51,12 @@ dongqiudi:
   backfill_first_season: 2018  # 历史回补最早的赛季（2026-10-31 定：只补赔率比较全的 2018/19 起；试验时用的是 2010，见 6.2.1）
   probe_matches_per_season: 3  # 试验模式：每个赛季抽几场看有没有赔率
 
+# 数据状态页 src/jobs/status_page.py（需求文档第 6.2、8 节）：超过这些界限就在网页上标出来，并弹窗提醒一次
+status:
+  hourly_stale_hours: 2      # 懂球帝每小时任务超过几小时没成功，算出错（关机、睡眠或程序坏了）
+  max_failures_24h: 3        # 最近 24 小时失败超过几次算“注意”（偶尔一两次多半是网络抖动）
+  backup_stale_hours: 30     # 最新备份超过几小时，算“注意”（每天 3:30 备份一次，留一点余地）
+
 inventory:
   full_coverage: 0.9         # 覆盖表里，一个赛季有数据的比赛占多少以上算“有”
 

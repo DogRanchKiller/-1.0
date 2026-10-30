@@ -4,6 +4,7 @@
 # 取消登记：
 #     Unregister-ScheduledTask -TaskName 足球预测_每日备份 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_懂球帝赔率 -Confirm:$false
+#     Unregister-ScheduledTask -TaskName 足球预测_数据状态 -Confirm:$false
 
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path   # 项目文件夹
 $python = Join-Path $root ".venv\Scripts\python.exe"
@@ -23,5 +24,13 @@ $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(17)) -
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 50) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "足球预测_懂球帝赔率" -Action $action -Trigger $trigger -Settings $settings `
     -Description "每小时抓一次懂球帝赛程和赛前赔率快照（只存原始层）" -Force | Out-Null
+
+# 数据状态页：每小时一次（第 47 分，错开懂球帝任务的第 17 分），重新生成 data/reports/status.html 和当天日报，
+# 有新问题时弹窗提醒（需求文档 6.2、8 节）
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.status_page" -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(47)) -RepetitionInterval (New-TimeSpan -Hours 1)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "足球预测_数据状态" -Action $action -Trigger $trigger -Settings $settings `
+    -Description "每小时生成数据状态页和抓取日报，出问题时弹窗提醒" -Force | Out-Null
 
 Get-ScheduledTask -TaskName "足球预测_*" | Select-Object TaskName, State
