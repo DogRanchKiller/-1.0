@@ -4,7 +4,7 @@
 造的数据：4 支英超球队。
   2023/24：双循环 12 场，football-data 有比分；懂球帝赛季页也有这 12 场（中文队名），用来投票定队名。
   2026/27（当前赛季）：懂球帝赛程里 4 场
-    901 曼城 对 切尔西  已踢完 2:0（football-data 还没更新）
+    901 曼城 对 切尔西  已踢完 2:0（football-data 还没更新 → 用懂球帝的比分，记已赛）
     902 利物浦 对 阿森纳  2026-11-07 15:00 开球，有赛前快照（两个快照，价格一部分重复）和彩票赔率
     903 阿森纳 对 曼城  时间待定（Uncertain），占位时间 2026-11-29 16:00
     904 曼城 对 某某队  对不上的队名 → 不导入
@@ -123,7 +123,7 @@ def test_teams_and_matches(env):
     assert con.execute("select count(*) from matches").fetchone()[0] == 15
     new = {r[0]: r[1:] for r in con.execute(
         "select home_team || '-' || away_team, match_date, kickoff_utc, status, date_precision from matches where season = 2026")}
-    assert new["Man City-Chelsea"] == ("2026-11-01", "2026-11-01 15:00", "scheduled", "day")   # 踢完了也记未赛
+    assert new["Man City-Chelsea"] == ("2026-11-01", "2026-11-01 15:00", "finished", "day")    # 踢完了、有比分：已赛
     assert new["Liverpool-Arsenal"] == ("2026-11-07", "2026-11-07 15:00", "scheduled", "day")
     # 时间待定：不写开球时间，日期往前挪 3 天，精度记“这一轮”
     assert new["Arsenal-Man City"] == ("2026-11-26", None, "scheduled", "round")
@@ -189,6 +189,41 @@ def test_feature_store(env, tmp_path):
     old = fs.odds_changes(1, "2024-06-01", "显示")
     assert old["home"].tolist() == [1.5, 1.4]
 
+
+
+def test_played_score_fills_in_before_football_data(env):
+    """football-data 还没更新的已赛比赛：用懂球帝的比分，取数层能拿到；football-data 有了就用它的。"""
+    con = env[0]
+    go(env)
+    mid = con.execute("select match_id from match_sources where source = 'dongqiudi' and source_key = '901'").fetchone()[0]
+    assert con.execute("select source, home_goals, away_goals, result from match_stats where match_id = ?",
+                       (mid,)).fetchall() == [("dongqiudi", 2, 0, "H")]
+    # 以前的赛季 football-data 已经有比分，懂球帝不另写一份
+    assert con.execute("select count(*) from match_stats where source = 'dongqiudi'").fetchone()[0] == 1
+    # 时间待定、还没踢的比赛没有比分
+    assert con.execute("select count(*) from match_stats s join matches m using (match_id)"
+                       " where m.season = 2026 and m.status != 'finished'").fetchone()[0] == 0
+    go(env)   # 再导一次不会重复
+    assert con.execute("select count(*) from match_stats where source = 'dongqiudi'").fetchone()[0] == 1
+
+    s = copy.deepcopy(env[3])
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["features"]["stats_source_priority"] = ["football-data", "dongqiudi"]
+    fs = FeatureStore(con, "实时", s)
+    hist = fs.historical_matches(NOW, "A版输入", competition="E0", since=2026)
+    row = hist[hist.match_id == mid].iloc[0]
+    assert (row.home_goals, row.away_goals, row.stats_source) == (2, 0, "dongqiudi")
+    # 赛后 3 小时才算知道结果：开球 15:00，17:59 还不知道
+    early = fs.historical_matches("2026-11-01 17:59", "A版输入", competition="E0", since=2026)
+    assert mid not in set(early.match_id)
+
+    # 两个来源都有时（例如 football-data 的导入还没来得及清掉懂球帝那份），按顺序先用 football-data
+    con.execute("insert into match_stats (match_id, source, home_goals, away_goals, result)"
+                " values (?, 'football-data', 3, 0, 'H')", (mid,))
+    hist = fs.historical_matches(NOW, "A版输入", competition="E0", since=2026)
+    row = hist[hist.match_id == mid].iloc[0]
+    assert (row.home_goals, row.stats_source) == (3, "football-data")
+    assert len(hist[hist.match_id == mid]) == 1
 
 def test_fill_teams_yaml(tmp_path):
     p = tmp_path / "teams.yaml"

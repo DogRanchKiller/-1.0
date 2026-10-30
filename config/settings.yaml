@@ -111,8 +111,9 @@ features:                    # 取数层 src/features（需求文档第 16、17 
   date_only_timezone: Europe/London
   # 只知道“这一轮从哪天开始”的杯赛（date_precision = round），按这一轮最长持续几天算最晚开球（比分晚知道，不偷看）
   round_date_window_days: 7
-  # 同一场比赛有几个来源的比分统计时，按这个顺序挑第一个有的
-  stats_source_priority: [football-data]
+  # 同一场比赛有几个来源的比分统计时，按这个顺序挑第一个有的。
+  # 懂球帝只有比分（没有射门等），只在 football-data 还没更新的当前赛季比赛上补（2026-10-31 加）
+  stats_source_priority: [football-data, dongqiudi]
 
 backtest:                    # 回测框架 src/evaluate/backtest.py（需求文档第 5 节“按时间滚动回测”“回测的计算量”）
   output_dir: data/backtest  # 回测结果放这里（data/ 不进 Git）；每次运行一个子文件夹

@@ -158,8 +158,9 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 <b>模型是临时的：</b>现在只有 Elo（按以往比分给每队打实力分），不知道伤停、轮换、首发、天气。
 在 2005–2023 赛季五大联赛有平博收盘赔率的 21,733 场比赛上回测，Elo 的 log loss 是 0.987，平博收盘赔率是 0.963
 （越小越准），也就是说 Elo 还不如收盘赔率准。以后的泊松、DC 等模型做好后换掉它。<br>
-<b>比分截至 {e(hist_last)}：</b>Elo 只用到这一天为止的比分（{result['hist_n']:,} 场，来自 football-data.co.uk）。
-这以后踢完的比赛还没算进去。football-data 每周更新两三次，要更新比分，跟 Claude 说一声（重新下载并导入）。</div>
+<b>比分截至 {e(hist_last)}：</b>Elo 用到这一天为止的比分（{result['hist_n']:,} 场）。
+比分以 football-data.co.uk 为准，它每周只更新两三次；它还没更新的最近比赛（这次 {result.get('hist_n_dongqiudi', 0)} 场）
+先用懂球帝赛程里的比分，懂球帝赛程每 6 小时抓一次，所以一般赛后半天内就能算进去。</div>
 <p class="small">模型版本 {e(result['model_version'])}；预测存进了预测存档（只加不删，以后复盘用）。
 赔率最后一次变动：{e(f"{last_odds:%m-%d %H:%M}") if last_odds else "没有"}（北京时间）。</p>
 {body}
@@ -173,6 +174,6 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 模型这两项还算不出来（Elo 只给胜平负），等有比分矩阵的模型。<br>
 “时间待定”：网站还没公布具体开球时间，日期是“这一轮大约从哪天开始”。鼠标停在队名上能看到英文名。
 </p>
-<p class="small">数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk。只供个人学习，不转发。</p>
+<p class="small">数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk，最近几天的比分来自懂球帝。只供个人学习，不转发。</p>
 </body></html>
 """

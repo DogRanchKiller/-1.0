@@ -158,6 +158,8 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
     return {"cutoff_utc": cutoff, "end_utc": end, "rows": rows, "model": name, "model_cfg": mcfg,
             "model_version": model_version(name, mcfg), "hist_n": int(len(hist)),
             "hist_last_date": hist["match_date"].max() if len(hist) else None,
+            # 其中有几场的比分是 football-data 还没更新、先用懂球帝的
+            "hist_n_dongqiudi": int((hist["stats_source"] == "dongqiudi").sum()) if len(hist) else 0,
             "gap_threshold": cfg["gap_threshold"], "days_ahead": cfg["days_ahead"]}
 
 

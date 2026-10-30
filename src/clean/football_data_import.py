@@ -295,6 +295,10 @@ def write_database(con: sqlite3.Connection, teams: list[dict], names: dict[str, 
         odds = odds.assign(match_id=odds["row"].map(row_to_id))
         con.executemany(f"insert into odds (source, {', '.join(ODDS_COLS)}) values (?{', ?' * len(ODDS_COLS)})",
                         [(SOURCE, *r) for r in rows_of(odds, ODDS_COLS)])
+        # 懂球帝的比分只是在 football-data 更新前先顶上（见 dongqiudi_import 开头的 STATUS）。
+        # football-data 有了这场的比分，就删掉懂球帝那份，一场比赛只留一个比分
+        con.execute("delete from match_stats where source = 'dongqiudi' and match_id in "
+                    "(select match_id from match_stats where source = ?)", (SOURCE,))
         # 原始层里已经没有的比赛（任何来源都不再提到它）删掉。以后有了预测存档，要改成只标记不删
         con.execute("delete from matches where match_id not in (select match_id from match_sources)")
     return con.execute("select count(*) from match_sources where source = ?", (SOURCE,)).fetchone()[0]

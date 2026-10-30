@@ -58,7 +58,7 @@
 
   比分:
     含义: 全场比分（90 分钟含补时）和赛果
-    来源: football-data
+    来源: football-data；football-data 还没更新的当前赛季比赛先用懂球帝赛程里的比分（2026-10-31 起）
     有数据的年份: 1993/94 起
     表: match_stats
     列: [home_goals, away_goals, result]

@@ -48,9 +48,23 @@ SOURCE = "dongqiudi"
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"   # 和取数层的截止时间写法一样，文字直接比大小就是比时间先后
 log = logging.getLogger(__name__)
 
-# 懂球帝赛程的状态 → 我们 matches.status。踢完了（Played）也记“未赛”：赛果以 football-data 为准，等它更新
-STATUS = {"Fixture": "scheduled", "Uncertain": "scheduled", "Playing": "scheduled", "Played": "scheduled",
+# 懂球帝赛程的状态 → 我们 matches.status。
+# 踢完了（Played）而且有比分的记“已赛”，比分写进 match_stats（来源 dongqiudi）：football-data 一周只更新两三次，
+# 不用懂球帝的比分，Elo 就要等好几天才知道最近的结果（2026-10-31 改）。
+# 只对“只有懂球帝一个来源”的比赛这样做；football-data 有了这场就以它为准（取数层按 stats_source_priority 先用它）。
+# 正在踢（Playing）的比分还会变，记“未赛”。
+STATUS = {"Fixture": "scheduled", "Uncertain": "scheduled", "Playing": "scheduled", "Played": "finished",
           "Postponed": "postponed", "Cancelled": "cancelled", "Cancel": "cancelled"}
+
+
+def has_score(fx) -> bool:
+    """踢完了而且两边比分都有。"""
+    return fx.status == "Played" and fx.home_goals is not None and fx.away_goals is not None
+
+
+def result_letter(home_goals: int, away_goals: int) -> str:
+    """比分 → H 主胜 / D 平 / A 客胜（和 football-data 的 result 列一样）。"""
+    return "H" if home_goals > away_goals else "A" if home_goals < away_goals else "D"
 
 
 def utc_text(t: datetime) -> str:
@@ -232,8 +246,11 @@ def fixture_fields(fx, back_days: int, tz: ZoneInfo) -> tuple[str, str | None, s
         base = fx.kickoff_utc or datetime.now(timezone.utc)
         d = (base.astimezone(tz) - timedelta(days=back_days)).date()
         return d.isoformat(), None, "scheduled", "round"
+    status = STATUS.get(fx.status, "scheduled")
+    if status == "finished" and not has_score(fx):
+        status = "scheduled"          # 说踢完了但没给比分：先当没踢，等有比分再说
     return (fx.kickoff_utc.astimezone(tz).date().isoformat(), fx.kickoff_utc.strftime("%Y-%m-%d %H:%M"),
-            STATUS.get(fx.status, "scheduled"), "day")
+            status, "day")
 # ---------- 赔率 ----------
 @dataclass
 class OddsFile:
@@ -417,7 +434,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
         cur = con.executemany("update teams set name_zh = ? where team_id = ? and (name_zh is null or name_zh = '')",
                               [(zh, en) for en, zh in zh_names.items()])
         counts["填了中文名的球队"] = cur.rowcount
-        ids, sources = {}, []
+        ids, sources, stats = {}, [], []
         for ln in links:
             c = ln.cand
             if ln.match_id is None and ln.result != "新增（当前赛季）":
@@ -438,11 +455,18 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
                                   " and away_team = ? and round = '' and leg = 0",
                                   (c.league, c.season, home, away)).fetchone()[0]
                 counts["只有懂球帝的比赛（新增或更新）"] += 1
+                if status == "finished":
+                    fx = c.seen.fx
+                    stats.append((mid, SOURCE, fx.home_goals, fx.away_goals, result_letter(fx.home_goals, fx.away_goals)))
             ids[c.dqd_id] = mid
             sources.append((mid, SOURCE, str(c.dqd_id), c.raw_file, c.fetched_at))
         con.execute("delete from match_sources where source = ?", (SOURCE,))
         con.executemany("insert into match_sources (match_id, source, source_key, raw_file, fetched_at_utc)"
                         " values (?, ?, ?, ?, ?)", sources)
+        con.execute("delete from match_stats where source = ?", (SOURCE,))
+        con.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result) values (?, ?, ?, ?, ?)",
+                        stats)
+        counts["用懂球帝比分的已赛比赛"] = len(stats)
         con.execute("delete from odds_changes where source = ?", (SOURCE,))
         con.executemany("insert into odds_changes (match_id, source, bookmaker, bookmaker_raw, market, line, home, draw,"
                         " away, over, under, changed_at_utc, fetched_at_utc, raw_file)"
