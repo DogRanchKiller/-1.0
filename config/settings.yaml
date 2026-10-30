@@ -1,0 +1,30 @@
+# 项目配置。路径都相对于项目文件夹，以后搬到云服务器只改这里。
+# 密钥不写在这里，写在 config/secrets.yaml（不上传 GitHub，模板见 secrets.example.yaml）。
+
+paths:
+  raw: data/raw              # 原始文件（只增不改）
+  database: data/football.db # 数据库
+  logs: logs
+  notes: 学习笔记
+  # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
+  backup: D:/足球预测系统_备份
+
+backup:
+  keep_days: 30              # 数据库备份保留最近多少天
+
+time:
+  storage_timezone: UTC          # 内部统一用标准时间
+  display_timezone: Asia/Shanghai # 网页显示北京时间
+
+# 赛季用途（需求文档第 5、17 节）。赛季写成开始年份：2023 表示 2023/24
+seasons:
+  dev_last: 2023             # 开发赛季：2023/24 及以前
+  exam: [2024, 2025]         # 期末考试赛季：2024/25、2025/26
+  live_first: 2026           # 上线后：2026/27 起
+
+leagues:                     # 第一阶段的联赛（football-data 的联赛代码）
+  top: {E0: 英超, SP1: 西甲, D1: 德甲, I1: 意甲, F1: 法甲}
+  second: {E1: 英冠, SP2: 西乙, D2: 德乙, I2: 意乙, F2: 法乙}
+
+scrape:
+  min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）

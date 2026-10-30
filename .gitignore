@@ -7,8 +7,7 @@ data/
 backup/
 
 # 配置里的密钥文件（config/ 里其他配置可以上传）
-config/secrets*
-config/*.secret.*
+config/secrets.yaml
 .env
 
 # 日志
