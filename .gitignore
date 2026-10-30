@@ -1,0 +1,33 @@
+# 仓库是公开的：数据、密钥、日志、预测结果都不上传（见需求文档第 13、16 节）
+
+# 数据：原始文件、数据库、备份
+data/
+*.db
+*.db-journal
+backup/
+
+# 配置里的密钥文件（config/ 里其他配置可以上传）
+config/secrets*
+config/*.secret.*
+.env
+
+# 日志
+logs/
+*.log
+
+# 需求文档的旧版备份（改用 Git 记录历史）
+需求文档_v*备份.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 编辑器和系统文件
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.claude/
