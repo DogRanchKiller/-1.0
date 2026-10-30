@@ -6,7 +6,11 @@
     2. 通过取数层拿到截止时间之前已经能知道的比赛结果（增量拿：只拿上次以来新知道的，用 since 参数）；
     3. 新结果交给模型 update()（Elo 每场赛后加减分就在这里）；离上次重新拟合满 refit_days 天（默认 7）就 fit() 一次；
     4. 模型给这场出预测（比分矩阵或胜平负三个概率）；
-  全部跑完，再站在“开球后 72 小时”取本场比分打分（用途“评估”），顺便取平博收盘赔率去水当参考标杆。
+  全部跑完，再站在“开球后 72 小时”取本场比分打分（用途“评估”），顺便取两个参考标杆（第 5 节“两个标杆”）：
+    标杆 1 pinnacle_close：平博收盘赔率去水（2012/13 起）；
+    标杆 2 market_avg：多家公司平均的收盘赔率去水（2019/20 起）。没有收盘平均的比赛，用多家平均的“赛前”赔率代替，
+      时点写“赛前代替”，和真正的收盘分开统计（赛前赔率离开球还有 1–3 天，消息少一些，按理会比收盘差一点）。
+  各年份能用的标杆不一样，所以每场比赛标一个“标杆分段”（benchmark_period），成绩按分段分开统计。
 
 为什么不能随机分训练集、测试集：随机分的话，2015 年的比赛可能用 2018 年的比赛训练出来的模型预测，
 等于知道了“以后谁变强”。足球每年都在变（转会、换帅、规则），只有“用过去预测未来”的成绩才代表上线后的成绩。
@@ -24,6 +28,7 @@
   predictions.csv            每场 × 时点 × 模型一行：概率、实际结果、每场分数
   summary.csv                按 模型 × 时点 × 联赛 × 赛季 汇总的 log loss、Brier、RPS、命中率（另有按联赛、全部的汇总行）
   summary_vs_benchmark.csv   只看有平博收盘赔率的比赛，模型和平博放在同一批比赛上比
+  summary_by_benchmark_period.csv  按“标杆分段”汇总：每一段里模型和这一段能用的标杆在同一批比赛上比
   calibration.csv            校准表（模型说 40% 的事，实际是不是四成发生）
   run_info.json              这次用的设置、模型参数、耗时
 """
@@ -40,15 +45,35 @@ import pandas as pd
 
 from src.common import markets
 from src.common.config import resolve_path, season_role
-from src.common.odds import devig_proportional
+from src.common.odds import devig
 from src.evaluate import metrics
 from src.features import FeatureStore, LookAheadError, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
 from src.models.base import Model, check_result_probs
 
-BENCHMARK = "pinnacle_close"   # 参考标杆在结果表里的模型名
-CLOSE = "收盘"                 # 参考标杆的“时点”
+BENCHMARK = "pinnacle_close"   # 标杆 1 在结果表里的模型名：平博收盘
+BENCHMARK_AVG = "market_avg"   # 标杆 2 在结果表里的模型名：多家平均（收盘；没有收盘时用赛前代替）
+BENCHMARKS = (BENCHMARK, BENCHMARK_AVG)
+CLOSE = "收盘"                 # 标杆的“时点”：收盘
+PRE_SUBSTITUTE = "赛前代替"     # 标杆 2 没有收盘平均、用赛前平均代替时的“时点”
 RESULT_COLS = ["p_home", "p_draw", "p_away"]
+
+# 每场比赛的“标杆分段”：这场能用哪几个标杆（第 5 节“各年份能用的标杆不一样，成绩分段统计”）。
+# 按每场实际有的赔率分，不按年份写死：大致 2012/13–2018/19 是“平博收盘+平均赛前”，2019/20–2024/25 是“两个收盘”，
+# 2025/26 下半季起是“只有平均收盘”，2005/06–2011/12 是“只有平均赛前”。
+PERIOD_BOTH = "平博收盘+平均收盘"
+PERIOD_PIN_PRE = "平博收盘+平均赛前"
+PERIOD_PIN = "只有平博收盘"
+PERIOD_AVG = "只有平均收盘"
+PERIOD_PRE = "只有平均赛前"
+PERIOD_NONE = "没有标杆"
+
+
+def benchmark_period(has_pin: bool, avg_horizon: str | None) -> str:
+    """有没有平博收盘、标杆 2 是收盘还是赛前代替（None = 都没有）→ 分段名。"""
+    if has_pin:
+        return {CLOSE: PERIOD_BOTH, PRE_SUBSTITUTE: PERIOD_PIN_PRE}.get(avg_horizon, PERIOD_PIN)
+    return {CLOSE: PERIOD_AVG, PRE_SUBSTITUTE: PERIOD_PRE}.get(avg_horizon, PERIOD_NONE)
 
 
 def horizon_label(hours: float) -> str:
@@ -62,6 +87,7 @@ class BacktestResult:
     summary: pd.DataFrame                     # 分组汇总
     summary_vs_benchmark: pd.DataFrame        # 和平博收盘同一批比赛
     calibration: pd.DataFrame                 # 校准表
+    summary_by_period: pd.DataFrame = field(default_factory=pd.DataFrame)  # 按标杆分段汇总
     info: dict = field(default_factory=dict)  # 设置、参数、耗时
     models: list = field(default_factory=list)
 
@@ -198,27 +224,47 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
 
 
 # ======================= 第 3 步：取答案、打分 =======================
-def _answers_and_benchmark(fs: FeatureStore, targets: pd.DataFrame, benchmark: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """全部预测做完以后，站在开球后 eval_after_kickoff_hours 小时，取本场比分（用途“评估”）和平博收盘赔率。"""
+def _odds_row(df: pd.DataFrame, bookmaker: str) -> np.ndarray | None:
+    """取到的赔率表里这家公司的胜平负三个赔率；没有、或者缺一个都当作没有。"""
+    o = df[df["bookmaker"] == bookmaker].dropna(subset=["home", "draw", "away"])
+    return None if o.empty else o.iloc[0][["home", "draw", "away"]].to_numpy(dtype=float)
+
+
+def _answers_and_benchmark(fs: FeatureStore, targets: pd.DataFrame, benchmark: bool
+                           ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """全部预测做完以后，站在开球后 eval_after_kickoff_hours 小时，取本场比分（用途“评估”）和两个标杆的赔率。
+
+    标杆 1：平博收盘。标杆 2：多家平均收盘；这场没有收盘平均时，用多家平均的赛前赔率代替（时点写“赛前代替”）。
+    两个标杆都用 backtest.benchmark_devig_method 去水（默认按比例）。
+    返回 (答案, 标杆预测, 每场的标杆分段)。
+    """
     b = fs.settings["backtest"]
     after = pd.Timedelta(hours=float(b["eval_after_kickoff_hours"]))
-    ans, bench = [], []
+    pin, avg = b["benchmark_bookmaker"], b["benchmark_avg_bookmaker"]
+    method = b["benchmark_devig_method"]
+    ans, bench, periods = [], [], []
     for mid, ko in targets[["match_id", "kickoff_earliest_utc"]].itertuples(index=False, name=None):
         when = to_utc_text(pd.Timestamp(ko) + after)
         r = fs.match_result(int(mid), when, "评估")
         if not r.empty and pd.notna(r.iloc[0]["result"]):
             row = r.iloc[0]
             ans.append((int(mid), row["result"], int(row["home_goals"]), int(row["away_goals"])))
-        if benchmark:
-            o = fs.closing_odds(int(mid), when, "评估", bookmaker=b["benchmark_bookmaker"], market="1x2")
-            o = o.dropna(subset=["home", "draw", "away"])
-            if not o.empty:
-                p = devig_proportional(o.iloc[0][["home", "draw", "away"]].to_numpy(dtype=float))
-                bench.append((int(mid), CLOSE, when, BENCHMARK, None, *p, np.nan, np.nan))
+        if not benchmark:
+            continue
+        close = fs.closing_odds(int(mid), when, "评估", bookmaker=[pin, avg], market="1x2")
+        o_pin, o_avg, avg_hz = _odds_row(close, pin), _odds_row(close, avg), CLOSE
+        if o_avg is None:     # 没有收盘平均 → 用赛前平均代替
+            o_avg = _odds_row(fs.pre_match_odds(int(mid), when, "评估", bookmaker=avg, market="1x2"), avg)
+            avg_hz = PRE_SUBSTITUTE if o_avg is not None else None
+        for name, hz, o in [(BENCHMARK, CLOSE, o_pin), (BENCHMARK_AVG, avg_hz, o_avg)]:
+            if o is not None:
+                bench.append((int(mid), hz, when, name, None, *devig(o, method), np.nan, np.nan))
+        periods.append((int(mid), benchmark_period(o_pin is not None, avg_hz)))
     answers = pd.DataFrame(ans, columns=["match_id", "result", "home_goals", "away_goals"])
     bench_df = pd.DataFrame(bench, columns=["match_id", "horizon", "cutoff_utc", "model", "fit_cutoff_utc",
                                             *RESULT_COLS, "p_over25", "p_btts"])
-    return answers, bench_df
+    period_df = pd.DataFrame(periods, columns=["match_id", "benchmark_period"])
+    return answers, bench_df, period_df
 
 
 def score(predictions: pd.DataFrame) -> pd.DataFrame:
@@ -249,12 +295,13 @@ def score(predictions: pd.DataFrame) -> pd.DataFrame:
 def common_rows(scored: pd.DataFrame) -> pd.DataFrame:
     """同一个时点上，只留“这次回测的每个模型都有预测、也有结果”的比赛，让各模型在同一批比赛上比（参考标杆另算）。"""
     df = scored[scored["log_loss"].notna()]
-    mods = df[df["model"] != BENCHMARK]
+    is_bench = df["model"].isin(BENCHMARKS)
+    mods = df[~is_bench]
     n_models = mods.groupby("horizon")["model"].nunique()
     per = mods.groupby(["horizon", "match_id"])["model"].nunique().reset_index(name="k")
     per = per[per["k"] == per["horizon"].map(n_models)]
     keep = mods.merge(per[["horizon", "match_id"]], on=["horizon", "match_id"])
-    return pd.concat([keep, df[df["model"] == BENCHMARK]], ignore_index=True)
+    return pd.concat([keep, df[is_bench]], ignore_index=True)
 
 
 def _agg(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
@@ -290,6 +337,29 @@ def vs_benchmark_rows(rows: pd.DataFrame) -> pd.DataFrame:
     return rows[rows["match_id"].isin(has)]
 
 
+def summarize_by_period(rows: pd.DataFrame) -> pd.DataFrame:
+    """按标杆分段汇总（第 5 节“各年份能用的标杆不一样，成绩分段统计”）。
+
+    每个分段里，只留“这一段的每个标杆都有分数”的比赛，模型和标杆在同一批比赛上比。
+    例如“平博收盘+平均赛前”这一段，模型、pinnacle_close、market_avg（赛前代替）三个的 n 一样。
+    汇总层次和 summarize 一样（联赛×赛季、联赛、全部），前面多一列 benchmark_period。
+    """
+    if rows.empty or "benchmark_period" not in rows:
+        return pd.DataFrame()
+    parts = []
+    for period, part in rows.groupby("benchmark_period", sort=False):
+        bench = part[part["model"].isin(BENCHMARKS)]
+        if not bench.empty:
+            need = bench["model"].nunique()
+            ok = bench.groupby("match_id")["model"].nunique()
+            part = part[part["match_id"].isin(ok[ok == need].index)]
+        s = summarize(part)
+        if not s.empty:
+            s.insert(0, "benchmark_period", period)
+            parts.append(s)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
 def calibration(rows: pd.DataFrame, n_bins: int | None = None) -> pd.DataFrame:
     """每个 模型 × 时点：主胜、平、客胜各一张校准表，再把三个结果合在一起一张（每场贡献 3 个点）。"""
     parts = []
@@ -316,8 +386,8 @@ def run_backtest(fs: FeatureStore, competitions, first: int, last: int, models: 
         raise ValueError("first 不能大于 last")
     competitions = [competitions] if isinstance(competitions, str) else list(competitions)
     names = [m.name for m in models]
-    if len(set(names)) != len(names) or BENCHMARK in names:
-        raise ValueError(f"模型名字不能重复，也不能叫 {BENCHMARK}：{names}")
+    if len(set(names)) != len(names) or set(BENCHMARKS) & set(names):
+        raise ValueError(f"模型名字不能重复，也不能叫 {' / '.join(BENCHMARKS)}：{names}")
     horizons = list(horizons or fs.settings["backtest"]["horizons"])
     timing: dict = {}
     t_all = time.perf_counter()
@@ -331,25 +401,34 @@ def run_backtest(fs: FeatureStore, competitions, first: int, last: int, models: 
     timing["滚动预测秒"] = round(time.perf_counter() - t0, 2)
 
     t0 = time.perf_counter()
-    answers, bench = _answers_and_benchmark(fs, targets, benchmark)
+    answers, bench, periods = _answers_and_benchmark(fs, targets, benchmark)
     timing["取答案和标杆秒"] = round(time.perf_counter() - t0, 2)
 
     info_cols = ["match_id", "competition", "season", "match_date", "kickoff_utc", "home_team", "away_team"]
     allp = pd.concat([preds, bench], ignore_index=True) if not bench.empty else preds
     allp = allp.merge(targets[info_cols], on="match_id").merge(answers, on="match_id", how="left")
+    if benchmark:
+        allp = allp.merge(periods, on="match_id", how="left")
     scored = score(allp)
     rows = common_rows(scored)
     summary = summarize(rows)
-    vs = summarize(vs_benchmark_rows(rows)) if not bench.empty else pd.DataFrame()
+    has_pin = not bench.empty and (bench["model"] == BENCHMARK).any()
+    vs = summarize(vs_benchmark_rows(rows)) if has_pin else pd.DataFrame()
+    by_period = summarize_by_period(rows) if benchmark else pd.DataFrame()
     calib = calibration(rows)
     timing["总秒数"] = round(time.perf_counter() - t_all, 2)
 
-    model_rows = scored[scored["model"] != BENCHMARK]
+    avg_rows = bench[bench["model"] == BENCHMARK_AVG] if not bench.empty else bench
+    model_rows = scored[~scored["model"].isin(BENCHMARKS)]
     missing = model_rows["p_home"].isna().groupby([model_rows["model"], model_rows["horizon"]]).sum()
     info = {
         "联赛": competitions, "赛季": [first, last], "时点": [horizon_label(h) for h in horizons],
         "运行模式": fs.mode, "模型": names, "目标比赛数": int(len(targets)), "有结果的比赛数": int(len(answers)),
-        "有平博收盘的比赛数": int(bench["match_id"].nunique()) if not bench.empty else 0,
+        "有平博收盘的比赛数": int((bench["model"] == BENCHMARK).sum()) if not bench.empty else 0,
+        "多家平均用收盘的比赛数": int((avg_rows["horizon"] == CLOSE).sum()),
+        "多家平均用赛前代替的比赛数": int((avg_rows["horizon"] == PRE_SUBSTITUTE).sum()),
+        "每个标杆分段的比赛数": periods["benchmark_period"].value_counts().to_dict() if benchmark else {},
+        "标杆去水方法": fs.settings["backtest"]["benchmark_devig_method"] if benchmark else None,
         "没出预测的场数": {f"{m}|{h}": int(v) for (m, h), v in missing.items()},
         "耗时": timing,
         "设置": {k: fs.settings[k] for k in ("backtest", "models", "features")},
@@ -358,8 +437,10 @@ def run_backtest(fs: FeatureStore, competitions, first: int, last: int, models: 
     order = ["match_id", "competition", "season", "match_date", "kickoff_utc", "home_team", "away_team", "horizon",
              "cutoff_utc", "model", "fit_cutoff_utc", *RESULT_COLS, "p_over25", "p_btts", "result", "home_goals",
              "away_goals", "log_loss", "brier", "rps", "hit", "brier_over25", "brier_btts"]
+    if benchmark:
+        order.insert(order.index("horizon"), "benchmark_period")
     scored = scored[order].sort_values(["match_date", "match_id", "model", "horizon"], ignore_index=True)
-    return BacktestResult(scored, summary, vs, calib, info, models)
+    return BacktestResult(scored, summary, vs, calib, info=info, models=models, summary_by_period=by_period)
 
 
 def save(result: BacktestResult, name: str, settings: dict) -> Path:
@@ -371,6 +452,8 @@ def save(result: BacktestResult, name: str, settings: dict) -> Path:
     result.summary.to_csv(out / "summary.csv", float_format="%.5f", **kw)
     if not result.summary_vs_benchmark.empty:
         result.summary_vs_benchmark.to_csv(out / "summary_vs_benchmark.csv", float_format="%.5f", **kw)
+    if not result.summary_by_period.empty:
+        result.summary_by_period.to_csv(out / "summary_by_benchmark_period.csv", float_format="%.5f", **kw)
     result.calibration.to_csv(out / "calibration.csv", float_format="%.4f", **kw)
     for m in result.models:
         if hasattr(m, "ratings_table"):
@@ -392,7 +475,7 @@ def main() -> None:
     ap.add_argument("--models", nargs="+", default=["frequency", "frequency_poisson", "elo"])
     ap.add_argument("--horizons", nargs="+", type=float, default=None, help="开球前几小时，默认 settings 里的 24 6 1")
     ap.add_argument("--name", default=None, help="结果文件夹名，默认按联赛和赛季起")
-    ap.add_argument("--no-benchmark", action="store_true", help="不算平博收盘参考")
+    ap.add_argument("--no-benchmark", action="store_true", help="不算两个标杆（平博收盘、多家平均）")
     ap.add_argument("--db", default=None, help="数据库文件，默认 settings 里的")
     a = ap.parse_args()
 
@@ -408,6 +491,10 @@ def main() -> None:
         v = res.summary_vs_benchmark
         print("\n和平博收盘同一批比赛：")
         print(v[v["level"] == "全部"].to_string(**fmt))
+    if not res.summary_by_period.empty:
+        v = res.summary_by_period
+        print("\n按标杆分段（每段里模型和标杆同一批比赛）：")
+        print(v[v["level"] == "全部"].drop(columns=["level", "competition", "season"]).to_string(**fmt))
     print("\n耗时：", json.dumps(res.info["耗时"], ensure_ascii=False))
     print(f"结果存在 {out}")
 

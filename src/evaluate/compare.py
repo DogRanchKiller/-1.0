@@ -131,15 +131,22 @@ def default_pairs(pred: pd.DataFrame) -> list[tuple[str, str, str, str]]:
     1. 每个模型 vs frequency（第 4 节“最低标准”）；
     2. 每个 elo_ 开头的变体 vs 默认 elo（事先写好的几组设置，第 5 节）；
     3. 每个模型的 T-1 vs 它自己的 T-24（晚一点预测有没有用）；
-    4. 平博收盘 vs 每个模型的 T-24（离庄家多远）。"""
-    models = [m for m in pred["model"].unique() if m != "pinnacle_close"]
+    4. 两个标杆 vs 每个模型的 T-24（离庄家多远）：平博收盘；多家平均收盘；多家平均“赛前代替”（2018/19 及以前）
+       分开比，不混在一起；
+    5. 平博收盘 vs 多家平均收盘（两个都有的比赛，2019/20 起）：平博是不是真的比多家平均准。"""
+    benches = {"pinnacle_close", "market_avg"}
+    models = [m for m in pred["model"].unique() if m not in benches]
     horizons = set(pred["horizon"].unique())
     pairs = [("frequency", m, "T-24", "T-24") for m in models if m != "frequency"]
     pairs += [("elo", m, "T-24", "T-24") for m in models if m.startswith("elo_") and "elo" in models]
     if {"T-1", "T-24"} <= horizons:
         pairs += [(m, m, "T-24", "T-1") for m in models]
-    if "pinnacle_close" in set(pred["model"]):
-        pairs += [(m, "pinnacle_close", "T-24", "收盘") for m in models]
+    have = set(pred[["model", "horizon"]].drop_duplicates().itertuples(index=False, name=None))
+    for bench, hz in [("pinnacle_close", "收盘"), ("market_avg", "收盘"), ("market_avg", "赛前代替")]:
+        if (bench, hz) in have:
+            pairs += [(m, bench, "T-24", hz) for m in models]
+    if {("pinnacle_close", "收盘"), ("market_avg", "收盘")} <= have:
+        pairs.append(("market_avg", "pinnacle_close", "收盘", "收盘"))
     return pairs
 
 
