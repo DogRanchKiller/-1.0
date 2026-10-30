@@ -32,6 +32,13 @@ def resolve_path(p: str) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def load_football_data_columns(settings: dict | None = None) -> dict:
+    """读 football-data 的数据字典（config/football_data_columns.yaml），返回 {列名: 这一列的登记信息}。"""
+    path = resolve_path((settings or load_settings())["paths"]["football_data_columns"])
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)["列"]
+
+
 def season_role(season_start_year: int, settings: dict | None = None) -> str:
     """判断一个赛季的用途：'dev'（开发）、'exam'（期末考试）、'live'（上线后）。
 

@@ -1,4 +1,4 @@
-"""下载 football-data.co.uk 的历史 CSV（需求文档第 6.1、17 节）。
+r"""下载 football-data.co.uk 的历史 CSV（需求文档第 6.1、17 节）。
 
 每个联赛每个赛季一个文件，网址格式：https://football-data.co.uk/mmz4281/2425/E0.csv
 （2425 表示 2024/25 赛季，E0 是英超）。
@@ -9,8 +9,8 @@
   和上一份内容一样就不存，只在抓取记录里记“没变化”。
 - 每次请求（包括网站没有这个文件）都记进数据库的 fetch_log 表。
 
-运行方法：双击项目文件夹里的“下载历史数据.bat”。
-这个网站的 robots.txt 不允许 AI 程序抓取，所以下载由你在自己电脑上运行，不由 Claude 运行。
+运行方法：Claude 运行 `.venv\Scripts\python -m src.collect.football_data`，或双击项目文件夹里的“下载历史数据.bat”。
+这个网站的 robots.txt 不允许 AI 爬虫；你决定（2026-10-30）由 Claude 在你电脑上替你低频运行，只下个人学习要用的文件。
 """
 import argparse
 import hashlib

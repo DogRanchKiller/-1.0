@@ -6,6 +6,8 @@ paths:
   database: data/football.db # 数据库
   logs: logs
   notes: 学习笔记
+  reports: data/reports       # 程序生成的统计报告（从原始层算出来，能重新生成）
+  football_data_columns: config/football_data_columns.yaml  # football-data 的数据字典
   # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
   backup: D:/足球预测系统_备份
 
@@ -28,3 +30,6 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
 
 scrape:
   min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）
+
+inventory:
+  full_coverage: 0.9         # 覆盖表里，一个赛季有数据的比赛占多少以上算“有”
