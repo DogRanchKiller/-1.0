@@ -25,17 +25,36 @@ create table if not exists team_names (
     primary key (source, name)
 );
 
--- 比赛：一行一场比赛。同一联赛同一赛季同一对主客队只有一场（需求文档第 16 节“同一场比赛的匹配”）
+-- 比赛：一行一场比赛（需求文档第 16 节“同一场比赛的匹配”）。
+-- 联赛：同一联赛同一赛季同一对主客队只有一场，round 记空字符串 ''，leg 记 0。
+-- 杯赛、欧战：同一对球队一个赛季可能碰好几次（小组赛一次、淘汰赛两回合、重赛），
+--   所以要加上 round（哪一轮）和 leg（第几回合）才能分清。
 create table if not exists matches (
     match_id       integer primary key,
-    competition    text not null,   -- 赛事代码，联赛用 football-data 的代码，例如 E0
+    competition    text not null,   -- 赛事代码，联赛用 football-data 的代码（例如 E0），杯赛用 settings.yaml wikipedia 里的代码（例如 UCL）
     season         integer not null,-- 赛季开始年份，2023 表示 2023/24
     home_team      text not null references teams(team_id),
     away_team      text not null references teams(team_id),
-    match_date     text not null,   -- 比赛日期（英国当地日期，yyyy-mm-dd）
-    kickoff_utc    text,            -- 开球时间（标准时间 yyyy-mm-dd HH:MM）；2019/20 以前 football-data 没有，是空的
-    status         text not null,   -- scheduled 未赛 / finished 已赛 / postponed 改期 / cancelled 取消
-    unique (competition, season, home_team, away_team)
+    match_date     text not null,   -- 比赛日期（比赛当地的日期，yyyy-mm-dd）
+    kickoff_utc    text,            -- 开球时间（标准时间 yyyy-mm-dd HH:MM）；不知道时区或来源没有时是空的
+    status         text not null,   -- scheduled 未赛 / finished 已赛 / awarded 判罚比分 / postponed 改期 / cancelled 取消
+    round          text not null default '',  -- 轮次：联赛是 ''；杯赛例如 Q2 第二轮资格赛、G 小组赛、R16 十六强、F 决赛，
+                                              -- 重赛后面加 _replay（代码含义见 src/clean/wikipedia_import.py 的 ROUND_RULES）
+    leg            integer not null default 0,-- 第几回合：0 = 单场；1、2 = 两回合的第 1、2 回合
+    date_precision text not null default 'day',-- 日期精确到：day 具体哪一天 / round 只知道这一轮从哪天开始（match_date 记这一轮的第一天）
+    unique (competition, season, home_team, away_team, round, leg)
+);
+
+-- 杯赛的加时、点球（只有杯赛、欧战有，一场比赛一个来源一行）。
+-- match_stats 里的比分一律是 90 分钟（含补时）的比分，和联赛口径一样；踢了加时的，加时后的比分在这里。
+create table if not exists cup_details (
+    match_id      integer not null references matches(match_id),
+    source        text not null,
+    extra_time    integer not null,  -- 1 = 踢了加时（含金球、银球）
+    aet_home integer, aet_away integer,   -- 加时后的比分（没踢加时就是空的）
+    pen_home integer, pen_away integer,   -- 点球大战比分（没有就是空的）
+    note          text,              -- 例如 golden goal 金球、awarded 判罚比分
+    primary key (match_id, source)
 );
 
 -- 各来源的比赛对应到哪个统一比赛编号，以及这条数据从哪个原始文件来、什么时候拿到的
@@ -85,5 +104,42 @@ create table if not exists odds (
 
 
 def create_tables(con: sqlite3.Connection) -> None:
-    """建表（已经有的表不动）。"""
+    """建表（已经有的表不动），旧版的比赛表自动升级（见 migrate_matches）。"""
     con.executescript(TABLES)
+    migrate_matches(con)
+
+
+# 升级后比赛表的列（顺序和上面建表语句一致）
+MATCH_COLUMNS = ["match_id", "competition", "season", "home_team", "away_team", "match_date",
+                 "kickoff_utc", "status", "round", "leg", "date_precision"]
+
+
+def migrate_matches(con: sqlite3.Connection) -> bool:
+    """把旧版比赛表（唯一键只有 联赛、赛季、主队、客队）升级成带 round、leg、date_precision 的新版。
+
+    SQLite 不能直接修改唯一键，只能“建新表 → 原样复制 → 删旧表 → 新表改名”（SQLite 官方文档推荐的做法）。
+    复制时 match_id 原样带过去，所以已有比赛的编号一个都不变；旧比赛（都是联赛）round 记 ''、leg 记 0、
+    date_precision 记 day。整个过程在一个事务里，中途出错就全部不算。
+    已经是新版就什么都不做，返回 False；升级了返回 True。
+    """
+    cols = [r[1] for r in con.execute("pragma table_info(matches)")]
+    if "round" in cols:
+        return False
+    before = con.execute("select count(*), coalesce(sum(match_id), 0) from matches").fetchone()
+    new_table = TABLES.split("create table if not exists matches (")[1].split(");")[0]
+    con.commit()
+    fk_was = con.execute("pragma foreign_keys").fetchone()[0]
+    con.execute("pragma foreign_keys = off")   # 其他表引用了 matches，换表期间先关掉外键检查
+    try:
+        with con:
+            con.execute(f"create table matches_new ({new_table})")
+            old = [c for c in MATCH_COLUMNS if c in cols]
+            con.execute(f"insert into matches_new ({', '.join(old)}) select {', '.join(old)} from matches")
+            con.execute("drop table matches")
+            con.execute("alter table matches_new rename to matches")
+            after = con.execute("select count(*), coalesce(sum(match_id), 0) from matches").fetchone()
+            if after != before:
+                raise RuntimeError(f"比赛表升级前后对不上：之前 {before}，之后 {after}")
+    finally:
+        con.execute(f"pragma foreign_keys = {'on' if fk_was else 'off'}")   # 恢复原来的设置
+    return True
