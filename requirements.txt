@@ -6,3 +6,5 @@ scipy       # 统计分布（泊松等）和参数拟合
 requests    # 下载网页和文件
 PyYAML      # 读配置文件
 pytest      # 自动检查（tests/ 文件夹）
+beautifulsoup4  # 解析网页（HTML）：从维基百科赛季页面读最终积分榜，核对我们算的积分榜
+lxml        # beautifulsoup4 用的 HTML 解析器（快）

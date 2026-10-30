@@ -1,0 +1,76 @@
+# 德比清单（复盘自动标签用，需求文档第 15 节“标签和备注”）。
+#
+# 收录原则（保守）：只收公认的、有固定名字的德比，大多数在维基百科有单独的词条
+#   （例如 en.wikipedia.org/wiki/North_London_derby）。拿不准的不收。
+#   清单只用来给复盘的比赛贴标签，不当模型输入（要当模型输入，先在 data_usage.yaml 登记，见报告）。
+#
+# 写法：
+#   名字    中文名
+#   英文名  英文名（维基百科词条名，方便查来源）
+#   类型    同城 = 同一座城市；地区 = 同一地区 / 邻近城市；宿敌 = 不同地区，但长期争冠或历史恩怨
+#   球队    teams.yaml 里的“英文”（球队编号）。可以写 2 队以上，任意两队之间的比赛都算这个德比
+#           （例如英格兰东北德比 Newcastle / Sunderland 只有两队；南威尔士德比 Cardiff / Swansea）
+#   同一对球队只能出现在一个德比里，重复了读文件时报错。
+#
+# 联赛无关：两队只要在我们的联赛（顶级或次级）里碰面就算，例如英冠里的 Sheffield United – Sheffield Weds。
+德比:
+  # ================= 英格兰 =================
+  - {名字: 北伦敦德比, 英文名: North London derby, 类型: 同城, 球队: [Arsenal, Tottenham]}
+  - {名字: 默西塞德德比, 英文名: Merseyside derby, 类型: 同城, 球队: [Everton, Liverpool]}
+  - {名字: 曼彻斯特德比, 英文名: Manchester derby, 类型: 同城, 球队: [Man City, Man United]}
+  - {名字: 西北德比, 英文名: North West derby, 类型: 宿敌, 球队: [Liverpool, Man United]}
+  - {名字: 泰恩-威尔德比, 英文名: Tyne–Wear derby, 类型: 地区, 球队: [Newcastle, Sunderland]}
+  - {名字: 第二城市德比, 英文名: Second City derby, 类型: 同城, 球队: [Aston Villa, Birmingham]}
+  - {名字: 钢城德比, 英文名: Steel City derby, 类型: 同城, 球队: [Sheffield United, Sheffield Weds]}
+  - {名字: 东米德兰兹德比, 英文名: East Midlands derby, 类型: 地区, 球队: [Nott'm Forest, Derby]}
+  - {名字: 道克斯德比, 英文名: Dockers derby, 类型: 同城, 球队: [Millwall, West Ham]}
+  - {名字: M23 德比, 英文名: M23 derby, 类型: 地区, 球队: [Crystal Palace, Brighton]}
+  - {名字: 南威尔士德比, 英文名: South Wales derby, 类型: 地区, 球队: [Cardiff, Swansea]}
+  - {名字: 黑乡德比, 英文名: Black Country derby, 类型: 地区, 球队: [West Brom, Wolves]}
+  - {名字: 东英格兰德比, 英文名: East Anglian derby, 类型: 地区, 球队: [Ipswich, Norwich]}
+  - {名字: 南海岸德比, 英文名: South Coast derby, 类型: 地区, 球队: [Portsmouth, Southampton]}
+  - {名字: 陶瓷德比, 英文名: Potteries derby, 类型: 同城, 球队: [Stoke, Port Vale]}
+  - {名字: 东兰开夏德比, 英文名: East Lancashire derby, 类型: 地区, 球队: [Blackburn, Burnley]}
+  - {名字: 西伦敦德比（切尔西-富勒姆）, 英文名: West London derby, 类型: 同城, 球队: [Chelsea, Fulham]}
+  - {名字: 玫瑰战争德比, 英文名: Roses rivalry, 类型: 宿敌, 球队: [Leeds, Man United]}
+
+  # ================= 西班牙 =================
+  - {名字: 国家德比, 英文名: El Clásico, 类型: 宿敌, 球队: [Real Madrid, Barcelona]}
+  - {名字: 马德里德比, 英文名: Madrid derby, 类型: 同城, 球队: [Real Madrid, Ath Madrid]}
+  - {名字: 巴塞罗那德比, 英文名: Barcelona derby, 类型: 同城, 球队: [Barcelona, Espanol]}
+  - {名字: 塞维利亚德比, 英文名: Seville derby, 类型: 同城, 球队: [Betis, Sevilla]}
+  - {名字: 巴斯克德比, 英文名: Basque derby, 类型: 地区, 球队: [Ath Bilbao, Sociedad]}
+  - {名字: 加利西亚德比, 英文名: Galician derby, 类型: 地区, 球队: [Celta, La Coruna]}
+  - {名字: 瓦伦西亚德比, 英文名: Valencia derby, 类型: 同城, 球队: [Valencia, Levante]}
+  - {名字: 阿斯图里亚斯德比, 英文名: Asturian derby, 类型: 地区, 球队: [Oviedo, Sp Gijon]}
+  - {名字: 加那利德比, 英文名: Canary Islands derby, 类型: 地区, 球队: [Las Palmas, Tenerife]}
+
+  # ================= 德国 =================
+  - {名字: 鲁尔区德比, 英文名: Revierderby, 类型: 地区, 球队: [Dortmund, Schalke 04]}
+  - {名字: 德国国家德比, 英文名: Der Klassiker, 类型: 宿敌, 球队: [Bayern Munich, Dortmund]}
+  - {名字: 北方德比, 英文名: Nordderby, 类型: 地区, 球队: [Hamburg, Werder Bremen]}
+  - {名字: 莱茵德比, 英文名: Rhine derby, 类型: 地区, 球队: [FC Koln, M'gladbach]}
+  - {名字: 慕尼黑德比, 英文名: Munich derby, 类型: 同城, 球队: [Bayern Munich, Munich 1860]}
+  - {名字: 柏林德比, 英文名: Berlin derby, 类型: 同城, 球队: [Hertha, Union Berlin]}
+  - {名字: 汉堡德比, 英文名: Hamburg derby, 类型: 同城, 球队: [Hamburg, St Pauli]}
+  - {名字: 下萨克森德比, 英文名: Lower Saxony derby, 类型: 地区, 球队: [Hannover, Braunschweig]}
+  - {名字: 弗兰肯德比, 英文名: Frankenderby, 类型: 地区, 球队: [Nurnberg, Greuther Furth]}
+
+  # ================= 意大利 =================
+  - {名字: 米兰德比, 英文名: Derby della Madonnina, 类型: 同城, 球队: [Inter, Milan]}
+  - {名字: 罗马德比, 英文名: Derby della Capitale, 类型: 同城, 球队: [Lazio, Roma]}
+  - {名字: 都灵德比, 英文名: Derby della Mole, 类型: 同城, 球队: [Juventus, Torino]}
+  - {名字: 热那亚德比, 英文名: Derby della Lanterna, 类型: 同城, 球队: [Genoa, Sampdoria]}
+  - {名字: 意大利德比, 英文名: Derby d'Italia, 类型: 宿敌, 球队: [Inter, Juventus]}
+  - {名字: 西西里德比, 英文名: Sicilian derby, 类型: 地区, 球队: [Catania, Palermo]}
+  - {名字: 维罗纳德比, 英文名: Derby della Scala, 类型: 同城, 球队: [Verona, Chievo]}
+  - {名字: 太阳德比, 英文名: Derby del Sole, 类型: 宿敌, 球队: [Napoli, Roma]}
+
+  # ================= 法国 =================
+  - {名字: 法国国家德比, 英文名: Le Classique, 类型: 宿敌, 球队: [Paris SG, Marseille]}
+  - {名字: 罗讷河德比, 英文名: Derby du Rhône, 类型: 地区, 球队: [Lyon, St Etienne]}
+  - {名字: 北方德比（朗斯-里尔）, 英文名: Derby du Nord, 类型: 地区, 球队: [Lens, Lille]}
+  - {名字: 蔚蓝海岸德比, 英文名: Derby de la Côte d'Azur, 类型: 地区, 球队: [Monaco, Nice]}
+  - {名字: 布列塔尼德比（雷恩-南特）, 英文名: Derby breton, 类型: 地区, 球队: [Rennes, Nantes]}
+  - {名字: 科西嘉德比, 英文名: Corsican derby, 类型: 地区, 球队: [Bastia, Ajaccio]}
+  - {名字: 奥林匹克德比, 英文名: Olympico, 类型: 宿敌, 球队: [Marseille, Lyon]}
