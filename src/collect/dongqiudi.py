@@ -212,7 +212,11 @@ class Collector:
         else:
             status = "saved"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(gzip.compress(content, mtime=0))  # 原样压缩保存，不改内容
+        # 原样压缩保存，不改内容。先写临时文件再改名：中途断电或被停掉时，不会留下写了一半的文件
+        # （写了一半的文件下次会被当成“已有”跳过，那场比赛就永远缺了）
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_bytes(gzip.compress(content, mtime=0))
+        tmp.replace(target)
         self._record(url, data_type, status, http_status=200, path=target, content=content, note=problem)
         if status == "suspicious":
             log.warning("内容可疑（%s）：%s", problem, url)
@@ -312,8 +316,12 @@ class Collector:
                     n_live += 1
             log.info("%s：赛程 %d 场，赔率快照 %d 场，最终赔率检查 %d 场", lg, len(games), n_live, n_final)
 
-    def backfill(self, leagues: list[str], first: int, last: int | None = None, retry_bad=False):
-        """历史回补：已结束赛季用赛季页，当前赛季用赛程接口；每场比赛的最终赔率只抓一次。可以中途停，下次接着来。"""
+    def backfill(self, leagues: list[str], first: int, last: int | None = None, retry_bad=False,
+                 limit: int | None = None):
+        """历史回补：已结束赛季用赛季页，当前赛季用赛程接口；每场比赛的最终赔率只抓一次。可以中途停，下次接着来。
+
+        limit：小批量试验用，每个赛季最多新抓几场（已经有的不算）。不写就是全部。
+        """
         now = self.now()
         this = current_season(now)
         last = this if last is None else min(last, this)
@@ -330,8 +338,12 @@ class Collector:
                     log.info("%s %d/%d：历届赛季页里没有这个赛季，跳过", lg, y, y + 1)
                     continue
                 before = dict(self.counts)
+                fetched = 0  # 这次新请求了几场（已经有的跳过，不算）
                 for mid in ids:
-                    self.odds_final(lg, y, mid, retry_bad=retry_bad)
+                    if limit is not None and fetched >= limit:
+                        break
+                    if self.odds_final(lg, y, mid, retry_bad=retry_bad) != "skipped":
+                        fetched += 1
                 new = {k: v - before.get(k, 0) for k, v in self.counts.items() if v - before.get(k, 0)}
                 log.info("%s %d/%d：%d 场；这次 %s", lg, y, y + 1, len(ids),
                          "，".join(f"{STATUS_NAMES[k]} {v}" for k, v in new.items()) or "都已有")
@@ -385,6 +397,7 @@ def main():
     parser.add_argument("--from", dest="first", type=int, help="从哪个赛季开始（开始年份）")
     parser.add_argument("--to", dest="last", type=int, help="到哪个赛季为止（开始年份），不写就是到当前赛季")
     parser.add_argument("--retry-bad", action="store_true", help="以前“网站没有”“内容可疑”的也重新试一次")
+    parser.add_argument("--limit", type=int, help="小批量试验：回补时每个赛季最多新抓几场")
     args = parser.parse_args()
 
     s = load_settings()
@@ -400,7 +413,8 @@ def main():
         if args.mode == "upcoming":
             c.upcoming(leagues)
         elif args.mode == "backfill":
-            c.backfill(leagues, args.first or cfg["backfill_first_season"], args.last, retry_bad=args.retry_bad)
+            c.backfill(leagues, args.first or cfg["backfill_first_season"], args.last, retry_bad=args.retry_bad,
+                       limit=args.limit)
         else:
             import csv
             rows = c.probe(leagues, args.first or cfg["backfill_first_season"], cfg["probe_matches_per_season"])

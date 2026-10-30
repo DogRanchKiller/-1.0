@@ -277,3 +277,17 @@ def test_backfill_progress_report(env):
     assert run_state(con, clock.t + timedelta(hours=1))[0].startswith("没在运行")
     text = report(list(rows.values()), state, None, 5, clock.t)
     assert "还剩 1 场" in text and "懂球帝没有这个赛季" in text and "还没开始" in text
+
+
+def test_backfill_limit_and_no_half_files(env):
+    """小批量：每个赛季最多新抓 limit 场，再跑一次接着抓下一批；保存时不留临时文件。"""
+    con, site, clock, c, out = env
+    site.pages[HISTORY_URL.format(league_id=4)] = (200, HISTORY_HTML.encode())
+    site.pages[SEASON_URL.format(season_id=21198)] = (200, SEASON_HTML.encode())
+    for mid in (101, 102, 103):
+        site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
+    c.backfill(["E0"], 2023, 2023, limit=2)
+    assert sorted(p.name for p in (out / "odds_final/E0/2023").iterdir()) == ["101.json.gz", "102.json.gz"]
+    c.backfill(["E0"], 2023, 2023, limit=2)
+    assert sorted(p.name for p in (out / "odds_final/E0/2023").iterdir()) == ["101.json.gz", "102.json.gz", "103.json.gz"]
+    assert not list(out.rglob("*.tmp"))
