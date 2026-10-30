@@ -253,3 +253,27 @@ def test_requests_spaced_out(tmp_path):
     c.odds_live("E0", 1)
     c.odds_live("E0", 2)
     assert sleeps == [5]
+
+
+def test_backfill_progress_report(env):
+    """回补进度：已抓 = 有文件的 + 网站说没有的；不在历届列表里的赛季标“懂球帝没有”；全程不联网。"""
+    from src.jobs.dongqiudi_progress import report, run_state, season_rows
+    con, site, clock, c, out = env
+    site.pages[HISTORY_URL.format(league_id=4)] = (200, HISTORY_HTML.encode())
+    site.pages[SEASON_URL.format(season_id=21198)] = (200, SEASON_HTML.encode())
+    site.pages[ODDS_URL.format(match_id=101)] = (200, odds_json(101))
+    c.season_games("E0", 2023, c.history("E0")[2023])
+    c.odds_final("E0", 2023, 101)          # 有赔率
+    c.odds_final("E0", 2023, 102)          # 假网站返回 404：网站没有这场
+    n = len(site.requests)
+    rows = {r["赛季"]: r for r in season_rows(con, out, ["E0"], 2023, clock.t)}
+    assert len(site.requests) == n         # 查进度不发请求
+    assert (rows["2023/24"]["应有"], rows["2023/24"]["已抓"], rows["2023/24"]["有赔率"]) == (3, 2, 1)
+    assert rows["2024/25"]["懂球帝没有"]   # 历届列表里只有 2025/26 和 2023/24
+    assert rows["2025/26"]["应有"] is None and not rows["2025/26"]["懂球帝没有"]  # 赛季页还没抓
+    assert rows["2026/27"]["进行中"]
+    state, _ = run_state(con, clock.t + timedelta(minutes=1))
+    assert state == "正在运行"
+    assert run_state(con, clock.t + timedelta(hours=1))[0].startswith("没在运行")
+    text = report(list(rows.values()), state, None, 5, clock.t)
+    assert "还剩 1 场" in text and "懂球帝没有这个赛季" in text and "还没开始" in text
