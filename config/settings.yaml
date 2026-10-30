@@ -35,6 +35,22 @@ football_data:
 scrape:
   min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）
 
+# 懂球帝（赔率来源，需求文档 6.2）。采集程序 src/collect/dongqiudi.py，只存原始层，暂不进数据库
+dongqiudi:
+  min_interval_seconds: 5    # 两次请求至少隔几秒
+  # 懂球帝自己的联赛编号（从它的网页上查到的）。乙级联赛的编号还没找到，暂时只采五大联赛
+  league_ids: {E0: 4, SP1: 3, D1: 5, I1: 9, F1: 12}
+  # 赛程接口一次返回约 40~50 场；“即将开赛”模式往回看几天（补抓刚踢完比赛的最终赔率）、往后看几天
+  upcoming_lookback_days: 3
+  upcoming_ahead_days: 8
+  max_fixture_pages: 4       # 每个联赛每次最多翻几页赛程（防止翻页出错时一直请求）
+  fixtures_every_hours: 6    # 每个联赛的赛程每隔几小时才重新抓一次
+  # 赛前赔率快照的间隔：离开球越近抓得越勤。[离开球不到几小时, 至少隔几小时抓一次]，从近到远排
+  odds_snapshot_rules: [[6, 1], [48, 3], [192, 12]]
+  final_after_hours: 3       # 开球后几小时，比赛算踢完，抓一次“最终赔率”（以后不再变）
+  backfill_first_season: 2010  # 历史回补最早的赛季（试验发现 2014/15 及以前没有赔率，见 6.2.1）
+  probe_matches_per_season: 3  # 试验模式：每个赛季抽几场看有没有赔率
+
 inventory:
   full_coverage: 0.9         # 覆盖表里，一个赛季有数据的比赛占多少以上算“有”
 
