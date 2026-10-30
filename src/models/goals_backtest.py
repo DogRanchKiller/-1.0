@@ -189,7 +189,7 @@ def main() -> None:
     if comps:
         cmp = pd.concat(comps, ignore_index=True)
         cmp.to_csv(out / "compare_goals.csv", index=False, encoding="utf-8-sig", float_format="%.6f")
-        print("\n比较（差 = 新 − 旧，负数 = 新的更准）：")
+        print("\n比较（差 = 新 - 旧，负数 = 新的更准）：")
         print(cmp[["base", "new", "metric", "n", "base_mean", "new_mean", "diff", "ci_low", "ci_high", "verdict"]]
               .to_string(**fmt))
     print("\n耗时：", json.dumps(res.info["耗时"], ensure_ascii=False))
