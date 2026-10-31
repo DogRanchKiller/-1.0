@@ -143,6 +143,7 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         raise ValueError(f"一次回测里的模型要用同一种用途（现在是 {usages}），分开跑")
     usage = usages.pop()
     data = list(dict.fromkeys(d for m in models for d in m.data))
+    pre_data = list(dict.fromkeys(d for m in models for d in getattr(m, "pre_match_data", ())))
     comps = sorted(targets["competition"].unique())
 
     # 每场 × 每个时点的截止时间（取数层算，规则只在一处）
@@ -232,6 +233,9 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         info_cols = group.drop(columns=["horizon", "cutoff_utc"])
         if rest is not None:
             info_cols = rest.annotate(info_cols)
+        # 本场的赛前文件数据（例如步骤 7 的「伤停（研究）」）：有模型要（pre_match_data）才接，取数层按本场检查、按快照时间给数
+        if pre_data:
+            info_cols = fs.attach_pre_match(info_cols, cutoff, usage, pre_data)
         for m in models:
             preds = m.predict(info_cols, cutoff)
             if len(preds) != len(group):

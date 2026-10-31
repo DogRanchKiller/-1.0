@@ -25,11 +25,12 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.common.config import load_settings, resolve_path, season_role
 from src.features.errors import LookAheadError
-from src.features.known_time import compute_known_times, to_utc_text
+from src.features.known_time import TIME_FORMAT, compute_known_times, to_utc_text
 from src.features.usage import PAST, THIS, DataUsage, normalize_mode, season_label
 
 MARKETS = {"1x2", "ou", "ah"}  # 玩法：胜平负 / 大小球 / 亚盘（和 odds 表的写法一样）
@@ -256,19 +257,42 @@ class FeatureStore:
         df = self._query_past(cutoff, self._stats_groups([d for d in data if d not in files]), league=True,
                               competition=competition, since=since)
         for d in files:
-            df = self._join_file(df, d)
+            df = self._join_file(df, d, cutoff)
         return self._check_rows_mode(df, usage)
 
-    def _join_file(self, df: pd.DataFrame, data_type: str) -> pd.DataFrame:
+    def attach_pre_match(self, targets: pd.DataFrame, cutoff, usage: str, data) -> pd.DataFrame:
+        """给要预测的比赛（本场）接上文件里的赛前数据（例如「伤停（研究）」），返回 targets 加上这些列。
+
+        每一场都按“本场”检查：用途允许、运行模式允许这个赛季、赛前用途的截止时间早于开球（和取别的本场数据一样，见 _target）。
+        文件每行有自己的快照时间（as_of_utc）；截止时间早于快照时间的，那一行的数是空值（那时还不知道）。
+        现在只支持“什么时候能知道: 快照时间”的文件数据；数据库里的本场数据有各自的函数（例如 pre_match_odds）。
+        """
+        cutoff = to_utc_text(cutoff)
+        data = list(data)
+        for d in data:
+            if self.usage.item(d).get("什么时候能知道") != "快照时间" or "文件" not in self.usage.item(d):
+                raise ValueError(f"「{d}」不是按快照时间记的文件数据，不能用 attach_pre_match 取")
+        for mid in targets["match_id"]:
+            self._target(int(mid), cutoff, usage, data)
+        df = targets
+        for d in data:
+            df = self._join_file(df, d, cutoff)
+        return df
+
+    def _join_file(self, df: pd.DataFrame, data_type: str, cutoff: str) -> pd.DataFrame:
         """把不在数据库里的数据（例如 Understat xG（研究））按 match_id 接到已经取出来的比赛上，文件里没有的场次是空值。
 
-        为什么不会偷看未来：只接到“截止时间之前已经能知道比分”的那些行上，这些数据和比分一样是赛后才有的
-        （data_usage.yaml 里写的“什么时候能知道: 赛后”），比分能知道时它也能知道。本场的这类数据一律不给（本场: []）。
+        为什么不会偷看未来，看 data_usage.yaml 写的“什么时候能知道”：
+          赛后：只接到“截止时间之前已经能知道比分”的那些行上，这些数据和比分一样是赛后才有的，比分能知道时它也能知道。
+                本场的这类数据一律不给（本场: []）。
+          快照时间：文件每行有一列 as_of_utc（这一行的数是哪个时间点的情况）。截止时间早于 as_of_utc 的行，数一律变成空值；
+                接完把 as_of_utc 去掉。
         文件里的列名是 home_xg 这种，接上时换成 data_usage.yaml 写的列名（例如 us_home_xg），免得和数据库的列混在一起。
         """
         item = self.usage.item(data_type)
-        if item.get("什么时候能知道") != "赛后":
-            raise ValueError(f"「{data_type}」：文件里的数据现在只支持“赛后”能知道的")
+        rule = item.get("什么时候能知道")
+        if rule not in ("赛后", "快照时间"):
+            raise ValueError(f"「{data_type}」：文件里的数据现在只支持“赛后”“快照时间”能知道的")
         if data_type not in self._files:
             path = resolve_path(self.settings["paths"][item["文件"]])
             if not path.exists():
@@ -276,14 +300,27 @@ class FeatureStore:
             raw = pd.read_csv(path)
             prefix = item.get("列前缀", "")
             cols = {c: c[len(prefix):] if c.startswith(prefix) else c for c in self.usage.columns(data_type)}
-            missing = [f for f in cols.values() if f not in raw.columns]
+            keep = ["match_id", *cols.values()] + (["as_of_utc"] if rule == "快照时间" else [])
+            missing = [f for f in keep if f not in raw.columns]
             if missing or raw["match_id"].duplicated().any():
                 raise ValueError(f"「{data_type}」的文件 {path.name} 格式不对：缺列 {missing}，或者同一场出现了两次")
-            self._files[data_type] = raw[["match_id", *cols.values()]].rename(columns={v: k for k, v in cols.items()})
-        clash = [c for c in self._files[data_type].columns if c != "match_id" and c in df.columns]
+            table = raw[keep].rename(columns={v: k for k, v in cols.items()})
+            if rule == "快照时间":   # 统一成和截止时间一样的写法（UTC，到秒），才能直接比较文字
+                # utc=True：没写时区的当作 UTC；写了时区的（例如 +01:00）先换成 UTC 再写成文字，免得差一小时
+                table["as_of_utc"] = pd.to_datetime(table["as_of_utc"], errors="coerce", utc=True).dt.strftime(TIME_FORMAT)
+            self._files[data_type] = table
+        table = self._files[data_type]
+        clash = [c for c in table.columns if c not in ("match_id", "as_of_utc") and c in df.columns]
         if clash:
             raise ValueError(f"「{data_type}」的列 {clash} 和别的数据重名")
-        return df.merge(self._files[data_type], on="match_id", how="left")
+        out = df.merge(table, on="match_id", how="left")
+        if rule == "快照时间":
+            # 快照时间晚于截止时间（或者没写快照时间）的行：那时还不知道，数变成空值
+            unknown = ~(out["as_of_utc"].astype("string") <= cutoff).fillna(False).astype(bool)
+            value_cols = [c for c in table.columns if c not in ("match_id", "as_of_utc")]
+            out.loc[unknown, value_cols] = np.nan
+            out = out.drop(columns="as_of_utc")
+        return out
 
     def team_recent_matches(self, team: str, cutoff, usage: str, n: int, competition=None,
                             data=("比分",)) -> pd.DataFrame:
