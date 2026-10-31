@@ -253,3 +253,16 @@ def test_matrix_model_shows_line_shares(env):
     assert by_id[11]["model_lines"] == {"ah_home": None, "ou_over": None}  # 没有赔率就没有盘口
     page = render(res, s, NOW)
     assert "模型 50% / 50%" in page and "粗体的“模型”一行" in page and "还算不出来" not in page
+
+
+def test_page_uses_shared_dark_theme(env):
+    """深色主题、手机排版（需求文档第 8 节“风格”）：两页都用 src/web/theme.py；每一格都有手机上显示的名字。"""
+    _con, s = env
+    res = run_preview(env)
+    page = render(res, s, NOW)
+    assert 'name="viewport"' in page and "color-scheme: dark" in page
+    assert page.count("data-label='差距'") == len(res["rows"])                    # 每场一行
+    assert page.count("<tr class=has-gap") == sum(r["gap"] is not None for r in res["rows"])
+    for name in ("开球", "联赛", "比赛", "赔率概率", "差距", "亚盘", "大小球"):
+        assert f"data-label='{name}'" in page
+    assert "<script" not in page                                   # 只用样式，不用脚本

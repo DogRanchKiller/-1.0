@@ -30,6 +30,7 @@ from src.clean.dongqiudi_reader import BEIJING
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
 from src.jobs.dongqiudi_progress import run_state, season_rows
+from src.web.theme import BASE_CSS, VIEWPORT
 
 LEVEL_NAMES = {"ok": "正常", "warn": "注意", "error": "出错"}
 DATA_TYPE_NAMES = {"fixtures": "懂球帝 赛程", "odds_live": "懂球帝 赛前赔率快照", "odds_final": "懂球帝 赛后最终赔率",
@@ -325,16 +326,26 @@ def today_start(now: datetime) -> datetime:
 
 
 # ---------- 生成网页 ----------
-CSS = """
-body { font-family: "Microsoft YaHei", sans-serif; margin: 24px; color: #1f2d1f; background: #f4f8f4; }
-h1 { color: #1b5e20; } h2 { color: #2e7d32; margin-top: 28px; }
-table { border-collapse: collapse; background: #fff; margin: 8px 0; }
-th, td { border: 1px solid #c8dcc8; padding: 6px 10px; text-align: left; font-size: 14px; }
-th { background: #e3efe3; }
-.ok { color: #1b5e20; } .warn { color: #e65100; font-weight: bold; } .error { color: #c62828; font-weight: bold; }
-.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
-.dot.ok { background: #43a047; } .dot.warn { background: #fb8c00; } .dot.error { background: #e53935; }
-.small { color: #607060; font-size: 13px; } .url { word-break: break-all; font-size: 12px; }
+# 共用的颜色、字体、表格、卡片在 src/web/theme.py；这里只加这一页特有的
+CSS = BASE_CSS + """
+.ok { color: var(--green); } .warn { color: var(--amber); font-weight: 600; } .error { color: var(--red); font-weight: 600; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+.dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(52, 211, 153, .7); }
+.dot.warn { background: var(--amber); box-shadow: 0 0 8px rgba(251, 191, 36, .7); }
+.dot.error { background: var(--red); box-shadow: 0 0 8px rgba(248, 113, 113, .7); }
+.url { word-break: break-all; font-size: 12px; color: var(--sub); }
+td.name { white-space: nowrap; } td.level { white-space: nowrap; }
+/* 手机上“各项检查”不用左右滑：每项一块，名字和状态一行，说明在下面 */
+@media (max-width: 760px) {
+  table.checks tr:first-child { display: none; }
+  table.checks, table.checks tbody, table.checks tr, table.checks td { display: block; }
+  table.checks tr { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  table.checks tr:last-child { border-bottom: none; }
+  table.checks td { border: none; padding: 0; }
+  table.checks td.name, table.checks td.level { display: inline; }
+  table.checks td.level { margin-left: 8px; font-size: 13px; }
+  table.checks td.text { margin-top: 4px; color: var(--sub); font-size: 13.5px; }
+}
 """
 
 
@@ -351,12 +362,12 @@ def counts_html(table: dict[str, dict[str, int]]) -> str:
     for dtype in sorted(table):
         cells = "".join(f"<td>{table[dtype].get(s, '') or ''}</td>" for s in STATUS_NAMES)
         body += f"<tr><td>{e(DATA_TYPE_NAMES.get(dtype, dtype))}</td>{cells}</tr>"
-    return f"<table><tr><th>数据</th>{head}</tr>{body}</table>"
+    return f"<div class='card scroll'><table><tr><th>数据</th>{head}</tr>{body}</table></div>"
 
 
 def backfill_html(rows: list[dict]) -> str:
     """回补进度按联赛汇总一行（逐赛季的明细在 data/reports/dongqiudi_回补进度.md）。"""
-    out = "<table><tr><th>联赛</th><th>已结束赛季应有</th><th>已抓</th><th>有赔率</th><th>还没开始的赛季</th></tr>"
+    out = "<div class='card scroll'><table><tr><th>联赛</th><th>已结束赛季应有</th><th>已抓</th><th>有赔率</th><th>还没开始的赛季</th></tr>"
     for lg in dict.fromkeys(r["联赛"] for r in rows):
         rs = [r for r in rows if r["联赛"] == lg and not r["进行中"]]
         total = sum(r["应有"] or 0 for r in rs)
@@ -364,7 +375,7 @@ def backfill_html(rows: list[dict]) -> str:
         odds = sum(r["有赔率"] for r in rs)
         todo = sum(r["应有"] is None and not r["懂球帝没有"] for r in rs)
         out += f"<tr><td>{e(lg)}</td><td>{total}</td><td>{done}</td><td>{odds}</td><td>{todo or ''}</td></tr>"
-    return out + "</table>"
+    return out + "</table></div>"
 
 
 def listing_html(lst: Listing) -> str:
@@ -373,7 +384,7 @@ def listing_html(lst: Listing) -> str:
     if lst.rows:
         head = "".join(f"<th>{e(c)}</th>" for c in lst.columns)
         body = "".join("<tr>" + "".join(f"<td>{e(v)}</td>" for v in r) + "</tr>" for r in lst.rows)
-        out += f"<table><tr>{head}</tr>{body}</table>"
+        out += f"<div class='card scroll'><table><tr>{head}</tr>{body}</table></div>"
         more = f"，只列了前 {len(lst.rows)} {lst.unit}" if lst.total > len(lst.rows) else ""
         out += f"<p class='small'>一共 {lst.total} {lst.unit}{more}。</p>"
     elif not lst.errors:
@@ -385,22 +396,23 @@ def render_html(checks: list[Check], today: dict, day: dict, problems: list[tupl
                 now: datetime, lists: list[Listing] = ()) -> str:
     worst = max(checks, key=lambda c: ["ok", "warn", "error"].index(c.level)).level
     summary = {"ok": "一切正常", "warn": "有需要注意的地方", "error": "有地方出错了"}[worst]
-    items = "".join(f"<tr><td><span class='dot {c.level}'></span>{e(c.name)}</td>"
-                    f"<td class='{c.level}'>{e(LEVEL_NAMES[c.level])}</td><td>{e(c.text)}</td></tr>" for c in checks)
+    items = "".join(f"<tr><td class='name'><span class='dot {c.level}'></span>{e(c.name)}</td>"
+                    f"<td class='level {c.level}'>{e(LEVEL_NAMES[c.level])}</td><td class='text'>{e(c.text)}</td></tr>" for c in checks)
     probs = "".join(f"<tr><td>{e(bj(datetime.fromisoformat(p[0])))}</td><td>{e(p[1])}</td>"
                     f"<td>{e(DATA_TYPE_NAMES.get(p[2], p[2]))}</td><td>{e(STATUS_NAMES.get(p[3], p[3]))}</td>"
                     f"<td>{e(p[4])}</td><td class='url'>{e(p[5])}</td><td>{e(p[6])}</td></tr>" for p in problems)
-    probs_html = (f"<table><tr><th>时间</th><th>来源</th><th>数据</th><th>结果</th><th>状态码</th><th>网址</th>"
-                  f"<th>说明</th></tr>{probs}</table>") if problems else "<p class='small'>没有。</p>"
+    probs_html = (f"<div class='card scroll'><table><tr><th>时间</th><th>来源</th><th>数据</th><th>结果</th><th>状态码</th><th>网址</th>"
+                  f"<th>说明</th></tr>{probs}</table></div>") if problems else "<p class='small'>没有。</p>"
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="600">
-<title>足球预测 数据状态</title><style>{CSS}</style></head><body>
+{VIEWPORT}
+<title>足球预测 数据状态</title><style>{CSS}</style></head><body><div class="wrap">
 <h1>数据状态：<span class="{worst}">{summary}</span></h1>
 <p class="small">更新时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。
 这一页每小时自动重新生成一次，开着的话每 10 分钟自动刷新。它只是本机的一个文件，不连网。</p>
 <h2>各项检查</h2>
-<table><tr><th>项目</th><th>状态</th><th>说明</th></tr>{items}</table>
+<div class="card scroll"><table class="checks"><tr><th>项目</th><th>状态</th><th>说明</th></tr>{items}</table></div>
 <h2>今天的抓取次数（北京时间 0 点起）</h2>{counts_html(today)}
 <h2>最近 24 小时的抓取次数</h2>{counts_html(day)}
 <h2>最近 24 小时的问题</h2>{probs_html}
@@ -411,7 +423,7 @@ def render_html(checks: list[Check], today: dict, day: dict, problems: list[tupl
 <p class="small">逐赛季明细：data/reports/dongqiudi_回补进度.md（双击“查看懂球帝回补进度.bat”）。<br>
 “已保存”= 拿到了新内容存下来；“没变化”= 和上次一样，没重复存；“网站没有”= 懂球帝那边没有这场；
 “内容可疑”= 拿到的东西不像正常数据，单独存放不使用；“失败”= 没拿到（网络或网站问题）。</p>
-</body></html>
+</div></body></html>
 """
 
 
