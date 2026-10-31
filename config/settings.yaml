@@ -174,7 +174,8 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     dc_hl180: {dc: true, half_life_days: 180}
     dc_hl730: {dc: true, half_life_days: 730}
     dc_nodecay: {dc: true, half_life_days: null, window_days: 730}   # 不衰减：最近 2 年每场一样重
-    # 步骤 3：DC + 负二项（衰减设置跟步骤 2 留下的那组一样，步骤 2 做完后在这里填上，不另外试）
+    # 步骤 3：DC + 负二项（衰减设置跟步骤 2 留下的那组一样，不另外试）。
+    # 步骤 2 留下的是 dc（半衰期 365 天、窗口 4 年、收缩 3 = 上面的默认值），所以这里只开两个开关
     dcnb: {dc: true, nb: true}
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
