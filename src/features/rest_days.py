@@ -14,8 +14,11 @@
   已知的偏差：T-24 时，开球前 24 小时内踢的比赛（例如前一天晚上的杯赛）还不知道踢没踢，上一场会找成再前一场，休息天数偏多。
   训练用的历史比赛没有这个问题（那时赛程早就知道了），所以预测时少数比赛的休息天数和训练时的算法略有不同。
 
-三、怎么用（回测框架 src/evaluate/backtest.py）
-  每次截止时间往前走，就把新开球的赛程交给 add()；给模型的历史比赛、要预测的比赛先用 annotate() 加上上面四列。
+三、怎么用
+  回测框架 src/evaluate/backtest.py：每次截止时间往前走，就把新开球的赛程交给 add()；
+  给模型的历史比赛、要预测的比赛先用 annotate() 加上上面四列。
+  预测页 src/predict/preview.py：只有一个截止时间（“现在”），一次 add() 全部赛程，再 annotate()。
+  两边都用 from_settings() 造，设置一样；tests/test_preview.py 检查两边交给模型的数一样。
 """
 from __future__ import annotations
 
@@ -36,6 +39,12 @@ class RestDays:
         self.euro_within = int(euro_within_days)
         self.games: dict[str, list[tuple[int, int, str]]] = {}
         self.seen: set[int] = set()
+
+    @classmethod
+    def from_settings(cls, settings: dict) -> "RestDays":
+        """按 settings.yaml 的 rest_days 段造一个（回测和预测页共用，免得两边设置不一样）。"""
+        r = settings["rest_days"]
+        return cls(r["euro_competitions"], r["cap_days"], r["euro_within_days"])
 
     @staticmethod
     def _day(match_date) -> int:

@@ -311,6 +311,52 @@ def test_rest_days_after_euro_and_cutoff(fs):
     assert before == 1 and after == 2 and hist >= 1                  # T-24 一次；T-6、T-1 两次；进了历史
 
 
+class ShotsRestSpy(Spy):
+    """和 gb_l7 要的一样：比分 + 射门、射正，加休息天数。"""
+    name = "shots_rest_spy"
+    data = ("比分", "射门、xG")
+    uses_rest_days = True
+
+
+def test_preview_gives_model_same_inputs_as_backtest(fs, settings):
+    """预测页（src/predict/preview.py 的 model_inputs，实时模式、一次取完）和回测（一批一批取）
+    在同一个截止时间交给模型的历史比赛、要预测的比赛一样：同样的比赛、射门射正、休息天数、欧战后。
+    加一场欧冠，让 A 队的休息天数随截止时间变（同 test_rest_days_after_euro_and_cutoff）。"""
+    from src.predict.preview import model_inputs
+    c = fs.conn
+    c.execute("insert into teams (team_id, country) values ('X', 'Spain')")
+    c.execute("insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc,"
+              " status) values (2022990, 'UCL', 2022, 'A', 'X', '2022-08-12', '2022-08-12 19:00', 'finished')")
+    c.execute("update match_stats set home_shots = 10 + match_id % 7, away_shots = 8 + match_id % 5,"
+              " home_shots_on_target = 3 + match_id % 4, away_shots_on_target = 2 + match_id % 3")
+    c.commit()
+    fs.refresh()
+    spy = ShotsRestSpy()
+    run_backtest(fs, "E0", 2022, 2022, [spy], benchmark=False)
+    live = FeatureStore(c, "实时", settings)
+
+    def same(a, b):
+        assert set(b.columns) <= set(a.columns), set(b.columns) - set(a.columns)
+        cols = list(b.columns)
+        a = a[cols].sort_values("match_id").reset_index(drop=True)
+        b = b[cols].sort_values("match_id").reset_index(drop=True)
+        pd.testing.assert_frame_equal(a, b, check_dtype=False)
+
+    fits = predicts = 0
+    for kind, cutoff, df in spy.log:
+        if kind == "update":
+            continue
+        hist, targets = model_inputs(live, settings, spy, cutoff, "2023-07-01 00:00:00", ["E0"])
+        assert {"home_shots_on_target", "home_rest_days", "away_after_euro"} <= set(hist.columns)
+        if kind == "fit" and len(df):
+            same(df, hist)
+            fits += 1
+        elif kind == "predict":
+            same(df, targets[targets["match_id"].isin(df["match_id"])])
+            predicts += 1
+    assert fits >= 10 and predicts >= 30
+
+
 # ======================= 结果表、汇总、保存 =======================
 def test_results_table_summary_and_save(fs, settings, tmp_path):
     models = [build_model(n, settings) for n in ("frequency", "frequency_poisson", "elo")]

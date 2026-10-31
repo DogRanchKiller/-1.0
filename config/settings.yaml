@@ -98,15 +98,16 @@ status:
 preview:
   days_ahead: 7              # 显示未来几天开球的比赛
   leagues: top               # 哪一组联赛（leagues 段里的 top 五大联赛 / second 次级联赛）
-  model: dc                  # 用哪个模型（models 段里的名字）。2026-10-31 从 Elo 换成 dc，页面上仍标“临时模型”
-  # 页面上关于模型的说明，换模型时一起改。回测成绩：五大联赛 2005–2023 有平博收盘赔率的 21,733 场，T-24，胜平负 log loss
-  # （越小越准）；出处是进度记录“第 2 阶段步骤 1–3”的结果目录 g_step2（dc 0.98231，平博收盘 0.96293）
+  model: gb_l7               # 用哪个模型（models 段里的名字）。2026-10-31 从 Elo 换成 dc，同一天又换成 gb_l7（步骤 6 选出的），页面上仍标“临时模型”
+  # 页面上关于模型的说明，换模型时一起改。回测成绩：五大联赛 2014–2023 有平博收盘赔率的 18,083 场，T-24，胜平负 log loss
+  # （越小越准）；出处是进度记录“步骤 6”的结果目录 s6_eval 的 summary_vs_benchmark.csv（gb_l7 0.97888，平博收盘 0.96429）
   model_info:
-    label: Dixon-Coles
-    desc: 按以往比分估每队的进攻力和防守力，算出每种比分的概率
-    backtest_n: 21733
-    backtest_model: 0.982
-    backtest_pinnacle: 0.963
+    label: 梯度提升树 gb_l7
+    desc: 把动态实力评分、Elo、pi-rating、近期状态、射正、休息天数等一起交给一种“很多棵小决策树”的模型，先猜两队各进几球，再算胜平负
+    backtest_period: 2014–2023
+    backtest_n: 18083
+    backtest_model: 0.979
+    backtest_pinnacle: 0.964
   # 模型和赔率的概率差多少算“差距大”，在页面上标出来。0.10 = 10 个百分点。
   # 这是先定的一个数，没有用数据验证过；以后用回测看“差距大的场次”模型到底对不对，再调
   gap_threshold: 0.10
