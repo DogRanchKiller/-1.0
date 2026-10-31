@@ -2,6 +2,7 @@
 
 生成的是一个本机的静态文件（data/reports/preview.html），不开网站服务，别的电脑访问不到；
 没有详情页、动画、自动刷新（第 8 节：这些等第 6 阶段的正式网页）。
+样子（深色底、绿色、手机上一场一张卡片）用 src/web/theme.py 的共用样式。
 网页里的队名、公司名等文字都先转义（e 函数），防止里面的 < > & 之类的符号把网页弄乱。
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.clean.dongqiudi_reader import BEIJING
+from src.web.theme import BASE_CSS, VIEWPORT
 
 WEEKDAYS = "一二三四五六日"
 OUTCOMES = ("主胜", "平", "客胜")
@@ -20,21 +22,47 @@ STATUS_TAGS = {"postponed": "改期", "cancelled": "取消", "abandoned": "中�
 AH_NAMES = ["平手", "平半", "半球", "半一", "一球", "一球球半", "球半", "球半两球", "两球", "两球两球半", "两球半",
             "两球半三球", "三球"]
 
-CSS = """
-body { font-family: "Microsoft YaHei", sans-serif; margin: 24px; color: #1f2d1f; background: #f4f8f4; }
-h1 { color: #1b5e20; } h2 { color: #2e7d32; margin-top: 28px; }
-table { border-collapse: collapse; background: #fff; margin: 8px 0; }
-th, td { border: 1px solid #c8dcc8; padding: 6px 10px; text-align: left; font-size: 14px; vertical-align: top; }
-th { background: #e3efe3; }
-.small { color: #607060; font-size: 13px; } .muted { color: #9aa89a; }
-.note { background: #fff8e1; border: 1px solid #ffcc80; padding: 10px 14px; margin: 12px 0; font-size: 14px; }
-.tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; margin-left: 4px; }
-.tag.temp { background: #fff3e0; color: #e65100; border: 1px solid #ffb74d; }
-.tag.warn { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
-.gap { color: #e65100; font-weight: bold; }
-.bar { display: flex; width: 150px; height: 8px; margin-top: 4px; border-radius: 4px; overflow: hidden; }
-.bar span:nth-child(1) { background: #43a047; } .bar span:nth-child(2) { background: #bdbdbd; }
-.bar span:nth-child(3) { background: #1e88e5; }
+# 这一页特有的样子；共用的颜色、字体、表格、卡片在 src/web/theme.py
+CSS = BASE_CSS + """
+.bar { display: flex; width: 100%; max-width: 180px; height: 6px; margin-top: 6px; border-radius: 3px;
+       overflow: hidden; background: var(--line); gap: 2px; }
+.bar span { transition: width .6s ease; }
+.bar span:nth-child(1) { background: var(--green); } .bar span:nth-child(2) { background: var(--draw); }
+.bar span:nth-child(3) { background: var(--blue); }
+.legend { display: inline-flex; gap: 14px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.probs { white-space: nowrap; }
+td.match { font-weight: 600; font-size: 15px; }
+td.time { white-space: nowrap; color: var(--text); }
+.gap { display: inline-block; color: var(--lime); background: rgba(190, 242, 100, .1); font-weight: 600;
+       font-size: 13px; padding: 3px 10px; border-radius: 8px; border: 1px solid rgba(190, 242, 100, .35); }
+tr.has-gap td:first-child { box-shadow: inset 3px 0 0 var(--lime); }
+.model-line { color: var(--green); font-weight: 600; }
+td.time, td.league { white-space: nowrap; }
+/* 屏幕窄（手机、平板、窄窗口）时：表格变成一场一张卡片，两项并排；每一项上面写这一项叫什么（data-label） */
+@media (max-width: 1100px) {
+  .card:has(table.matches) { background: none; border: none; box-shadow: none; }
+  table.matches thead { display: none; }
+  table.matches, table.matches tbody { display: block; }
+  table.matches tr { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 18px;
+                     background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+                     padding: 16px 18px; margin-bottom: 12px; box-shadow: 0 6px 20px rgba(0, 0, 0, .3); }
+  table.matches tr:hover { background: var(--card); }
+  table.matches td { display: block; border: none; padding: 0; min-width: 0; }
+  table.matches td::before { content: attr(data-label); display: block; color: var(--faint); font-size: 11.5px;
+                             letter-spacing: .5px; margin-bottom: 2px; }
+  table.matches td.match { grid-column: 1 / -1; order: -2; font-size: 17px; padding-bottom: 8px;
+                           border-bottom: 1px solid var(--line); }
+  table.matches td.match::before { display: none; }
+  table.matches td.time, table.matches td.league { order: -1; }
+  tr.has-gap td:first-child { box-shadow: none; }
+  table.matches tr.has-gap { border-color: rgba(190, 242, 100, .45); box-shadow: inset 3px 0 0 var(--lime), 0 6px 20px rgba(0, 0, 0, .3); }
+  .bar { max-width: none; }
+}
+/* 手机：每行两项 */
+@media (max-width: 600px) {
+  table.matches tr { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 14px; }
+}
 """
 
 
@@ -69,7 +97,7 @@ def probs_cell(p) -> str:
         return "<span class='muted'>没算出来</span>"
     nums = " / ".join(pct(x) for x in p)
     bar = "".join(f"<span style='width:{x * 100:.1f}%'></span>" for x in p)
-    return f"{nums}<div class='bar'>{bar}</div>"
+    return f"<div><span class='probs'>{nums}</span><div class='bar'>{bar}</div></div>"
 
 
 def gap_cell(g, threshold: float) -> str:
@@ -90,8 +118,9 @@ def line_cell(m: dict | None, kind: str, model_share: float | None = None) -> st
     else:
         head = f"{m['line']:g} 球"
         body = f"大 {m['over']:.2f} / 小 {m['under']:.2f}<br>赔率 {pct(m['p_over'])} / {pct(m['p_under'])}"
-    model = "" if model_share is None else f"<br><b>模型 {pct(model_share)} / {pct(1 - model_share)}</b>"
-    return f"{head}<br><span class='small'>{body}，{m['n_books']} 家{model}</span>"
+    model = ("" if model_share is None
+             else f"<br><b class='model-line'>模型 {pct(model_share)} / {pct(1 - model_share)}</b>")
+    return f"<div>{head}<br><span class='small'>{body}，{m['n_books']} 家{model}</span></div>"
 
 
 def backtest_text(info: dict, label: str) -> str:
@@ -131,7 +160,7 @@ def time_cell(r: dict) -> str:
     return t.strftime("%H:%M") if t else "未定"
 
 
-def row_html(r: dict, threshold: float) -> str:
+def row_html(r: dict, threshold: float, label: str) -> str:
     tag = STATUS_TAGS.get(r.get("status"))
     tag_html = f"<span class='tag warn'>{e(tag)}</span>" if tag else ""
     match = (f"<span title='{e(r['home_team'])} 对 {e(r['away_team'])}'>{e(r['home_zh'])} 对 {e(r['away_zh'])}</span>"
@@ -141,11 +170,15 @@ def row_html(r: dict, threshold: float) -> str:
     if m["p_1x2"] is None:
         market = "<span class='muted'>还没有赔率</span>"
     else:
-        market = f"{probs_cell(m['p_1x2'])}<span class='small'>{m['n_books_1x2']} 家平均</span>"
-    return (f"<tr><td>{e(time_cell(r))}</td><td>{e(r['league'])}</td><td>{match}</td>"
-            f"<td>{probs_cell(r['model_p'])}</td><td>{market}</td><td>{gap_cell(r['gap'], threshold)}</td>"
-            f"<td>{line_cell(m['ah'], 'ah', lines.get('ah_home'))}</td>"
-            f"<td>{line_cell(m['ou'], 'ou', lines.get('ou_over'))}</td></tr>")
+        market = f"<div>{probs_cell(m['p_1x2'])}<span class='small'>{m['n_books_1x2']} 家平均</span></div>"
+    # data-label：手机上表格变成卡片时，写在每一项前面的名字（见 CSS 里的 @media）
+    cells = [("开球", "time", e(time_cell(r))), ("联赛", "league", e(r["league"])), ("比赛", "match", match),
+             (f"模型 {label}", "", probs_cell(r["model_p"])), ("赔率概率", "", market),
+             ("差距", "", gap_cell(r["gap"], threshold)),
+             ("亚盘", "", line_cell(m["ah"], "ah", lines.get("ah_home"))),
+             ("大小球", "", line_cell(m["ou"], "ou", lines.get("ou_over")))]
+    tds = "".join(f"<td data-label='{e(name)}'{f' class={cls}' if cls else ''}>{body}</td>" for name, cls, body in cells)
+    return f"<tr{' class=has-gap' if r['gap'] is not None else ''}>{tds}</tr>"
 
 
 def render(result: dict, settings: dict, now: datetime) -> str:
@@ -159,13 +192,16 @@ def render(result: dict, settings: dict, now: datetime) -> str:
     info = settings["preview"].get("model_info") or {}
     label = info.get("label") or result["model"]
     has_lines = any((r.get("model_lines") or {}).get(k) is not None for r in rows for k in ("ah_home", "ou_over"))
-    head = ("<tr><th>开球<br>（北京时间）</th><th>联赛</th><th>比赛（主 对 客）</th>"
+    head = ("<thead><tr><th>开球<br>（北京时间）</th><th>联赛</th><th>比赛（主 对 客）</th>"
             f"<th>模型 {e(label)}<span class='tag temp'>临时模型</span><br>主胜 / 平 / 客胜</th>"
-            "<th>赔率概率<br>主胜 / 平 / 客胜</th><th>差距</th><th>亚盘主盘口</th><th>大小球主盘口</th></tr>")
-    body = "".join(f"<h2>{e(title)}</h2><table>{head}{''.join(row_html(r, th) for r in grp)}</table>"
+            "<th>赔率概率<br>主胜 / 平 / 客胜</th><th>差距</th><th>亚盘主盘口</th><th>大小球主盘口</th></tr></thead>")
+    # 每一天一张卡片；卡片里是一张表，手机上每一行变成一张小卡片
+    body = "".join(f"<h2>{e(title)}<span class='small'>{len(grp)} 场</span></h2>"
+                   f"<div class='card'><table class='matches'>{head}"
+                   f"<tbody>{''.join(row_html(r, th, label) for r in grp)}</tbody></table></div>"
                    for (_k, title), grp in sorted(groups.items()))
     if not rows:
-        body = "<p>未来几天没有比赛（或者赛程还没导入）。</p>"
+        body = "<div class='note'>未来几天没有比赛（或者赛程还没导入）。</div>"
     changes = [r["market"]["last_change_utc"] for r in rows if r["market"]["last_change_utc"]]
     last_odds = to_bj(max(changes)) if changes else None
     n_model = sum(r["model_p"] is not None for r in rows)
@@ -173,11 +209,19 @@ def render(result: dict, settings: dict, now: datetime) -> str:
     n_gap = sum(r["gap"] is not None for r in rows)
     hist_last = result["hist_last_date"]
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>足球预测 预览版</title><style>{CSS}</style></head><body>
-<h1>五大联赛未来 {result['days_ahead']} 天 · 预测预览版</h1>
+{VIEWPORT}
+<title>足球预测 预览版</title><style>{CSS}</style></head><body><div class="wrap">
+<h1>五大联赛未来 {result['days_ahead']} 天 · <span class="accent">预测预览版</span></h1>
 <p class="small">生成时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。
 共 {len(rows)} 场：模型算出概率 {n_model} 场，有赔率 {n_market} 场，差距大 {n_gap} 场。
 这一页只是本机的一个文件，不连网，不会自动刷新；要看最新的，重新双击“查看预测预览.bat”。</p>
+<div class="stats"><div class="stat"><b>{len(rows)}</b><span>场比赛</span></div>
+<div class="stat"><b>{n_model}</b><span>模型算出</span></div>
+<div class="stat"><b>{n_market}</b><span>有赔率</span></div>
+<div class="stat hi"><b>{n_gap}</b><span>差距大</span></div></div>
+<p class="small legend"><span><i style="background:var(--green)"></i>主胜</span>
+<span><i style="background:var(--draw)"></i>平</span><span><i style="background:var(--blue)"></i>客胜</span>
+<span><i style="background:var(--lime)"></i>模型和赔率差距大（亮绿边）</span></p>
 <div class="note"><b>只给自己看，不是下注建议。</b>页面只显示“模型怎么看”和“赔率怎么看”，不推荐买哪一边。<br>
 <b>模型是临时的：</b>现在用 {e(label)}{f"（{e(info['desc'])}）" if info.get("desc") else ""}，不知道伤停、轮换、首发、天气。
 {backtest_text(info, label)}<br>
@@ -187,8 +231,7 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 <p class="small">模型版本 {e(result['model_version'])}；预测存进了预测存档（只加不删，以后复盘用）。
 赔率最后一次变动：{e(f"{last_odds:%m-%d %H:%M}") if last_odds else "没有"}（北京时间）。</p>
 {body}
-<h2>怎么看这张表</h2>
-<p class="small">
+<h2>怎么看这张表</h2><div class="note">
 “赔率概率”：懂球帝上各家公司现在的胜平负赔率，每家去掉抽水（按比例）换成概率，再几家取平均。<br>
 “差距”：模型和赔率概率在某个结果上差 {th * 100:.0f} 个百分点以上就标出来，只说明两边看法不同，不说明谁对。
 {th * 100:.0f} 个百分点这个界限是先定的，还没有用数据验证过。<br>
@@ -196,7 +239,7 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 和去掉抽水后两边的概率。平手、整数球和四分之一球有走盘（退钱）或赢一半，这个概率只是“不算走盘时哪边赢的机会”。
 {lines_text(has_lines)}<br>
 “时间待定”：网站还没公布具体开球时间，日期是“这一轮大约从哪天开始”。鼠标停在队名上能看到英文名。
-</p>
-<p class="small">数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk，最近几天的比分来自懂球帝。只供个人学习，不转发。</p>
-</body></html>
+</div>
+<footer class="small">数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk，最近几天的比分来自懂球帝。只供个人学习，不转发。</footer>
+</div></body></html>
 """

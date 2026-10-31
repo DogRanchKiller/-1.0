@@ -121,6 +121,7 @@ def test_html_escapes_outside_text(env):
     assert "script" not in p.tags and "b" not in p.tags
     assert "<script>alert(1)</script>" in p.text and "内容可疑" in p.text
     assert 'http-equiv="refresh"' in page
+    assert 'name="viewport"' in page and "color-scheme: dark" in page and "<script" not in page
     md = sp.render_markdown(checks, today, problems, NOW)
     assert "# 抓取日报 2026-10-31" in md and "内容可疑" in md
 
