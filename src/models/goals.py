@@ -363,29 +363,38 @@ def fit_targets(part: pd.DataFrame, target: str, coef: tuple[float, float] | Non
 
 
 def fit_rho(f: FitData, theta: np.ndarray) -> float:
-    """两步拟合的第 2 步：mu、home、a、d 固定（theta 是第 1 步的结果，不含 rho），只用真实比分找 rho。
-
-    λ 固定时，泊松那部分和 rho 无关，要最大化的只剩 Σ 权重 × log τ（4 个小比分格子的修正系数）。
-    rho 的范围：±RHO_LIMIT 和 rho_range（每场 4 个格子至少留 TAU_MIN）的交集。
-    """
+    """两步拟合的第 2 步：mu、home、a、d 固定（theta 是第 1 步的结果，不含 rho），只用真实比分找 rho。"""
     n = f.n_teams
     mu, home, a, d = theta[0], theta[1], theta[2:2 + n], theta[2 + n:2 + 2 * n]
     lh = np.exp(mu + home + a[f.hi] - d[f.ai])
     la = np.exp(mu + a[f.ai] - d[f.hi])
-    lo, hi = rho_range(np.concatenate([theta, [0.0]]), f)
+    return fit_rho_lambdas(lh, la, f.x, f.y, f.w)
+
+
+def fit_rho_lambdas(lh: np.ndarray, la: np.ndarray, x: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
+    """每场两队的预期进球（lh、la）已经定了，只用真实比分（x、y）和权重 w 找 DC 的 rho。
+    步骤 4 的两步拟合、步骤 5 的动态模型（src/models/dynamic.py）都用它。
+
+    λ 固定时，泊松那部分和 rho 无关，要最大化的只剩 Σ 权重 × log τ（4 个小比分格子的修正系数）。
+    rho 的范围：±RHO_LIMIT 和“每场 4 个格子至少留 TAU_MIN”（见 rho_range）的交集。
+    """
+    lh, la = np.asarray(lh, float), np.asarray(la, float)
+    x, y, w = np.asarray(x), np.asarray(y), np.asarray(w, float)
+    lo = float(np.max(np.maximum((TAU_MIN - 1) / lh, (TAU_MIN - 1) / la)))
+    hi = float(min(np.min((1 - TAU_MIN) / (lh * la)), 1 - TAU_MIN))
     lo, hi = max(lo, -RHO_LIMIT), min(hi, RHO_LIMIT)
     if lo >= hi:
         return 0.0
-    m00, m01 = (f.x == 0) & (f.y == 0), (f.x == 0) & (f.y == 1)
-    m10, m11 = (f.x == 1) & (f.y == 0), (f.x == 1) & (f.y == 1)
+    m00, m01 = (x == 0) & (y == 0), (x == 0) & (y == 1)
+    m10, m11 = (x == 1) & (y == 0), (x == 1) & (y == 1)
 
     def neg(rho):
-        tau = np.ones(len(f.x))
+        tau = np.ones(len(x))
         tau[m00] = 1 - lh[m00] * la[m00] * rho
         tau[m01] = 1 + lh[m01] * rho
         tau[m10] = 1 + la[m10] * rho
         tau[m11] = 1 - rho
-        return -float(np.sum(f.w * np.log(np.maximum(tau, TAU_FLOOR))))
+        return -float(np.sum(w * np.log(np.maximum(tau, TAU_FLOOR))))
 
     res = minimize_scalar(neg, bounds=(lo, hi), method="bounded", options={"xatol": 1e-7})
     return float(res.x)
