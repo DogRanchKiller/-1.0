@@ -166,8 +166,7 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
     # 每个截止时间都把新开球的赛程取进来（杯赛赛程周中才有，不能等“有新比分”才取），给历史比赛和要预测的比赛加上休息天数四列
     rest = None
     if any(getattr(m, "uses_rest_days", False) for m in models):
-        rcfg = settings["rest_days"]
-        rest = RestDays(rcfg["euro_competitions"], rcfg["cap_days"], rcfg["euro_within_days"])
+        rest = RestDays.from_settings(settings)
         # 只有“哪一轮”日期的杯赛，最早、最晚开球差 round_date_window_days 天；往回多取这么多再加 2 天，免得漏
         sched_margin = pd.Timedelta(days=float(settings["features"]["round_date_window_days"]) + 2)
         last_sched: str | None = None

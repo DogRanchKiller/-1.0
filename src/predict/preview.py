@@ -1,8 +1,8 @@
 """预测页预览版：算未来几天比赛的模型概率和赔率概率，存进预测存档，生成网页（需求文档第 8 节“早期简易页”）。
 
 做什么：
-1. 站在“现在”这个时间点（实时模式），通过取数层拿到现在之前已经能知道的比分，拟合模型
-   （settings.yaml 的 preview.model；2026-10-31 从 Elo 换成 dc，仍是临时模型）。
+1. 站在“现在”这个时间点（实时模式），通过取数层拿到现在之前已经能知道的比分（模型要的话还有射门、射正和
+   休息天数），拟合模型（settings.yaml 的 preview.model；2026-10-31 从 Elo 换成 dc，同一天又换成 gb_l7，仍是临时模型）。
 2. 取未来 N 天开球的联赛比赛，模型给出每场的主胜 / 平 / 客胜概率。
 3. 每场取懂球帝各家公司“现在”的赔率，去掉抽水后换成概率，几家公司取平均（叫“赔率概率”）。
    模型给比分矩阵时，再算模型在赔率的亚盘、大小球主盘口上的胜算，和赔率那边对比。
@@ -32,6 +32,7 @@ from src.common.markets import asian_handicap, over_under, result_probs
 from src.common.odds import devig
 from src.features import FeatureStore, open_readonly
 from src.features.known_time import to_utc_text
+from src.features.rest_days import RestDays
 from src.models.registry import build_model, model_config
 
 KIND = "preview"          # 预测存档里这一种预测的名字
@@ -144,6 +145,30 @@ def model_version(name: str, cfg: dict) -> str:
     return f"{name}-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
 
 
+def model_inputs(fs: FeatureStore, settings: dict, model, cutoff: str, end: str,
+                 leagues: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """交给模型的两张表：截止时间之前的历史比赛（训练用）、[cutoff, end) 开球的比赛（要预测的）。
+
+    和回测框架（src/evaluate/backtest.py 的 run_backtest）取数的方法一样，这样模型上线后看到的数和回测时一样：
+      - 用途按模型自己写的 usage（现在都是“A版输入”）；
+      - 数据种类按模型自己写的 data：例如 gb_l7 要 ('比分', '射门、xG')，就把射门、射正也取来；
+      - 模型要休息天数（uses_rest_days）时，取截止时间之前已经开球的全部赛程（联赛 + 杯赛、欧战），
+        给两张表都加上休息天数、欧战后四列（src/features/rest_days.py）。
+    回测是一个截止时间一个截止时间往前走、一批一批取；这里只有“现在”这一个截止时间，一次取完。
+    tests/test_backtest.py 的 test_preview_gives_model_same_inputs_as_backtest 检查同一个截止时间两边交给模型的数一样。
+    """
+    usage = getattr(model, "usage", "A版输入")
+    data = tuple(getattr(model, "data", ("比分",)))
+    hist = fs.historical_matches(cutoff, usage, competition=leagues, data=data)
+    targets = fs.prediction_targets(cutoff, end, "A版输入", competition=leagues)
+    if getattr(model, "uses_rest_days", False):
+        sched = fs.schedule(cutoff, "休息天数和欧战后标签")
+        rest = RestDays.from_settings(settings)
+        rest.add(sched)
+        hist, targets = rest.annotate(hist), rest.annotate(targets)
+    return hist, targets
+
+
 def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -> dict:
     """站在 now 这个时间点，算未来几天比赛的模型概率和赔率概率。不写数据库。
 
@@ -157,11 +182,10 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
     mcfg = model_config(name, settings)
     model = model or build_model(name, settings)
 
-    # 1. 截止“现在”已经能知道比分的比赛 → 拟合模型
-    hist = fs.historical_matches(cutoff, "A版输入", competition=list(leagues))
+    # 1~2. 截止“现在”已经能知道结果的比赛、未来几天开球的比赛（开球时间已经过了的不算），整理成和回测一样的样子
+    hist, targets = model_inputs(fs, settings, model, cutoff, end, list(leagues))
+    # 拟合模型，给每场出概率
     model.fit(hist, cutoff)
-    # 2. 未来几天开球的比赛（开球时间已经过了的不算）
-    targets = fs.prediction_targets(cutoff, end, "A版输入", competition=list(leagues))
     probs = model.predict(targets, cutoff) if len(targets) else []
 
     rows = []

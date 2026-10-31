@@ -23,6 +23,7 @@ from src.common.odds import devig
 from src.features import FeatureStore
 from src.predict.preview import (add_display_info, archive, build_preview, devig_1x2, gap, main_line, model_lines,
                                  market_summary, model_version, to_1x2)
+from src.models.registry import model_config
 from src.web.preview_page import ah_text, render
 
 NOW = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
@@ -207,7 +208,8 @@ def test_archive_insert_only_and_dedup(env):
     rows = con.execute("select prediction_id, p_home from predictions order by prediction_id").fetchall()
     assert rows[:3] == first and len(rows) == 6                              # 旧的行原样留着
     d = json.loads(con.execute("select detail from predictions where match_id = 10 limit 1").fetchone()[0])
-    assert d["代码版本"] == "abc1234" and d["赔率公司数"] == 2 and d["模型设置"]["dc"] is True   # 预览用 dc
+    assert d["代码版本"] == "abc1234" and d["赔率公司数"] == 2
+    assert d["模型设置"] == json.loads(json.dumps(model_config(_s["preview"]["model"], _s)))   # 存的是预览现在用的模型的设置
     assert d["亚盘主盘口"] == -0.5 and d["模型亚盘主队胜算"] is None       # 假模型只给胜平负，算不出盘口胜算
 
 
@@ -227,12 +229,15 @@ def test_render_escapes_and_labels(env):
     assert "时间待定" in page and "还没有赔率" in page and "主让半球" in page
     assert "推荐下注" not in page and "建议买" not in page
     assert "11 月 7 日 星期六" in page                                       # 2026-11-07 15:00 UTC = 北京 23:00
-    assert "模型 Dixon-Coles" in page and "Elo" not in page                  # 模型名字从 settings 读
+    info = s["preview"]["model_info"]
+    assert f"模型 {info['label']}" in page                                   # 模型名字、回测赛季从 settings 读
+    assert f"在 {info['backtest_period']} 赛季" in page and f"{info['backtest_n']:,} 场" in page
     assert "模型这两项还算不出来" in page                                     # 假模型只给胜平负
     s2 = copy.deepcopy(s)
     del s2["preview"]["model_info"]                                          # settings 里没写说明：用模型名字，不留空括号
     page = render(run_preview(env), s2, NOW)
-    assert "模型 dc" in page and "现在用 dc，" in page and "（）" not in page and "log loss 是" not in page
+    name = s["preview"]["model"]
+    assert f"模型 {name}" in page and f"现在用 {name}，" in page and "（）" not in page and "log loss 是" not in page
 
 
 class MatrixModel(FakeModel):

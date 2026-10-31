@@ -127,7 +127,9 @@ def backtest_text(info: dict, label: str) -> str:
     """模型的回测成绩那一句。settings.yaml 里没写回测成绩时不写这一句。"""
     if not all(info.get(k) for k in ("backtest_n", "backtest_model", "backtest_pinnacle")):
         return ""
-    return (f"在 2005–2023 赛季五大联赛有平博收盘赔率的 {int(info['backtest_n']):,} 场比赛上回测，"
+    # 回测用的赛季（settings 的 backtest_period）；没写就不写赛季，免得换了模型还显示旧模型的赛季
+    period = f"{e(info['backtest_period'])} 赛季" if info.get("backtest_period") else ""
+    return (f"在 {period}五大联赛有平博收盘赔率的 {int(info['backtest_n']):,} 场比赛上回测，"
             f"{e(label)} 的 log loss 是 {float(info['backtest_model']):.3f}，平博收盘赔率是 {float(info['backtest_pinnacle']):.3f}"
             f"（越小越准），也就是说模型还不如收盘赔率准。")
 
