@@ -213,3 +213,26 @@ def test_registry_builds_variants():
         assert isinstance(m, DynamicModel) and m.name == n
         assert m.q == cfg["q"] and m.per_match == cfg["per_match"]
     assert build_model("dyn_q1e4_b01").season_bump == 0.01
+
+
+def test_early_rounds_flags():
+    """前 10 轮 = 每个联赛每个赛季按开球时间排的前 球队数 ÷ 2 × 10 场；早年没有开球时间用比赛日期。"""
+    from src.evaluate.early_rounds import early_flags
+    rows = []
+    mid = 0
+    for comp, n_teams in [("E0", 4), ("D1", 6)]:
+        teams = [f"{comp}{i}" for i in range(n_teams)]
+        pairs = [(h, a) for h in teams for a in teams if h != a]
+        for k, (h, a) in enumerate(pairs[::-1]):              # 倒着编号，检查是按时间排、不是按编号排
+            mid += 1
+            day = pd.Timestamp("2015-08-01") + pd.Timedelta(days=k)
+            rows.append({"match_id": 1000 - mid, "competition": comp, "season": 2015, "home_team": h, "away_team": a,
+                         "match_date": day.strftime("%Y-%m-%d"),
+                         "kickoff_utc": None if comp == "E0" else (day + pd.Timedelta(hours=14)).strftime("%Y-%m-%d %H:%M:%S")})
+    pred = pd.DataFrame(rows + rows)                            # 同一场两行（两个模型）
+    f = early_flags(pred, rounds=2)                             # 只数前 2 轮，好检查
+    assert len(f) == len(rows)
+    for comp, n_first in [("E0", 4), ("D1", 6)]:               # 4 个队 → 4 ÷ 2 × 2 = 4 场；6 个队 → 6 场
+        g = pred[pred["competition"] == comp].drop_duplicates("match_id").sort_values("match_date")
+        assert f[g["match_id"]].tolist() == [True] * n_first + [False] * (len(g) - n_first)
+    assert early_flags(pred).all()                              # 前 10 轮：这么少的比赛全都算

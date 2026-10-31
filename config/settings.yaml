@@ -273,7 +273,8 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     dyn_q3e5_b01: {q: 3.0e-5, season_bump: 0.01}
     dyn_q1e4_b0: {q: 1.0e-4}
     dyn_q1e4_b01: {q: 1.0e-4, season_bump: 0.01}
-    # dyn_weekly（对照组）：选出的那组 q、b + per_match: false，选完再加在这里
+    # dyn_weekly（对照组）：2005–2013 选出的 dyn_q1e5_b01 那组 q、b，只是改成每周更新一次（per_match: false）
+    dyn_weekly: {q: 1.0e-5, season_bump: 0.01, per_match: false}
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。
