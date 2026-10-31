@@ -283,6 +283,19 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     dyn_q1e4_b01: {q: 1.0e-4, season_bump: 0.01}
     # dyn_weekly（对照组）：2005–2013 选出的 dyn_q1e5_b01 那组 q、b，只是改成每周更新一次（per_match: false）
     dyn_weekly: {q: 1.0e-5, season_bump: 0.01, per_match: false}
+  # 第 4 节步骤 5 补充：每队自己的变化速度（src/models/adaptive.py，原理见文件开头）。默认设置：
+  adaptive:
+    base: dyn_q1e5_b01        # 每个候选 dyn 的其余设置都和这一组一样（步骤 5 选出的），只有 q 不一样
+    candidates_q: [3.0e-6, 1.0e-5, 3.0e-5, 1.0e-4]   # 几个候选的 q（一个赛季实力大约变 0.03、0.055、0.095、0.17）
+    alpha: 0.98               # 权重每场先开 α 次方再归一（越小忘得越快；0.98 ≈ 35 场以前的表现剩一半分量）
+    per_team: true            # true：每队一套权重；false：一个联赛共用一套（对照组）
+  # 事先写下要试的设置（需求文档第 4 节“步骤 5 补充事先定的比较”）：2005–2013 选，2014–2023 和 dyn_q1e5_b01 比
+  adaptive_variants:
+    ada_a95: {alpha: 0.95}
+    ada_a98: {alpha: 0.98}
+    ada_a99: {alpha: 0.99}
+    # ada_league（对照组）：2005–2013 选出的 ada_a99 那组 α，一个联赛共用一套权重（和 dyn_weekly 一样，选完才加）
+    ada_league: {alpha: 0.99, per_team: false}
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。

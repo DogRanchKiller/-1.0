@@ -8,11 +8,14 @@
   poisson、dc、dcnb 等  models.goals_variants 里事先写好的泊松 / Dixon-Coles / DC + 负二项（src/models/goals.py），
                      默认设置在 models.goals，每组只写和默认不同的数
   dyn_q3e5_b0 等      models.dynamic_variants 里事先写好的动态实力模型（src/models/dynamic.py），默认设置在 models.dynamic
+  ada_a98 等          models.adaptive_variants 里事先写好的“每队自己的变化速度”（src/models/adaptive.py），
+                     默认设置在 models.adaptive；每个候选 dyn 的其余设置 = models.dynamic + adaptive.base 那一组
 加新模型：在这里加一个名字，回测框架不用改。
 """
 from __future__ import annotations
 
 from src.common.config import load_settings
+from src.models.adaptive import AdaptiveDynamicModel
 from src.models.base import Model
 from src.models.dynamic import DynamicModel
 from src.models.elo import EloModel
@@ -23,7 +26,7 @@ from src.models.goals import GoalsModel
 def available(settings: dict | None = None) -> list[str]:
     """所有能用的模型名字。"""
     s = (settings or load_settings())["models"]
-    return ["frequency", "frequency_poisson", "elo", *s.get("elo_variants", {}), *(s.get("goals_variants") or {}), *(s.get("dynamic_variants") or {})]
+    return ["frequency", "frequency_poisson", "elo", *s.get("elo_variants", {}), *(s.get("goals_variants") or {}), *(s.get("dynamic_variants") or {}), *(s.get("adaptive_variants") or {})]
 
 
 def model_config(name: str, settings: dict | None = None) -> dict:
@@ -43,6 +46,14 @@ def model_config(name: str, settings: dict | None = None) -> dict:
     if name in dyn:
         return {**s["dynamic"], **(dyn[name] or {}), "min_matches": s["min_matches"],
                 "max_goals": full["calc"]["max_goals"]}
+    ada = s.get("adaptive_variants") or {}
+    if name in ada:
+        a = {**s["adaptive"], **(ada[name] or {})}
+        base = a.pop("base")
+        cfg = {**s["dynamic"], **(dyn[base] or {}), **a, "min_matches": s["min_matches"],
+               "max_goals": full["calc"]["max_goals"]}
+        cfg.pop("q")                                     # q 由 candidates_q 给，不记一个用不上的数
+        return cfg
     raise ValueError(f"没有叫「{name}」的模型。能用的：{'、'.join(available(settings))}")
 
 
@@ -57,4 +68,6 @@ def build_model(name: str, settings: dict | None = None) -> Model:
         return GoalsModel(name=name, **cfg)
     if name in ((settings or load_settings())["models"].get("dynamic_variants") or {}):
         return DynamicModel(name=name, **cfg)
+    if name in ((settings or load_settings())["models"].get("adaptive_variants") or {}):
+        return AdaptiveDynamicModel(name=name, **cfg)
     return EloModel(name=name, **cfg)
