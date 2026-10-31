@@ -324,3 +324,64 @@ def test_data_usage_typo_is_caught(tmp_path, settings):
     text.write_text(raw.replace("本场: [评估, 机器人结算, 复盘]", "本场: [评估, 机器人结算, 复盘盘]"), encoding="utf-8")
     with pytest.raises(ValueError, match="不认识的用途"):
         DataUsage(settings, text)
+
+
+# ---------- 研究实验（Understat 镜像 xG，只在开发模式） ----------
+@pytest.fixture
+def research_settings(tmp_path, settings):
+    """把 Understat xG 文件换成测试用的：1 号、3 号有 xG，2 号没有。"""
+    f = tmp_path / "us.csv"
+    pd.DataFrame({"match_id": [1, 3], "home_xg": [1.7, 0.9], "away_xg": [0.4, 1.2],
+                  "home_npxg": [0.94, 0.9], "away_npxg": [0.4, 1.2], "home_shots": [12, 9]}).to_csv(f, index=False)
+    s = copy.deepcopy(settings)
+    s["paths"]["understat_xg"] = str(f)
+    return s
+
+
+def test_research_xg_joins_by_match_id(con, research_settings):
+    fs = FeatureStore(con, "开发", research_settings)
+    df = fs.historical_matches("2024-01-12", "研究实验", data=["比分", "射门、xG", "Understat xG（研究）"])
+    got = df.set_index("match_id")
+    assert ids(df) == [1, 2]
+    assert got.loc[1, "us_home_xg"] == 1.7 and got.loc[1, "us_home_npxg"] == 0.94
+    assert pd.isna(got.loc[2, "us_home_xg"])                       # 文件里没有的场次是空值
+    assert got.loc[1, "home_shots"] == 10                          # 数据库里的射门照样有，列名不冲突
+    assert "us_home_shots" not in df.columns and "home_shots" in df.columns
+    # 只要 Understat 一类也行
+    assert ids(fs.historical_matches("2024-01-20", "研究实验", data=["Understat xG（研究）"])) == [1, 2, 3]
+
+
+def test_research_xg_only_for_research(con, research_settings):
+    fs = FeatureStore(con, "开发", research_settings)
+    with pytest.raises(UsageNotAllowedError, match="不能用于「A版输入」"):
+        fs.historical_matches("2024-01-12", "A版输入", data=["Understat xG（研究）"])
+    with pytest.raises(UsageNotAllowedError):                      # 本场的 xG 任何用途都拿不到
+        fs.usage.check("Understat xG（研究）", THIS, "研究实验")
+
+
+@pytest.mark.parametrize("mode", ["考试", "实时"])
+def test_research_usage_only_in_dev_mode(con, research_settings, mode):
+    fs = FeatureStore(con, mode, research_settings)
+    with pytest.raises(UsageNotAllowedError, match="只能在开发模式"):
+        fs.historical_matches("2024-01-12", "研究实验", data=["比分"])
+    with pytest.raises(UsageNotAllowedError, match="只能在开发模式"):
+        fs.cutoff_before(3, 24, "研究实验")
+    with pytest.raises(UsageNotAllowedError, match="只能在开发模式"):
+        fs.prediction_targets("2024-01-01", "2024-02-01", "研究实验")
+
+
+def test_research_usage_cannot_be_listed_for_exam(tmp_path, settings):
+    from src.common.config import resolve_path
+    raw = resolve_path(settings["features"]["data_usage"]).read_text(encoding="utf-8")
+    old = "    exam: [A版输入, B版输入, 人工调整版, 休息天数和欧战后标签, 显示]"
+    assert old in raw
+    f = tmp_path / "x.yaml"
+    f.write_text(raw.replace(old, old.replace("显示]", "显示, 研究实验]")), encoding="utf-8")
+    with pytest.raises(ValueError, match="只在开发模式"):
+        DataUsage(settings, f)
+
+
+def test_historical_matches_without_stats_columns(dev):
+    """一类统计都不要时（data=()）也能取：只有比赛信息和挑出来的比分来源。"""
+    df = dev.historical_matches("2024-01-12", "A版输入", data=())
+    assert ids(df) == [1, 2] and set(df["stats_source"]) == {"football-data"}

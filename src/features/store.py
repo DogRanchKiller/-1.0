@@ -62,7 +62,8 @@ class FeatureStore:
         self.mode = normalize_mode(mode)
         self.settings = settings or load_settings()
         self.fs = self.settings["features"]
-        self.usage = DataUsage(self.settings)
+        self.usage = DataUsage(self.settings, mode=self.mode)
+        self._files: dict[str, pd.DataFrame] = {}   # 不在数据库里的数据（data_usage.yaml 里写了“文件”的），读一次就记住
         # 联赛代码：顶级 + 次级（从 settings.yaml 读，不写死）
         self.leagues = [code for group in self.settings["leagues"].values() for code in group]
         # 临时表名带一个随机标签：同一个连接上建两个 FeatureStore（例如一个开发模式、一个考试模式）也互不干扰
@@ -173,7 +174,7 @@ class FeatureStore:
         select, joins = [], []
         for i, (name, cols) in enumerate(groups):
             a = f"s{i}"
-            filled = " + ".join(f"(s2.{c} is not null)" for c in cols) or "0"
+            filled = " + ".join(f"(s2.{c} is not null)" for c in cols) or "null"   # 不能写 0：order by 0 会被当成“按第 0 列排”而报错
             joins.append(f"""
             left join match_stats {a}
               on {a}.match_id = m.match_id
@@ -251,8 +252,38 @@ class FeatureStore:
         data = list(data)
         for d in ["比赛信息", *data]:
             self.usage.check(d, PAST, usage)
-        df = self._query_past(cutoff, self._stats_groups(data), league=True, competition=competition, since=since)
+        files = [d for d in data if "文件" in self.usage.item(d)]
+        df = self._query_past(cutoff, self._stats_groups([d for d in data if d not in files]), league=True,
+                              competition=competition, since=since)
+        for d in files:
+            df = self._join_file(df, d)
         return self._check_rows_mode(df, usage)
+
+    def _join_file(self, df: pd.DataFrame, data_type: str) -> pd.DataFrame:
+        """把不在数据库里的数据（例如 Understat xG（研究））按 match_id 接到已经取出来的比赛上，文件里没有的场次是空值。
+
+        为什么不会偷看未来：只接到“截止时间之前已经能知道比分”的那些行上，这些数据和比分一样是赛后才有的
+        （data_usage.yaml 里写的“什么时候能知道: 赛后”），比分能知道时它也能知道。本场的这类数据一律不给（本场: []）。
+        文件里的列名是 home_xg 这种，接上时换成 data_usage.yaml 写的列名（例如 us_home_xg），免得和数据库的列混在一起。
+        """
+        item = self.usage.item(data_type)
+        if item.get("什么时候能知道") != "赛后":
+            raise ValueError(f"「{data_type}」：文件里的数据现在只支持“赛后”能知道的")
+        if data_type not in self._files:
+            path = resolve_path(self.settings["paths"][item["文件"]])
+            if not path.exists():
+                raise FileNotFoundError(f"「{data_type}」的文件不存在：{path}（先运行生成它的程序，见 data_usage.yaml 的来源）")
+            raw = pd.read_csv(path)
+            prefix = item.get("列前缀", "")
+            cols = {c: c[len(prefix):] if c.startswith(prefix) else c for c in self.usage.columns(data_type)}
+            missing = [f for f in cols.values() if f not in raw.columns]
+            if missing or raw["match_id"].duplicated().any():
+                raise ValueError(f"「{data_type}」的文件 {path.name} 格式不对：缺列 {missing}，或者同一场出现了两次")
+            self._files[data_type] = raw[["match_id", *cols.values()]].rename(columns={v: k for k, v in cols.items()})
+        clash = [c for c in self._files[data_type].columns if c != "match_id" and c in df.columns]
+        if clash:
+            raise ValueError(f"「{data_type}」的列 {clash} 和别的数据重名")
+        return df.merge(self._files[data_type], on="match_id", how="left")
 
     def team_recent_matches(self, team: str, cutoff, usage: str, n: int, competition=None,
                             data=("比分",)) -> pd.DataFrame:

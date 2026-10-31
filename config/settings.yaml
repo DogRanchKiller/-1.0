@@ -11,6 +11,9 @@ paths:
   teams: config/teams.yaml   # 球队对照表
   team_aliases_wikipedia: config/team_aliases_wikipedia.yaml  # 维基百科条目名 → teams.yaml 的球队
   bookmakers_dongqiudi: config/bookmakers_dongqiudi.yaml  # 懂球帝的公司名（打了星号）→ 我们的公司名
+  team_aliases_understat: config/team_aliases_understat.yaml  # Understat 镜像的队名 → teams.yaml 的球队
+  # Understat 镜像算出的每场 xG（只做研究实验，不进数据库；src/clean/understat_match.py 生成，见需求文档 6.1）
+  understat_xg: data/research/understat_xg.csv
   # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
   backup: D:/足球预测系统_备份
 

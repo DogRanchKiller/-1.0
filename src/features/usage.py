@@ -5,6 +5,7 @@
 1. 用途检查：这类数据在这个范围（以前的比赛 / 本场）允不允许这个用途。例如 A 版不能拿赔率。
 2. 阶段检查：有些数据要到某个阶段才能当模型输入。例如角球、黄牌第 10 阶段起。
 3. 模式检查：开发 / 考试 / 实时三种模式，各自能把哪类赛季的数据用在哪些用途上。
+   另外，标了“只在开发模式: 是”的用途（研究实验），考试、实时模式下一律不能用（构造时给了 mode 才查）。
 """
 from pathlib import Path
 
@@ -41,7 +42,9 @@ def season_label(season: int) -> str:
 class DataUsage:
     """数据用途字典。构造时读文件并检查文件本身写得对不对（用途名拼错、规则名不认识，都在这里就报出来）。"""
 
-    def __init__(self, settings: dict | None = None, path: Path | None = None):
+    def __init__(self, settings: dict | None = None, path: Path | None = None, mode: str | None = None):
+        # mode：用这个字典的程序在什么运行模式下（取数层会给）。给了就检查“只在开发模式”的用途
+        self.mode = normalize_mode(mode) if mode is not None else None
         self.settings = settings or load_settings()
         f = self.settings["features"]
         path = path or resolve_path(f["data_usage"])
@@ -56,6 +59,7 @@ class DataUsage:
     # ---------- 读文件时的自检 ----------
     def _validate(self, raw: dict) -> None:
         known = set(self.usages)
+        self.dev_only = {k for k, v in self.usages.items() if v.get("只在开发模式") == "是"}
         for name, item in self.data.items():
             for scope in (PAST, THIS):
                 if scope not in item:
@@ -73,6 +77,8 @@ class DataUsage:
                 allowed = known if value == "全部" else set(value)
                 if allowed - known:
                     raise ValueError(f"data_usage.yaml：运行模式「{zh}」的 {role} 里有不认识的用途 {sorted(allowed - known)}")
+                if mode != "dev" and value != "全部" and allowed & self.dev_only:
+                    raise ValueError(f"data_usage.yaml：运行模式「{zh}」里写了只在开发模式能用的用途 {sorted(allowed & self.dev_only)}")
                 self.modes[mode][role] = allowed
         if set(self.modes) != set(MODE_NAMES):
             raise ValueError("data_usage.yaml：“运行模式”要把 开发、考试、实时 三种都写上")
@@ -84,6 +90,10 @@ class DataUsage:
             raise UsageNotAllowedError(
                 f"用途「{usage}」不认识。取数据时必须声明用途，只能是：{'、'.join(self.usages)}"
                 f"（定义在 config/data_usage.yaml 的“用途”）")
+        if usage in self.dev_only and self.mode not in (None, "dev"):
+            raise UsageNotAllowedError(
+                f"不允许：用途「{usage}」只能在开发模式下用，现在是{MODE_NAMES[self.mode]}模式。\n"
+                f"  原因：{self.usages[usage].get('说明', '')}")
 
     def is_pre_match(self, usage: str) -> bool:
         """这个用途是不是“开球前做决定”（是的话，本场数据的截止时间必须早于开球）。"""
