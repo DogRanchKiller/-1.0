@@ -246,6 +246,34 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     # 实验二（A版输入，能上线的）：dc 就是上面那组
     dc_2s: {dc: true, two_stage: true}     # 只用来解释“两步”本身的影响
     dc_shots: {dc: true, target: shots}
+  # 第 4 节步骤 5：动态实力模型（src/models/dynamic.py，原理见文件开头）。下面是默认设置
+  dynamic:
+    q: 3.0e-5                # 每队 a、d 的方差每天加多少（越大 = 越相信实力变得快）
+    q_league: 1.0e-6         # mu、主场优势的方差每天加多少（很小，几乎不变，不另外试）
+    season_bump: 0           # 新赛季开始时，上赛季的队 a、d 的方差各加多少（休赛期转会、换帅）
+    promoted_var: 0.1        # 升班马 a、d 的初始方差（标准差约 0.32）
+    first_var: 0.1           # 联赛第一个赛季各队 a、d 的初始方差
+    first_var_mu: 0.1        # 联赛第一个赛季 mu 的初始方差
+    first_var_home: 0.05     # 联赛第一个赛季主场优势的初始方差
+    first_goals: 1.35        # 联赛第一个赛季的初始场均进球（每队），mu = log 1.35
+    first_home: 0.25         # 联赛第一个赛季的初始主场优势（e^0.25 ≈ 主队进球多 28%）
+    promoted_attack: -0.2    # 升班马先验的默认值（还没有往年升班马的记录时用），和 dc 一样
+    promoted_defence: -0.2
+    promoted_history_seasons: 3  # 升班马先验 = 最近 3 个赛季的升班马在赛季结束时的平均
+    burn_in_seasons: 2       # 每个联赛头两个赛季只用来让估计稳定，不出预测
+    window_days: 1461        # 拟合 rho 用最近 4 年的比赛（赛前的预期进球 + 真实比分）
+    half_life_days: 365      # 拟合 rho 的时间衰减，和 dc 一样
+    per_match: true          # true：每场赛后马上更新；false：只在每周拟合时把新比赛算进去（对照组）
+  # 事先写下要试的设置（需求文档第 4 节“步骤 5 事先定的比较”）：选的那段（2005–2013）里挑胜平负 log loss 最小的一组，
+  # 再在评的那段（2014–2023）和 dc 比
+  dynamic_variants:
+    dyn_q1e5_b0: {q: 1.0e-5}
+    dyn_q1e5_b01: {q: 1.0e-5, season_bump: 0.01}
+    dyn_q3e5_b0: {q: 3.0e-5}
+    dyn_q3e5_b01: {q: 3.0e-5, season_bump: 0.01}
+    dyn_q1e4_b0: {q: 1.0e-4}
+    dyn_q1e4_b01: {q: 1.0e-4, season_bump: 0.01}
+    # dyn_weekly（对照组）：选出的那组 q、b + per_match: false，选完再加在这里
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。
