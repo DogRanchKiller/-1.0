@@ -21,7 +21,7 @@ from src.common.config import load_settings
 from src.common.db import connect
 from src.common.odds import devig
 from src.features import FeatureStore
-from src.predict.preview import (add_display_info, archive, build_preview, devig_1x2, gap, main_line,
+from src.predict.preview import (add_display_info, archive, build_preview, devig_1x2, gap, main_line, model_lines,
                                  market_summary, model_version, to_1x2)
 from src.web.preview_page import ah_text, render
 
@@ -98,6 +98,23 @@ def test_to_1x2_accepts_matrix():
     m[1, 0], m[1, 1], m[0, 1] = 0.5, 0.3, 0.2     # 1:0 主胜、1:1 平、0:1 客胜
     assert to_1x2(m) == pytest.approx([0.5, 0.3, 0.2])
     assert to_1x2(None) is None and to_1x2([0.4, 0.3, 0.3]) == pytest.approx([0.4, 0.3, 0.3])
+
+
+def test_model_lines_from_matrix():
+    """比分矩阵 → 模型在赔率主盘口上的胜算；只给胜平负的模型、没有盘口时是 None。"""
+    m = np.zeros((4, 4))
+    m[2, 0], m[1, 0], m[1, 1], m[0, 1] = 0.3, 0.2, 0.3, 0.2
+    market = {"ah": {"line": -0.5}, "ou": {"line": 1.5}}
+    out = model_lines(m, market)
+    assert out["ah_home"] == pytest.approx(0.5)          # 主让半球：主队要赢球，2:0 + 1:0 = 50%
+    assert out["ou_over"] == pytest.approx(0.6)          # 大 1.5 球：总进球 2 个以上，2:0 + 1:1 = 60%
+    assert model_lines(m, {"ah": {"line": -0.25}, "ou": None})["ah_home"] == pytest.approx(0.5 / (0.5 + 0.2 + 0.15))
+    assert model_lines([0.5, 0.3, 0.2], market) == {"ah_home": None, "ou_over": None}
+    assert model_lines(None, market) == {"ah_home": None, "ou_over": None}
+    assert model_lines(m, {"ah": None, "ou": None}) == {"ah_home": None, "ou_over": None}
+    only_draw = np.zeros((2, 2))
+    only_draw[0, 0] = 1.0                                 # 平手盘只会 0:0：全部走盘，没有胜算
+    assert model_lines(only_draw, {"ah": {"line": 0}, "ou": None})["ah_home"] is None
 
 
 def test_ah_text():
@@ -190,7 +207,8 @@ def test_archive_insert_only_and_dedup(env):
     rows = con.execute("select prediction_id, p_home from predictions order by prediction_id").fetchall()
     assert rows[:3] == first and len(rows) == 6                              # 旧的行原样留着
     d = json.loads(con.execute("select detail from predictions where match_id = 10 limit 1").fetchone()[0])
-    assert d["代码版本"] == "abc1234" and d["赔率公司数"] == 2 and d["模型设置"]["k"] == 20
+    assert d["代码版本"] == "abc1234" and d["赔率公司数"] == 2 and d["模型设置"]["dc"] is True   # 预览用 dc
+    assert d["亚盘主盘口"] == -0.5 and d["模型亚盘主队胜算"] is None       # 假模型只给胜平负，算不出盘口胜算
 
 
 def test_archive_skips_rows_without_model(env):
@@ -209,3 +227,29 @@ def test_render_escapes_and_labels(env):
     assert "时间待定" in page and "还没有赔率" in page and "主让半球" in page
     assert "推荐下注" not in page and "建议买" not in page
     assert "11 月 7 日 星期六" in page                                       # 2026-11-07 15:00 UTC = 北京 23:00
+    assert "模型 Dixon-Coles" in page and "Elo" not in page                  # 模型名字从 settings 读
+    assert "模型这两项还算不出来" in page                                     # 假模型只给胜平负
+    s2 = copy.deepcopy(s)
+    del s2["preview"]["model_info"]                                          # settings 里没写说明：用模型名字，不留空括号
+    page = render(run_preview(env), s2, NOW)
+    assert "模型 dc" in page and "现在用 dc，" in page and "（）" not in page and "log loss 是" not in page
+
+
+class MatrixModel(FakeModel):
+    """假模型：每场都给同一个比分矩阵（像 dc 那样）。"""
+    def predict(self, targets, cutoff):
+        m = np.zeros((4, 4))
+        m[2, 0], m[1, 0], m[1, 1], m[0, 1] = 0.3, 0.2, 0.3, 0.2
+        return [m.copy() for _ in range(len(targets))]
+
+
+def test_matrix_model_shows_line_shares(env):
+    _con, s = env
+    res = run_preview(env, MatrixModel())
+    by_id = {r["match_id"]: r for r in res["rows"]}
+    assert by_id[10]["model_p"] == pytest.approx([0.5, 0.3, 0.2])
+    assert by_id[10]["model_lines"]["ah_home"] == pytest.approx(0.5)      # 主让半球
+    assert by_id[10]["model_lines"]["ou_over"] == pytest.approx(0.0)      # 大 2.75 球：这个矩阵最多 2 球，全输
+    assert by_id[11]["model_lines"] == {"ah_home": None, "ou_over": None}  # 没有赔率就没有盘口
+    page = render(res, s, NOW)
+    assert "模型 50% / 50%" in page and "粗体的“模型”一行" in page and "还算不出来" not in page

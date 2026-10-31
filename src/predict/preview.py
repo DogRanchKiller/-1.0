@@ -1,9 +1,11 @@
 """预测页预览版：算未来几天比赛的模型概率和赔率概率，存进预测存档，生成网页（需求文档第 8 节“早期简易页”）。
 
 做什么：
-1. 站在“现在”这个时间点（实时模式），通过取数层拿到现在之前已经能知道的比分，拟合模型（现在是 Elo，临时模型）。
+1. 站在“现在”这个时间点（实时模式），通过取数层拿到现在之前已经能知道的比分，拟合模型
+   （settings.yaml 的 preview.model；2026-10-31 从 Elo 换成 dc，仍是临时模型）。
 2. 取未来 N 天开球的联赛比赛，模型给出每场的主胜 / 平 / 客胜概率。
 3. 每场取懂球帝各家公司“现在”的赔率，去掉抽水后换成概率，几家公司取平均（叫“赔率概率”）。
+   模型给比分矩阵时，再算模型在赔率的亚盘、大小球主盘口上的胜算，和赔率那边对比。
 4. 模型和赔率的概率差得多的场次标出来（只是“两边看法不同”，不是下注建议）。
 5. 模型的预测存进预测存档（predictions 表，只加不改不删）；和上次存的一样就不重复存。
 6. 生成网页 data/reports/preview.html（只是本机一个文件，不连网，不开网站服务）。
@@ -26,7 +28,7 @@ import pandas as pd
 from src.clean.schema import create_tables
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
-from src.common.markets import result_probs
+from src.common.markets import asian_handicap, over_under, result_probs
 from src.common.odds import devig
 from src.features import FeatureStore, open_readonly
 from src.features.known_time import to_utc_text
@@ -113,6 +115,24 @@ def to_1x2(pred) -> list[float] | None:
     return [float(x) for x in (a if a.ndim == 1 else result_probs(a))]
 
 
+def model_lines(pred, market: dict) -> dict:
+    """模型在赔率那边的“主盘口”上怎么看：亚盘主队的胜算、大小球“大”的胜算。
+
+    只有给比分矩阵的模型（dc 等）才算得出来；只给胜平负三个概率的模型（Elo）或没有盘口时是 None。
+    胜算 = (赢 + 赢半×0.5) ÷ (赢 + 赢半×0.5 + 输 + 输半×0.5)，走盘不计（src/common/markets.py 的 win_share），
+    这样和赔率那边“不算走盘时哪边赢的机会”是同一个意思，两个数可以直接对比。
+    """
+    out = {"ah_home": None, "ou_over": None}
+    if pred is None or np.asarray(pred).ndim != 2:
+        return out
+    if market.get("ah"):
+        out["ah_home"] = asian_handicap(pred, market["ah"]["line"], "home")["win_share"]
+    if market.get("ou"):
+        out["ou_over"] = over_under(pred, market["ou"]["line"], "over")["win_share"]
+    # 全部都是走盘时没有胜算（nan），当作没算出来
+    return {k: None if v is None or np.isnan(v) else float(v) for k, v in out.items()}
+
+
 def text_or_none(x) -> str | None:
     """数据库里的空值读进来可能是 None，也可能是 NaN（不是数字），统一成 None。"""
     return None if x is None or (isinstance(x, float) and np.isnan(x)) else str(x)
@@ -154,7 +174,8 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
             "season": int(t["season"]), "home_team": t["home_team"], "away_team": t["away_team"],
             "kickoff_utc": text_or_none(t["kickoff_utc"]), "match_date": t["match_date"],
             "date_precision": text_or_none(t.get("date_precision")) or "day",
-            "model_p": mp, "market": market, "gap": gap(mp, market["p_1x2"], cfg["gap_threshold"])})
+            "model_p": mp, "model_lines": model_lines(p, market),
+            "market": market, "gap": gap(mp, market["p_1x2"], cfg["gap_threshold"])})
     return {"cutoff_utc": cutoff, "end_utc": end, "rows": rows, "model": name, "model_cfg": mcfg,
             "model_version": model_version(name, mcfg), "hist_n": int(len(hist)),
             "hist_last_date": hist["match_date"].max() if len(hist) else None,
@@ -220,9 +241,13 @@ def archive(con, result: dict, now: datetime, code: str | None = None) -> dict:
                 counts["没变化"] += 1
                 continue
             m = r["market"]
+            lines = r.get("model_lines") or {}
             detail = {"模型设置": result["model_cfg"], "代码版本": code, "拟合用的比赛场数": result["hist_n"],
                       "比分截至": result["hist_last_date"], "赔率概率": m["p_1x2"], "赔率公司数": m["n_books_1x2"],
-                      "赔率最后变动": m["last_change_utc"]}
+                      "赔率最后变动": m["last_change_utc"],
+                      # 模型在赔率主盘口上的胜算（只记下来；判断“和上次一样”仍只看胜平负和开球时间）
+                      "亚盘主盘口": m["ah"]["line"] if m["ah"] else None, "模型亚盘主队胜算": lines.get("ah_home"),
+                      "大小球主盘口": m["ou"]["line"] if m["ou"] else None, "模型大球胜算": lines.get("ou_over")}
             con.execute(
                 "insert into predictions (match_id, competition, season, home_team, away_team, kickoff_utc, match_date,"
                 " kind, model, model_version, cutoff_utc, created_at_utc, p_home, p_draw, p_away, detail)"

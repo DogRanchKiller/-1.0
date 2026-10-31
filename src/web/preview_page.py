@@ -79,18 +79,36 @@ def gap_cell(g, threshold: float) -> str:
     return f"<span class='gap'>模型{word}{OUTCOMES[g['outcome']]}，差 {abs(g['diff']) * 100:.0f} 个百分点</span>"
 
 
-def line_cell(m: dict | None, kind: str) -> str:
-    """让球 / 大小球：主盘口、几家平均赔率、去水后两边的概率。"""
+def line_cell(m: dict | None, kind: str, model_share: float | None = None) -> str:
+    """让球 / 大小球：主盘口、几家平均赔率、去水后两边的概率；模型算得出时，再加一行模型在这条盘口上的胜算。"""
     if m is None:
         return "<span class='muted'>没有</span>"
     if kind == "ah":
         num = "0" if m["line"] == 0 else f"{m['line']:+g}"
         head = f"{e(ah_text(m['line']))}（{num}）"
-        body = f"主 {m['home']:.2f} / 客 {m['away']:.2f}<br>{pct(m['p_home'])} / {pct(m['p_away'])}"
+        body = f"主 {m['home']:.2f} / 客 {m['away']:.2f}<br>赔率 {pct(m['p_home'])} / {pct(m['p_away'])}"
     else:
         head = f"{m['line']:g} 球"
-        body = f"大 {m['over']:.2f} / 小 {m['under']:.2f}<br>{pct(m['p_over'])} / {pct(m['p_under'])}"
-    return f"{head}<br><span class='small'>{body}，{m['n_books']} 家</span>"
+        body = f"大 {m['over']:.2f} / 小 {m['under']:.2f}<br>赔率 {pct(m['p_over'])} / {pct(m['p_under'])}"
+    model = "" if model_share is None else f"<br><b>模型 {pct(model_share)} / {pct(1 - model_share)}</b>"
+    return f"{head}<br><span class='small'>{body}，{m['n_books']} 家{model}</span>"
+
+
+def backtest_text(info: dict, label: str) -> str:
+    """模型的回测成绩那一句。settings.yaml 里没写回测成绩时不写这一句。"""
+    if not all(info.get(k) for k in ("backtest_n", "backtest_model", "backtest_pinnacle")):
+        return ""
+    return (f"在 2005–2023 赛季五大联赛有平博收盘赔率的 {int(info['backtest_n']):,} 场比赛上回测，"
+            f"{e(label)} 的 log loss 是 {float(info['backtest_model']):.3f}，平博收盘赔率是 {float(info['backtest_pinnacle']):.3f}"
+            f"（越小越准），也就是说模型还不如收盘赔率准。")
+
+
+def lines_text(has_lines: bool) -> str:
+    """“亚盘、大小球主盘口”那一列里，模型那一行怎么看。"""
+    if not has_lines:
+        return "模型这两项还算不出来（模型只给胜平负，要给比分概率的模型才算得出；或者这几场都还没开盘）。"
+    return ("粗体的“模型”一行：同一条盘口上，模型算出的两边胜算（从每种比分的概率算，赢半、输半算一半，走盘不计），"
+            "和上面赔率那一行是同一个意思，可以直接比。")
 
 
 def day_key(r: dict) -> tuple[str, str]:
@@ -119,13 +137,15 @@ def row_html(r: dict, threshold: float) -> str:
     match = (f"<span title='{e(r['home_team'])} 对 {e(r['away_team'])}'>{e(r['home_zh'])} 对 {e(r['away_zh'])}</span>"
              f"{tag_html}")
     m = r["market"]
+    lines = r.get("model_lines") or {}
     if m["p_1x2"] is None:
         market = "<span class='muted'>还没有赔率</span>"
     else:
         market = f"{probs_cell(m['p_1x2'])}<span class='small'>{m['n_books_1x2']} 家平均</span>"
     return (f"<tr><td>{e(time_cell(r))}</td><td>{e(r['league'])}</td><td>{match}</td>"
             f"<td>{probs_cell(r['model_p'])}</td><td>{market}</td><td>{gap_cell(r['gap'], threshold)}</td>"
-            f"<td>{line_cell(m['ah'], 'ah')}</td><td>{line_cell(m['ou'], 'ou')}</td></tr>")
+            f"<td>{line_cell(m['ah'], 'ah', lines.get('ah_home'))}</td>"
+            f"<td>{line_cell(m['ou'], 'ou', lines.get('ou_over'))}</td></tr>")
 
 
 def render(result: dict, settings: dict, now: datetime) -> str:
@@ -135,8 +155,12 @@ def render(result: dict, settings: dict, now: datetime) -> str:
     groups: dict[tuple[str, str], list] = {}
     for r in rows:
         groups.setdefault(day_key(r), []).append(r)
+    # 模型的名字、一句话说明、回测成绩都在 settings.yaml 的 preview.model_info，换模型时改那里
+    info = settings["preview"].get("model_info") or {}
+    label = info.get("label") or result["model"]
+    has_lines = any((r.get("model_lines") or {}).get(k) is not None for r in rows for k in ("ah_home", "ou_over"))
     head = ("<tr><th>开球<br>（北京时间）</th><th>联赛</th><th>比赛（主 对 客）</th>"
-            "<th>模型 Elo<span class='tag temp'>临时模型</span><br>主胜 / 平 / 客胜</th>"
+            f"<th>模型 {e(label)}<span class='tag temp'>临时模型</span><br>主胜 / 平 / 客胜</th>"
             "<th>赔率概率<br>主胜 / 平 / 客胜</th><th>差距</th><th>亚盘主盘口</th><th>大小球主盘口</th></tr>")
     body = "".join(f"<h2>{e(title)}</h2><table>{head}{''.join(row_html(r, th) for r in grp)}</table>"
                    for (_k, title), grp in sorted(groups.items()))
@@ -155,10 +179,9 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 共 {len(rows)} 场：模型算出概率 {n_model} 场，有赔率 {n_market} 场，差距大 {n_gap} 场。
 这一页只是本机的一个文件，不连网，不会自动刷新；要看最新的，重新双击“查看预测预览.bat”。</p>
 <div class="note"><b>只给自己看，不是下注建议。</b>页面只显示“模型怎么看”和“赔率怎么看”，不推荐买哪一边。<br>
-<b>模型是临时的：</b>现在只有 Elo（按以往比分给每队打实力分），不知道伤停、轮换、首发、天气。
-在 2005–2023 赛季五大联赛有平博收盘赔率的 21,733 场比赛上回测，Elo 的 log loss 是 0.987，平博收盘赔率是 0.963
-（越小越准），也就是说 Elo 还不如收盘赔率准。以后的泊松、DC 等模型做好后换掉它。<br>
-<b>比分截至 {e(hist_last)}：</b>Elo 用到这一天为止的比分（{result['hist_n']:,} 场）。
+<b>模型是临时的：</b>现在用 {e(label)}{f"（{e(info['desc'])}）" if info.get("desc") else ""}，不知道伤停、轮换、首发、天气。
+{backtest_text(info, label)}<br>
+<b>比分截至 {e(hist_last)}：</b>模型用到这一天为止的比分（{result['hist_n']:,} 场）。
 比分以 football-data.co.uk 为准，它每周只更新两三次；它还没更新的最近比赛（这次 {result.get('hist_n_dongqiudi', 0)} 场）
 先用懂球帝赛程里的比分，懂球帝赛程每 6 小时抓一次，所以一般赛后半天内就能算进去。</div>
 <p class="small">模型版本 {e(result['model_version'])}；预测存进了预测存档（只加不删，以后复盘用）。
@@ -171,7 +194,7 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 {th * 100:.0f} 个百分点这个界限是先定的，还没有用数据验证过。<br>
 “亚盘主盘口”“大小球主盘口”：各家公司开的盘口不一定一样，取开的公司最多的那条；下面是这几家的平均赔率（含本金），
 和去掉抽水后两边的概率。平手、整数球和四分之一球有走盘（退钱）或赢一半，这个概率只是“不算走盘时哪边赢的机会”。
-模型这两项还算不出来（Elo 只给胜平负），等有比分矩阵的模型。<br>
+{lines_text(has_lines)}<br>
 “时间待定”：网站还没公布具体开球时间，日期是“这一轮大约从哪天开始”。鼠标停在队名上能看到英文名。
 </p>
 <p class="small">数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk，最近几天的比分来自懂球帝。只供个人学习，不转发。</p>

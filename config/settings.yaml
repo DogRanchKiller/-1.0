@@ -95,7 +95,15 @@ status:
 preview:
   days_ahead: 7              # 显示未来几天开球的比赛
   leagues: top               # 哪一组联赛（leagues 段里的 top 五大联赛 / second 次级联赛）
-  model: elo                 # 用哪个模型（models 段里的名字）。现在只有 Elo，页面上标“临时模型”
+  model: dc                  # 用哪个模型（models 段里的名字）。2026-10-31 从 Elo 换成 dc，页面上仍标“临时模型”
+  # 页面上关于模型的说明，换模型时一起改。回测成绩：五大联赛 2005–2023 有平博收盘赔率的 21,733 场，T-24，胜平负 log loss
+  # （越小越准）；出处是进度记录“第 2 阶段步骤 1–3”的结果目录 g_step2（dc 0.98231，平博收盘 0.96293）
+  model_info:
+    label: Dixon-Coles
+    desc: 按以往比分估每队的进攻力和防守力，算出每种比分的概率
+    backtest_n: 21733
+    backtest_model: 0.982
+    backtest_pinnacle: 0.963
   # 模型和赔率的概率差多少算“差距大”，在页面上标出来。0.10 = 10 个百分点。
   # 这是先定的一个数，没有用数据验证过；以后用回测看“差距大的场次”模型到底对不对，再调
   gap_threshold: 0.10
