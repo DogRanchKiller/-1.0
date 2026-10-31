@@ -168,6 +168,11 @@ backtest:                    # 回测框架 src/evaluate/backtest.py（需求文
   window_start_md: "06-15"   # 按赛季取预测目标时，日期窗口从这年的几月几日开始（再按 season 列筛，窗口只是为了少查）
   window_end_md: "07-01"     # 窗口到下一年的几月几日（2019/20 疫情延期的赛季按 season 列筛，不受影响）
 
+rest_days:                   # 休息天数和“欧战后”标签（src/features/rest_days.py，需求文档第 4 节“步骤 6 怎么做”）
+  euro_competitions: [UCL, UEL, UECL]   # 哪几个赛事算“欧战”
+  euro_within_days: 4        # 上一场是欧战、而且隔了这么多天以内，才算“欧战后”
+  cap_days: 30               # 休息天数最多记多少天（休赛期、第一场都记这个数）
+
 compare:                     # 两个模型比较 src/evaluate/compare.py（第 5 节“怎么算真的更准”）
   n_boot: 2000               # bootstrap 重复抽样次数
   confidence: 0.95           # 可信区间的置信水平：95% 区间
@@ -296,6 +301,31 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     ada_a99: {alpha: 0.99}
     # ada_league（对照组）：2005–2013 选出的 ada_a99 那组 α，一个联赛共用一套权重（和 dyn_weekly 一样，选完才加）
     ada_league: {alpha: 0.99, per_team: false}
+  # 第 4 节步骤 6：特征表 + 梯度提升树（src/models/gbdt.py，原理见文件开头）。下面是默认设置
+  gbdt:
+    dyn: dyn_q1e5_b01         # 里面带的 dyn 用哪一组（步骤 5 选出的）
+    elo: elo_gd               # 里面带的 Elo 用哪一组（步骤 0 最好的）
+    pi: {lam: 0.035, gamma: 0.7, b: 10, c: 3, history_seasons: 3}   # pi-rating，原文的数，不调
+    form: {windows: [5, 10, 20], half_lives: [5, 20], within_days: 365}   # 近期状态：最近几场、时间衰减半衰期（场）、只看多少天以内
+    features: all             # all 全部特征 / nodyn 不给 dyn 的特征 / dynonly 只给 dyn 的特征（加联赛、主客场）
+    target: goals             # goals 预测每队进球（泊松）/ result 直接预测胜平负（多分类，只作对照）
+    num_leaves: 15            # 每棵树最多几片叶子（越多越复杂）
+    min_data_in_leaf: 100     # 每片叶子至少几行（越多越不容易“背答案”）
+    learning_rate: 0.03       # 每棵树的修正打几折（越小越稳，要的树越多）
+    feature_fraction: 0.8     # 每棵树随机用 80% 的特征
+    bagging_fraction: 0.8     # 每棵树随机用 80% 的行
+    lambda_l2: 1.0            # L2 正则：叶子上的数往 0 拉的力度
+    max_rounds: 2000          # 最多种几棵树
+    early_stopping_rounds: 50 # 验证集损失连续这么多棵不降就停
+    valid_days: 365           # 训练数据里最后多少天当验证集（只用来定种几棵树）
+    retrain_days: 91          # 每隔几天重新训练一次树（特征每场赛后都更新）
+    min_train_rows: 2000      # 训练行数少于这么多就不训练、不出预测
+    seed: 20261031            # 随机种子：每次运行结果一样
+  # 事先写下要试的设置（需求文档第 4 节“步骤 6 事先定的比较”）：2005–2013 选，2014–2023 和 dyn_q1e5_b01 比
+  gbdt_variants:
+    gb_l7: {num_leaves: 7, min_data_in_leaf: 200}
+    gb_l15: {num_leaves: 15, min_data_in_leaf: 100}
+    gb_l31: {num_leaves: 31, min_data_in_leaf: 50}
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。

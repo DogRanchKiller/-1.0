@@ -474,16 +474,25 @@ class FeatureStore:
 
         杯赛、欧战的赛程按数据用途字典只能用于「休息天数和欧战后标签」和「显示」：
         A 版要用，先在这里用「休息天数和欧战后标签」取出来算成休息天数，再把休息天数交给模型。
-        杯赛数据现在还没有（待定问题 5），先只返回联赛；以后导入后不用改这里。
         能知道的时间 = 最晚可能的开球时间（只有日期的杯赛按当天 24:00 英国时间算，宁晚勿早）。
         """
+        return self._schedule(cutoff, usage, team=team, include_cups=include_cups, since=since)
+
+    def schedule(self, cutoff, usage: str, since=None) -> pd.DataFrame:
+        """所有队截止时间之前已经开球的比赛日程（全部联赛 + 杯赛、欧战），规则和 team_schedule 一样，只是不按队筛。
+        回测给每场比赛算休息天数用（src/features/rest_days.py）：一次取一批，比一队一队取快得多。"""
+        return self._schedule(cutoff, usage, team=None, include_cups=True, since=since)
+
+    def _schedule(self, cutoff, usage: str, team: str | None, include_cups: bool, since) -> pd.DataFrame:
         cutoff = to_utc_text(cutoff)
         self.usage.check("比赛信息", PAST, usage)
         if include_cups:
             self.usage.check("杯赛欧战赛程", PAST, usage)
-        where = ["(m.home_team = ? or m.away_team = ?)", "k.kickoff_latest_utc <= ?",
-                 "m.status not in ('postponed', 'cancelled')"]
-        params: list = [team, team, cutoff]
+        where = ["k.kickoff_latest_utc <= ?", "m.status not in ('postponed', 'cancelled')"]
+        params: list = [cutoff]
+        if team is not None:
+            where.insert(0, "(m.home_team = ? or m.away_team = ?)")
+            params = [team, team, *params]
         if not include_cups:
             comp_sql, comp_params = self._competition_filter(None, league=True)
             where.append(comp_sql)

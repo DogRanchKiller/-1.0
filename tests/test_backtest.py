@@ -233,6 +233,50 @@ def test_elo_ratings_only_see_results_known_before_cutoff(fs, settings):
     assert elo.processed >= {m for m in known if m < 2022000}   # 上赛季的全部用上了
 
 
+class RestSpy(Spy):
+    name = "rest_spy"
+    uses_rest_days = True
+
+
+def expected_rest():
+    """手算：每队每场离上一场（改期没踢的不算）隔几天，最多 30；这个小联赛没有欧战，欧战后都是 0。"""
+    games = {}
+    for mid, _, _, h, a, day, _, status in MATCHES:
+        if status != "postponed":
+            for t in (h, a):
+                games.setdefault(t, []).append(pd.Timestamp(day))
+    out = {}
+    for mid, _, _, h, a, day, _, _ in MATCHES:
+        d = pd.Timestamp(day)
+        vals = []
+        for t in (h, a):
+            before = [g for g in games[t] if g < d]
+            vals.append(min((d - max(before)).days, 30) if before else 30)
+        out[mid] = vals
+    return out
+
+
+def test_rest_days_given_to_models_that_ask(fs):
+    """有模型说要休息天数（uses_rest_days）：历史比赛、要预测的比赛都带上四列，和手算的一样（改期那场之后的那轮休 14 天）。
+    同一次回测里所有模型拿到的是同一张表（不要的模型不看这几列就是了）；没有模型要时，照旧没有这几列。"""
+    spy, plain = RestSpy(), Spy()
+    run_backtest(fs, "E0", 2022, 2022, [spy, plain], benchmark=False)
+    exp = expected_rest()
+    n = 0
+    for kind, cutoff, df in spy.log:
+        assert not df.empty or kind == "update"
+        for mid, hr, ar, he, ae in df[["match_id", "home_rest_days", "away_rest_days", "home_after_euro",
+                                       "away_after_euro"]].itertuples(index=False, name=None):
+            assert [hr, ar] == exp[mid] and he == ae == 0
+            n += 1
+    assert any(14 in v for m, v in exp.items() if m // 1000 == 2022)    # 确实有改期造成的长休息
+    assert n > 100
+    assert all(a[2].equals(b[2]) for a, b in zip(spy.log, plain.log))
+    alone = Spy()
+    run_backtest(fs, "E0", 2022, 2022, [alone], benchmark=False)
+    assert all("home_rest_days" not in df for _, _, df in alone.log)
+
+
 # ======================= 结果表、汇总、保存 =======================
 def test_results_table_summary_and_save(fs, settings, tmp_path):
     models = [build_model(n, settings) for n in ("frequency", "frequency_poisson", "elo")]
