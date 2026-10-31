@@ -326,6 +326,10 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     gb_l7: {num_leaves: 7, min_data_in_leaf: 200}
     gb_l15: {num_leaves: 15, min_data_in_leaf: 100}
     gb_l31: {num_leaves: 31, min_data_in_leaf: 50}
+    # 对照组（2005–2013 选出 gb_l7 以后加的，树的大小都和 gb_l7 一样；需求文档第 4 节“步骤 6 怎么做”）
+    gb_nodyn: {num_leaves: 7, min_data_in_leaf: 200, features: nodyn}      # 不给 dyn 的特征
+    gb_1x2: {num_leaves: 7, min_data_in_leaf: 200, target: result}        # 直接出胜平负三个概率
+    gb_dynonly: {num_leaves: 7, min_data_in_leaf: 200, features: dynonly}  # 只给 dyn 的特征（加联赛、主客场）
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。

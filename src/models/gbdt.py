@@ -20,6 +20,7 @@
   - 训练用：从每个联赛第 3 个有数据的赛季起（前两季 dyn 还没稳定，和 dyn 出预测的规则一样）、截止前已经踢完的全部比赛。
   - 每 retrain_days 天（91 天）重新训练一次：先拿训练数据里最后 valid_days 天当验证集，找“种多少棵树”（验证集泊松损失
     early_stopping_rounds 轮不降就停），再用全部训练数据种这么多棵。两次训练之间，特征照样每场赛后更新。
+    分不出验证集（最后 valid_days 天没有比赛，或者之前的比赛不到 min_train_rows 行）就先不训练、不出预测。
   - 出预测：两行分别得到主队、客队预期进球，再用 dyn 这个联赛的 rho 做 DC 小比分修正，得到比分矩阵。
     只在 dyn 能出预测的比赛上出预测（两个模型比同一批比赛）。
   - target = result（对照组 gb_1x2）：每场只用主队那一行，直接输出胜平负三个概率（多分类）。
@@ -108,7 +109,9 @@ class GBDTModel(Model):
         if v is None:
             return None
         llh, lla, sdh, sda, hm = v
-        # Elo：和单独跑 Elo 出预测时一样，碰到新赛季先换赛季、给新队初始分（换赛季只用上赛季已经知道的结果）
+        # Elo：碰到新赛季先换赛季、给新队初始分（换赛季只用上赛季已经知道的结果，不偷看）。
+        # 和单独跑 Elo 有一点不同：单独跑的 Elo 拟合好“评分 → 概率”以后出预测时才换赛季，这里只要 dyn 能出预测就换。
+        # 所以上赛季的补赛如果在新赛季开始后才知道结果，这里的赛季基准可能和单独跑的差一点（极少见）
         self.elo.rating_diff(comp, season, home, away)
         base = self.elo.season_base.get((comp, self.elo.current_season.get(comp)), self.elo.initial)
         eh = self.elo.ratings.get((comp, home), base) - base
@@ -130,7 +133,12 @@ class GBDTModel(Model):
 
     # ---------------- 处理比赛结果 ----------------
     def _process(self, rows: pd.DataFrame) -> None:
-        """按开球顺序：每场先算赛前特征（存进训练表），再把比分交给 dyn、Elo、pi-rating、积分榜、近期状态。"""
+        """按开球顺序：每场先算赛前特征（存进训练表），再把比分交给 dyn、Elo、pi-rating、积分榜、近期状态。
+
+        同一时刻开球的几场（同一轮的同时开球、只有日期的比赛）：先把这几场的特征都算完，再一场一场更新。
+        否则 match_id 大的那场的特征会用到同时开球的别场的比分（积分榜名次、dyn 的联赛平均会动），
+        出预测时这些比分还不知道，训练和预测就对不上了。更新的顺序（开球时间、match_id）和单独跑 dyn、Elo 一样。
+        """
         if rows is None or rows.empty:
             return
         r = rows[rows["result"].notna() & rows["home_goals"].notna() & ~rows["match_id"].isin(self.processed)]
@@ -139,31 +147,42 @@ class GBDTModel(Model):
         r = r.sort_values(["kickoff_earliest_utc", "match_id"])
         num = {c: pd.to_numeric(r[c], errors="coerce").to_numpy(float) if c in r else np.full(len(r), np.nan)
                for c in SHOT_COLS + REST_COLS}
-        for k, (mid, comp, season, home, away, hg, ag, res, ko) in enumerate(r[
-                ["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
-                 "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None)):
-            mid, season, hg, ag = int(mid), int(season), int(hg), int(ag)
-            self.processed.add(mid)
-            feats = self._features(comp, season, home, away, ko, tuple(num[c][k] for c in REST_COLS))
-            # 特征算完，再更新（这场的比分不会进这场的特征）。dyn 的更新和单独跑 dyn 时 _process 做的一样
-            self.dyn.processed.add(mid)
-            lg = self.dyn._prepare(comp, season, home, away, ko)
-            if lg is not None:
-                self.dyn._observe(lg, ko, home, away, hg, ag)
-            self.elo.process_row(mid, comp, season, home, away, hg, ag, res, ko)
-            self.pi.observe(comp, season, home, away, hg, ag)
-            self.table.observe(comp, season, home, away, hg, ag)
-            day = _days(ko)
-            sh, sa = num["home_shots_on_target"][k], num["away_shots_on_target"][k]
-            self.form.observe(comp, home, day, hg, ag, sh, sa)
-            self.form.observe(comp, away, day, ag, hg, sa, sh)
-            lgs = self.dyn.leagues.get(comp)
-            if feats is None or lgs is None or season - lgs.first_season < self.dyn.burn_in_seasons:
-                continue
-            self.rows += [feats[0], feats[1]]
-            self.goals += [hg, ag]
-            self.results += [RESULT_INDEX[res]] * 2
-            self.kickoffs += [ko, ko]
+        items = list(r[["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
+                        "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None))
+        start = 0
+        while start < len(items):
+            end = start
+            while end < len(items) and items[end][8] == items[start][8]:   # 同一个开球时间的一组
+                end += 1
+            feats = [self._features(it[1], int(it[2]), it[3], it[4], it[8], tuple(num[c][k] for c in REST_COLS))
+                     for k, it in enumerate(items[start:end], start)]
+            for k, f in zip(range(start, end), feats):
+                self._observe_row(items[k], f, num["home_shots_on_target"][k], num["away_shots_on_target"][k])
+            start = end
+
+    def _observe_row(self, item, feats, sh, sa) -> None:
+        """一场比赛踢完：交给各个计算器更新，再把赛前特征存进训练表（这场的比分不会进这场的特征）。"""
+        mid, comp, season, home, away, hg, ag, res, ko = item
+        mid, season, hg, ag = int(mid), int(season), int(hg), int(ag)
+        self.processed.add(mid)
+        # dyn 的更新和单独跑 dyn 时 _process 做的一样
+        self.dyn.processed.add(mid)
+        lg = self.dyn._prepare(comp, season, home, away, ko)
+        if lg is not None:
+            self.dyn._observe(lg, ko, home, away, hg, ag)
+        self.elo.process_row(mid, comp, season, home, away, hg, ag, res, ko)
+        self.pi.observe(comp, season, home, away, hg, ag)
+        self.table.observe(comp, season, home, away, hg, ag)
+        day = _days(ko)
+        self.form.observe(comp, home, day, hg, ag, sh, sa)
+        self.form.observe(comp, away, day, ag, hg, sa, sh)
+        lgs = self.dyn.leagues.get(comp)
+        if feats is None or lgs is None or season - lgs.first_season < self.dyn.burn_in_seasons:
+            return
+        self.rows += [feats[0], feats[1]]
+        self.goals += [hg, ag]
+        self.results += [RESULT_INDEX[res]] * 2
+        self.kickoffs += [ko, ko]
 
     def update(self, new_rows: pd.DataFrame, cutoff: str) -> None:
         self._process(new_rows)
@@ -182,13 +201,13 @@ class GBDTModel(Model):
         names = [self.names[i] for i in self.use]
         cat = ["league"] if "league" in names else []
         valid = ko >= window_start(cutoff, self.valid_days)
-        best = self.max_rounds
-        if valid.sum() > 0 and (~valid).sum() >= self.min_train_rows:
-            dtr = lgb.Dataset(X[~valid], y[~valid], feature_name=names, categorical_feature=cat, free_raw_data=False)
-            dva = lgb.Dataset(X[valid], y[valid], reference=dtr, free_raw_data=False)
-            b = lgb.train(self.lgb_params, dtr, num_boost_round=self.max_rounds, valid_sets=[dva],
-                          callbacks=[lgb.early_stopping(self.early_stopping_rounds, verbose=False)])
-            best = max(int(b.best_iteration or self.max_rounds), 1)
+        if valid.sum() == 0 or (~valid).sum() < self.min_train_rows:
+            return                    # 分不出验证集就不知道种多少棵树：先不训练（不出预测），等数据够了再说
+        dtr = lgb.Dataset(X[~valid], y[~valid], feature_name=names, categorical_feature=cat, free_raw_data=False)
+        dva = lgb.Dataset(X[valid], y[valid], reference=dtr, free_raw_data=False)
+        b = lgb.train(self.lgb_params, dtr, num_boost_round=self.max_rounds, valid_sets=[dva],
+                      callbacks=[lgb.early_stopping(self.early_stopping_rounds, verbose=False)])
+        best = max(int(b.best_iteration or self.max_rounds), 1)
         dall = lgb.Dataset(X, y, feature_name=names, categorical_feature=cat, free_raw_data=False)
         self.booster = lgb.train(self.lgb_params, dall, num_boost_round=best)
         self.last_train = pd.Timestamp(cutoff)

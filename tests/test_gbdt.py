@@ -7,6 +7,7 @@
   - dyn 的“赛前看一眼”（pre_match_view）和真的走到开球后看状态完全一样（换赛季、升班马、补赛、挪平均值后都一样）；
   - 里面带的 dyn、Elo 和单独跑的完全一样；
   - 一场比赛的特征里没有这场自己的比分；出预测时算的特征和这场后来处理时存进训练表的一样；
+  - 同一时刻开球的几场，互相看不到对方的比分；
   - 只在 dyn 出预测的比赛上出预测，比分矩阵加起来是 1，同样的数据跑两次结果一样；胜平负对照组出三个概率；
   - 登记表能按名字造出来，里面 dyn 的设置和 dyn_q1e5_b01 一样。
 """
@@ -211,6 +212,32 @@ def test_features_never_see_own_result_and_predict_matches_training():
     n = 2 * int((order.loc[:k, "season"] >= 2019).sum())        # 2019 起才进训练表（前两季只让评分稳定）
     assert np.array_equal(np.vstack(a.rows[:n]), np.vstack(b.rows[:n]), equal_nan=True)
     assert not np.array_equal(np.vstack(a.rows[n:]), np.vstack(b.rows[n:]), equal_nan=True)
+
+
+def test_same_kickoff_matches_dont_see_each_other():
+    """同一时刻开球的两场：改其中一场的比分，另一场存进训练表的特征不变（出预测时两场的比分都还不知道）。
+    把模拟比赛里 k、k+1 两场挪到同一个开球时间，k 是 match_id 小的那场（先更新的）。
+    里面的 dyn、Elo 和单独跑的照样一样（更新顺序没变）。"""
+    h = promo_history()
+    order = h.sort_values(["kickoff_earliest_utc", "match_id"]).reset_index(drop=True)
+    k = 200
+    order.loc[k + 1, "kickoff_earliest_utc"] = order.loc[k, "kickoff_earliest_utc"]
+    assert order.loc[k, "match_id"] < order.loc[k + 1, "match_id"] and order.loc[k, "season"] >= 2019
+    changed = order.copy()
+    changed.loc[k, ["home_goals", "away_goals", "result"]] = [9, 0, "H"]
+    a, b = gb(), gb()
+    a.update(order, "2030-01-01 00:00:00")
+    b.update(changed, "2030-01-01 00:00:00")
+    n = 2 * int((order.loc[:k + 1, "season"] >= 2019).sum())      # k、k+1 两场的特征都在前 n 行里
+    assert np.array_equal(np.vstack(a.rows[:n]), np.vstack(b.rows[:n]), equal_nan=True)
+    assert not np.array_equal(np.vstack(a.rows[n:]), np.vstack(b.rows[n:]), equal_nan=True)
+    # 和单独跑的 dyn、Elo 一样
+    d, e = DynamicModel(**DYN), EloModel(**ELO)
+    d.update(order, "2030-01-01 00:00:00")
+    e.update(order, "2030-01-01 00:00:00")
+    assert a.elo.ratings == e.ratings
+    for c in d.leagues:
+        assert np.array_equal(a.dyn.leagues[c].m, d.leagues[c].m) and np.array_equal(a.dyn.leagues[c].P, d.leagues[c].P)
 
 
 def test_deterministic_and_1x2():

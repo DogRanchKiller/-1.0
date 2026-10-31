@@ -157,7 +157,10 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
 
     # 每场目标比赛的比分“什么时候能知道”：截止时间往前走，中间没有新结果能知道，就不用再去取数（省时间）
     known = np.sort(compute_known_times(targets, fs.fs)["result_known_utc"].to_numpy())
-    margin = pd.Timedelta(hours=float(settings["features"]["result_available_after_kickoff_hours"]) + 48)
+    # 增量取数往回多取一段（since 按最早开球筛，比分要到最晚开球 + 几小时才知道）：
+    # 只有“哪一轮”日期的比赛最早、最晚开球差 round_date_window_days 天，所以多取这么多天再加 2 天；取重了的按 match_id 去掉
+    margin = pd.Timedelta(days=float(settings["features"]["round_date_window_days"]) + 2,
+                          hours=float(settings["features"]["result_available_after_kickoff_hours"]))
 
     # 休息天数（需求文档第 4 节“步骤 6 怎么做”）：有模型要（uses_rest_days）才算。
     # 每个截止时间都把新开球的赛程取进来（杯赛赛程周中才有，不能等“有新比分”才取），给历史比赛和要预测的比赛加上休息天数四列
