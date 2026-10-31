@@ -184,6 +184,31 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     elo_k30: {k: 30}
     elo_gd: {goal_diff: true}
     elo_reg50: {season_regression: 0.5}
+  # 第 4 节步骤 1–3：泊松、Dixon-Coles、DC + 负二项（src/models/goals.py）。下面是默认设置，三个模型共用
+  goals:
+    dc: false                # true：Dixon-Coles 修正 0:0、1:0、0:1、1:1 四个小比分
+    nb: false                # true：进球数用负二项分布（比泊松多一个“离散度”，大比分可以更多）
+    window_days: 1461        # 只用截止前最近 4 年的比赛拟合
+    half_life_days: 365      # 时间衰减半衰期：1 年前的比赛算半场，2 年前算 1/4 场。null = 不衰减
+    ridge: 3                 # 收缩：每队的进攻力、防守力往中心拉的力度（越大越往联赛平均拉）
+    promoted_attack: -0.2    # 升班马先验的默认值（还没有往年升班马的拟合结果时用）：进攻力 −0.2 ≈ 进球少 18%
+    promoted_defence: -0.2   # 防守力 −0.2 ≈ 丢球多 22%
+    promoted_history_seasons: 3  # 升班马先验 = 最近 3 个赛季的升班马的平均
+  # 事先写下要试的设置（第 5 节：先写下要试哪几种，不临时加；比较规则见需求文档第 4 节“步骤 1–3 事先定的比较”）
+  goals_variants:
+    # 步骤 1：泊松
+    poisson: {}
+    poisson_ridge1: {ridge: 1}
+    poisson_ridge10: {ridge: 10}
+    # 步骤 2：Dixon-Coles，和泊松同样设置 + 时间衰减的几种速度
+    dc: {dc: true}
+    dc_hl90: {dc: true, half_life_days: 90}
+    dc_hl180: {dc: true, half_life_days: 180}
+    dc_hl730: {dc: true, half_life_days: 730}
+    dc_nodecay: {dc: true, half_life_days: null, window_days: 730}   # 不衰减：最近 2 年每场一样重
+    # 步骤 3：DC + 负二项（衰减设置跟步骤 2 留下的那组一样，不另外试）。
+    # 步骤 2 留下的是 dc（半衰期 365 天、窗口 4 年、收缩 3 = 上面的默认值），所以这里只开两个开关
+    dcnb: {dc: true, nb: true}
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。
