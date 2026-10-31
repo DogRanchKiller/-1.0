@@ -3,6 +3,7 @@
 检查的东西：
   - 只有一个候选、或几个候选的 q 都一样时，ada 的预测和 dyn 完全一样（有升班马、跨赛季也一样）；
   - 权重更新和手算的“先开 α 次方、再乘泊松概率、再归一”一样；
+  - 每个候选换一种“0 点”（a 整体加一个数、mu 减回去），平均出来的预期进球不变；
   - 一队实力中途突然变好：这队的权重偏向 q 大的候选，实力不变的队偏向 q 小的；
   - 升班马第一场之前权重回到 1/K；对照组（per_team = false）各队用联赛那一套；
   - 出预测不改状态；登记表能按名字造出来，比分矩阵加起来是 1。
@@ -86,6 +87,26 @@ def test_weight_update_by_hand():
         w = np.exp(0.9 * lw) * np.exp(hg * np.log(own[:, 0]) - own[:, 0] + ag * np.log(own[:, 1]) - own[:, 1])
         assert np.exp(m.logw["E0"][k]) == pytest.approx(w / w.sum(), rel=1e-9)
     assert m.rec["E0"][-1][3:] == (hg, ag)
+
+
+def test_mixing_ignores_how_each_candidate_sets_its_zero():
+    """把某个候选所有队的 a 都加 c、mu 减 c（d 同理），预期进球不变；平均出来的结果也必须不变（“0 = 平均”那一步的作用）。
+    权重要差得明显（q 差很多），这项检查才有意义。"""
+    h = promo_history(seasons=(2017, 2018, 2019))
+    m = AdaptiveDynamicModel(candidates_q=[1e-6, 1e-3], alpha=0.95, **KW)
+    m._process(h)
+    pairs = [("T3", "T4"), ("T5", "T9"), ("T8", "T2")]
+    before = [m._mixed("E0", 2019, a, b)[:2] for a, b in pairs]
+    assert np.abs(m._weights("E0", LEAGUE_KEY) - 0.5).max() > 0.05      # 权重确实不平均
+    lg = m.filters[1].leagues["E0"]
+    c, e = 0.3, -0.2
+    for t in lg.idx:
+        ia, idf = lg.pos(t)
+        lg.m[ia] += c
+        lg.m[idf] += e
+    lg.m[0] += e - c
+    for (a, b), x in zip(pairs, before):
+        assert np.allclose(m._mixed("E0", 2019, a, b)[:2], x, rtol=1e-12)
 
 
 def test_jump_team_prefers_fast_candidate():
