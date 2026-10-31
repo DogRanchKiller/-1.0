@@ -234,6 +234,18 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     # 步骤 3：DC + 负二项（衰减设置跟步骤 2 留下的那组一样，不另外试）。
     # 步骤 2 留下的是 dc（半衰期 365 天、窗口 4 年、收缩 3 = 上面的默认值），所以这里只开两个开关
     dcnb: {dc: true, nb: true}
+    # 步骤 4（需求文档第 4 节“步骤 4 事先定的比较”）。target：拟合实力时“进球”用什么；two_stage：rho 另外只用真实比分拟合；
+    # require：拟合只用这几类数据都齐的比赛（shots = 有射门、射正；understat = 有 Understat xG）。
+    # 实验一（研究实验，只在开发模式）：五组都只用“有 Understat xG 和射门”的比赛拟合，只差在用什么数据、分不分两步
+    e1_dc: {dc: true, usage: 研究实验}     # 平常的 dc（4 年窗口、全部比分），只作参考；用途要和同一次回测的其他组一样
+    e1_goals: {dc: true, usage: 研究实验, require: [understat, shots]}
+    e1_goals_2s: {dc: true, usage: 研究实验, require: [understat, shots], two_stage: true}
+    e1_shots: {dc: true, usage: 研究实验, require: [understat, shots], target: shots}
+    e1_xg: {dc: true, usage: 研究实验, require: [understat, shots], target: xg}
+    e1_mix: {dc: true, usage: 研究实验, require: [understat, shots], target: mix}
+    # 实验二（A版输入，能上线的）：dc 就是上面那组
+    dc_2s: {dc: true, two_stage: true}     # 只用来解释“两步”本身的影响
+    dc_shots: {dc: true, target: shots}
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。

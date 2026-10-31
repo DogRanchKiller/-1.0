@@ -19,6 +19,9 @@
   scores_matrix.csv       每场 × 有矩阵的模型：比分 log loss、预测的大比分概率、实际比分
   goals_calibration.csv   进球分布核对（每个模型 × 联赛，另有“全部”）
   compare_goals.csv       --pairs 的比较结果
+  shot_coefficients.csv   步骤 4：用射门推算进球的模型（target = shots）每次拟合每个联赛的 a、b
+步骤 4 的两个实验（需求文档第 4 节“步骤 4 事先定的比较”）也用这个入口，命令写在进度记录里。
+一次回测里的模型要用同一种用途：实验一的组都是“研究实验”，实验二的组都是“A版输入”，分开跑。
 """
 from __future__ import annotations
 
@@ -172,6 +175,14 @@ def main() -> None:
     scores.to_csv(out / "scores_matrix.csv", index=False, encoding="utf-8-sig", float_format="%.6f")
     calib = goals_calibration(scores)
     calib.to_csv(out / "goals_calibration.csv", index=False, encoding="utf-8-sig", float_format="%.5f")
+    # 步骤 4：用射门推算进球的模型，每次拟合每个联赛估出的 a（每个射正）、b（每个射偏）
+    coefs = [pd.DataFrame(m.coef_log).assign(model=m.name) for m in models if getattr(m, "coef_log", None)]
+    if coefs:
+        coef = pd.concat(coefs, ignore_index=True)
+        coef.to_csv(out / "shot_coefficients.csv", index=False, encoding="utf-8-sig", float_format="%.5f")
+        print("\n射门推算进球的系数（每次拟合的平均，按联赛）：")
+        print(coef.groupby(["model", "competition"])[["a_sot", "b_off"]].agg(["mean", "min", "max"]).round(3)
+              .to_string())
 
     per_match = pred[pred["horizon"] == first_hz][["match_id", "match_date", "model", "brier_over25", "brier_btts"]]
     per_match = per_match.merge(scores[["match_id", "model", "score_logloss"]], on=["match_id", "model"], how="left")

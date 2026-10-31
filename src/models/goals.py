@@ -47,6 +47,20 @@
   用 scipy 的 L-BFGS-B（一种只要“函数值 + 每个参数的斜率”的找最小值方法），斜率是手推公式算的（_nll），
   tests/test_goals_models.py 用“把参数挪一点点看函数变多少”的笨办法核对过公式。
   每周重新拟合时，从上一次的参数出发（球队大多不变），几十步就收敛。
+
+七、步骤 4：拟合实力时“进球”用什么（开关 target，需求文档第 4 节“步骤 4 事先定的比较”）
+  - goals：实际进球（默认，就是步骤 1–3 的模型，代码走原来那条路，结果一模一样）。
+  - shots：射门推算的进球 = a × 射正 + b × 射偏（射偏 = 射门 − 射正）。
+    a、b 每个联赛每次拟合单独估：窗口里的比赛、同样的时间权重，进球对射正、射偏做加权最小二乘（不带常数项）。
+    例：a = 0.33、b = 0.02，一队 5 个射正、8 个射偏 → 0.33×5 + 0.02×8 = 1.81 个“射门进球”。
+  - xg：Understat 的 xG（只能用“研究实验”用途，见 data_usage.yaml）。
+  - mix：0.5 × 实际进球 + 0.5 × xG。
+  不是整数的“进球”照样用泊松的式子拟合（x·log λ − λ 对小数也能算；log(x!) 换成 log Γ(x+1)，和参数无关，不影响结果）。
+  DC 的 rho 是关于“真实比分”的（0:0、1:1 多了多少），所以 target 不是 goals 时分两步（two_stage）：
+    第 1 步：不带 DC，用 target 拟合 mu、home、a、d；
+    第 2 步：固定这些，只用真实比分拟合 rho（同样有 rho 的合法范围）。
+  target = goals 也可以分两步（two_stage: true），用来分清“换了数据”和“改成两步”各自的影响。
+  require：拟合只用这几类数据都齐的比赛（例如实验一要求有 Understat xG），缺的不进拟合，不拿别的数据补。
 """
 from __future__ import annotations
 
@@ -54,7 +68,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 from scipy.special import gammaln
 
 from src.models.base import Model, window_start
@@ -299,6 +313,84 @@ def fit_league(f: FitData, start: np.ndarray, maxiter: int = 500) -> np.ndarray:
     return x
 
 
+# ======================= 步骤 4：拟合用的“进球”和两步拟合 =======================
+TARGETS = ("goals", "shots", "xg", "mix")
+# 每类“要求齐全”的数据 → 取数时要哪类数据（data_usage.yaml 的名字）、要哪几列都不是空的
+REQUIRE = {
+    "shots": ("射门、xG", ["home_shots", "away_shots", "home_shots_on_target", "away_shots_on_target"]),
+    "understat": ("Understat xG（研究）", ["us_home_xg", "us_away_xg"]),
+}
+TARGET_NEEDS = {"goals": [], "shots": ["shots"], "xg": ["understat"], "mix": ["understat"]}
+
+
+def shot_coefficients(part: pd.DataFrame, w: np.ndarray) -> tuple[float, float]:
+    """射门推算进球的 a、b：进球 ≈ a × 射正 + b × 射偏，主客两边都算一行，加权最小二乘（不带常数项）。
+
+    最小二乘的公式：[a, b] = (XᵀWX)⁻¹ XᵀWy，X 每行是 (射正, 射偏)，y 是进球，W 是时间权重。
+    射偏 = 射门 − 射正；个别场次数据里射门比射正少（录入错误），射偏按 0 算。
+    """
+    sot = np.concatenate([part["home_shots_on_target"], part["away_shots_on_target"]]).astype(float)
+    shots = np.concatenate([part["home_shots"], part["away_shots"]]).astype(float)
+    off = np.clip(shots - sot, 0, None)
+    goals = np.concatenate([part["home_goals"], part["away_goals"]]).astype(float)
+    ww = np.concatenate([w, w])
+    X = np.column_stack([sot, off])
+    a, b = np.linalg.solve(X.T @ (X * ww[:, None]), X.T @ (goals * ww))
+    return float(a), float(b)
+
+
+def fit_targets(part: pd.DataFrame, target: str, coef: tuple[float, float] | None = None
+                ) -> tuple[np.ndarray, np.ndarray]:
+    """拟合实力时两队的“进球”（主队、客队），每场一个数。shots 要先算好 a、b（coef）。"""
+    hg, ag = part["home_goals"].to_numpy(float), part["away_goals"].to_numpy(float)
+    if target == "goals":
+        return hg, ag
+    if target == "shots":
+        a, b = coef
+        def side(sot, shots):
+            sot, shots = part[sot].to_numpy(float), part[shots].to_numpy(float)
+            return a * sot + b * np.clip(shots - sot, 0, None)
+        x, y = side("home_shots_on_target", "home_shots"), side("away_shots_on_target", "away_shots")
+    elif target == "xg":
+        x, y = part["us_home_xg"].to_numpy(float), part["us_away_xg"].to_numpy(float)
+    elif target == "mix":
+        x = 0.5 * hg + 0.5 * part["us_home_xg"].to_numpy(float)
+        y = 0.5 * ag + 0.5 * part["us_away_xg"].to_numpy(float)
+    else:
+        raise ValueError(f"target 只能是 {TARGETS}，现在是 {target!r}")
+    # 泊松的式子要求“进球”不是负数。b 是负数时（射偏越多越少进），射正 0、射偏很多的一边会算出负数：按 0 算
+    return np.clip(x, 0, None), np.clip(y, 0, None)
+
+
+def fit_rho(f: FitData, theta: np.ndarray) -> float:
+    """两步拟合的第 2 步：mu、home、a、d 固定（theta 是第 1 步的结果，不含 rho），只用真实比分找 rho。
+
+    λ 固定时，泊松那部分和 rho 无关，要最大化的只剩 Σ 权重 × log τ（4 个小比分格子的修正系数）。
+    rho 的范围：±RHO_LIMIT 和 rho_range（每场 4 个格子至少留 TAU_MIN）的交集。
+    """
+    n = f.n_teams
+    mu, home, a, d = theta[0], theta[1], theta[2:2 + n], theta[2 + n:2 + 2 * n]
+    lh = np.exp(mu + home + a[f.hi] - d[f.ai])
+    la = np.exp(mu + a[f.ai] - d[f.hi])
+    lo, hi = rho_range(np.concatenate([theta, [0.0]]), f)
+    lo, hi = max(lo, -RHO_LIMIT), min(hi, RHO_LIMIT)
+    if lo >= hi:
+        return 0.0
+    m00, m01 = (f.x == 0) & (f.y == 0), (f.x == 0) & (f.y == 1)
+    m10, m11 = (f.x == 1) & (f.y == 0), (f.x == 1) & (f.y == 1)
+
+    def neg(rho):
+        tau = np.ones(len(f.x))
+        tau[m00] = 1 - lh[m00] * la[m00] * rho
+        tau[m01] = 1 + lh[m01] * rho
+        tau[m10] = 1 + la[m10] * rho
+        tau[m11] = 1 - rho
+        return -float(np.sum(f.w * np.log(np.maximum(tau, TAU_FLOOR))))
+
+    res = minimize_scalar(neg, bounds=(lo, hi), method="bounded", options={"xatol": 1e-7})
+    return float(res.x)
+
+
 # ======================= 模型 =======================
 class GoalsModel(Model):
     """泊松 / Dixon-Coles / DC + 负二项（看 dc、nb 两个开关）。每个联赛一套参数，每周重新拟合（回测框架调 fit）。"""
@@ -306,9 +398,24 @@ class GoalsModel(Model):
     def __init__(self, name: str = "poisson", dc: bool = False, nb: bool = False, window_days: float = 1461,
                  half_life_days: float | None = 365, ridge: float = 3.0, promoted_attack: float = -0.2,
                  promoted_defence: float = -0.2, promoted_history_seasons: int = 3, min_matches: int = 200,
-                 max_goals: int = 10):
+                 max_goals: int = 10, target: str = "goals", two_stage: bool = False, require=(),
+                 usage: str = "A版输入"):
         self.name = name
         self.dc, self.nb = bool(dc), bool(nb)
+        # ---- 步骤 4 的开关（见文件开头第七部分） ----
+        if target not in TARGETS:
+            raise ValueError(f"target 只能是 {TARGETS}，现在是 {target!r}")
+        self.target = target
+        self.two_stage = bool(two_stage) or target != "goals"     # 不用实际进球时一定分两步（rho 只看真实比分）
+        if self.nb and self.two_stage:
+            raise ValueError("负二项只支持 target = goals、一次拟合（离散度 α 是关于真实进球数的）")
+        self.require = list(dict.fromkeys([*require, *TARGET_NEEDS[target]]))
+        unknown = [r for r in self.require if r not in REQUIRE]
+        if unknown:
+            raise ValueError(f"require 只能是 {list(REQUIRE)}，现在有 {unknown}")
+        self.data = ("比分", *(REQUIRE[r][0] for r in self.require))
+        self.usage = usage
+        self.coef_log: list[dict] = []       # target = shots 时每次拟合每个联赛的 a、b（回测完存下来给人看）
         self.window_days = float(window_days)
         self.half_life_days = None if half_life_days is None else float(half_life_days)
         self.ridge = float(ridge)
@@ -334,8 +441,10 @@ class GoalsModel(Model):
         old = self.fits.get(comp)
         if old is None:
             return self.prior.get(comp, self.promoted_default)
+        # 按队名排好再求平均：集合（set）的顺序每次运行可能不同，加法顺序不同，最后几位小数就会差一点，
+        # 回测结果会在 0.0001 左右来回变（2026-10-31 发现）；排好序后每次都完全一样
         vals = [(old["a"][t], old["d"][t]) for s in range(season - self.promoted_history_seasons, season)
-                for t in self._promoted(comp, s) if t in old["a"]]
+                for t in sorted(self._promoted(comp, s)) if t in old["a"]]
         if not vals:
             return self.prior.get(comp, self.promoted_default)
         a, d = np.mean(vals, axis=0)
@@ -351,6 +460,13 @@ class GoalsModel(Model):
         for (comp, season), part in h.groupby(["competition", "season"]):
             self.members[(comp, int(season))] = set(part["home_team"]) | set(part["away_team"])
         recent = h[h["kickoff_earliest_utc"] >= window_start(cutoff, self.window_days)]
+        # require：缺这几类数据的比赛不进拟合（球队名单、升班马还是按上面全部比分认，那个和拟合用什么无关）
+        for r in self.require:
+            cols = REQUIRE[r][1]
+            missing = [c for c in cols if c not in recent.columns]
+            if missing:
+                raise ValueError(f"模型 {self.name} 要求「{REQUIRE[r][0]}」，但取来的数据里没有 {missing}")
+            recent = recent[recent[cols].notna().all(axis=1)]
         new_fits = {}
         for comp, part in recent.groupby("competition"):
             if len(part) < self.min_matches:
@@ -363,19 +479,41 @@ class GoalsModel(Model):
             idx = {t: i for i, t in enumerate(teams)}
             ca = np.array([prior[0] if t in promoted else 0.0 for t in teams])
             cd = np.array([prior[1] if t in promoted else 0.0 for t in teams])
-            f = FitData(hi=part["home_team"].map(idx).to_numpy(int), ai=part["away_team"].map(idx).to_numpy(int),
-                        x=part["home_goals"].to_numpy(int), y=part["away_goals"].to_numpy(int),
-                        w=time_weights(part["kickoff_earliest_utc"], cutoff, self.half_life_days),
-                        n_teams=len(teams), center_a=ca, center_d=cd, ridge=self.ridge, dc=self.dc, nb=self.nb)
-            theta = fit_league(f, self._start(comp, teams, ca, cd, part))
+            w = time_weights(part["kickoff_earliest_utc"], cutoff, self.half_life_days)
+            hi_, ai_ = part["home_team"].map(idx).to_numpy(int), part["away_team"].map(idx).to_numpy(int)
+            goals_x, goals_y = part["home_goals"].to_numpy(int), part["away_goals"].to_numpy(int)
+            if not self.two_stage:
+                # 步骤 1–3 原来的做法：真实比分，一次把所有参数（含 rho、alpha）拟合出来
+                f = FitData(hi=hi_, ai=ai_, x=goals_x, y=goals_y, w=w, n_teams=len(teams), center_a=ca,
+                            center_d=cd, ridge=self.ridge, dc=self.dc, nb=self.nb)
+                theta = fit_league(f, self._start(comp, teams, ca, cd, part))
+            else:
+                # 两步：第 1 步用 target 拟合实力（不带 DC），第 2 步固定实力、用真实比分找 rho
+                coef = None
+                if self.target == "shots":
+                    coef = shot_coefficients(part, w)
+                    self.coef_log.append({"cutoff": cutoff, "competition": comp, "a_sot": coef[0],
+                                          "b_off": coef[1], "n": len(part)})
+                tx, ty = fit_targets(part, self.target, coef)
+                f1 = FitData(hi=hi_, ai=ai_, x=tx, y=ty, w=w, n_teams=len(teams), center_a=ca, center_d=cd,
+                             ridge=self.ridge, dc=False, nb=False)
+                theta = fit_league(f1, self._start(comp, teams, ca, cd, part, dc=False))
+                if self.dc:
+                    f2 = FitData(hi=hi_, ai=ai_, x=goals_x, y=goals_y, w=w, n_teams=len(teams), center_a=ca,
+                                 center_d=cd, ridge=self.ridge, dc=True, nb=False)
+                    theta = np.concatenate([theta, [fit_rho(f2, theta)]])
+                f = f1
             mu, home, a, d, rho, alpha = _unpack(theta, len(teams), self.dc, self.nb)
             new_fits[comp] = {"mu": float(mu), "home": float(home), "rho": float(rho), "alpha": float(alpha),
                               "a": dict(zip(teams, map(float, a))), "d": dict(zip(teams, map(float, d))),
                               "season": season, "n": len(part), "n_eff": float(f.w.sum()), "prior": prior}
         self.fits = new_fits
 
-    def _start(self, comp: str, teams: list, ca: np.ndarray, cd: np.ndarray, part: pd.DataFrame) -> np.ndarray:
-        """拟合的起点：有上一次拟合就接着用（球队对得上的用旧值，新队用收缩中心）；没有就用场均进球。"""
+    def _start(self, comp: str, teams: list, ca: np.ndarray, cd: np.ndarray, part: pd.DataFrame,
+               dc: bool | None = None) -> np.ndarray:
+        """拟合的起点：有上一次拟合就接着用（球队对得上的用旧值，新队用收缩中心）；没有就用场均进球。
+        dc：起点里要不要放 rho（两步拟合的第 1 步不放）；不给就按模型的开关。"""
+        dc = self.dc if dc is None else dc
         old = self.fits.get(comp)
         if old is None:
             mean_goals = (part["home_goals"].mean() + part["away_goals"].mean()) / 2
@@ -388,7 +526,7 @@ class GoalsModel(Model):
             a = np.array([old["a"].get(t, c) for t, c in zip(teams, ca)])
             d = np.array([old["d"].get(t, c) for t, c in zip(teams, cd)])
         parts = [[mu, home], a, d]
-        if self.dc:
+        if dc:
             parts.append([rho])
         if self.nb:
             parts.append([max(alpha, ALPHA_MIN)])
@@ -449,7 +587,7 @@ class GoalsModel(Model):
         """最近一次拟合、当前赛季各队的进攻力和防守力（0 = 联赛平均；e^a = 进球是平均的几倍），按 a + d 从高到低。"""
         rows = []
         for c, f in self.fits.items():
-            for t in self.members.get((c, f["season"]), ()):
+            for t in sorted(self.members.get((c, f["season"]), ())):
                 if t in f["a"]:
                     rows.append({"competition": c, "season": f["season"], "team": t,
                                  "attack": round(f["a"][t], 4), "defence": round(f["d"][t], 4),
