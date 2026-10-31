@@ -330,6 +330,61 @@ class DynamicModel(Model):
                 out[r] = m
         return out
 
+    # ---------------- 步骤 6 用：赛前的预期进球和它的不确定 ----------------
+    def pre_match_view(self, comp: str, season: int, home: str, away: str, ko: str):
+        """这场比赛开球那一刻（处理这场之前）的 (log λ主, log λ客, log λ主 的标准差, log λ客 的标准差, 主场优势)。不改任何状态。
+
+        算法和“先 _prepare（换赛季、时间走到开球、加升班马）再看状态”完全一样，只是不真的改：
+        只取这场用得到的 6 个数（mu、home、主队 a、d、客队 a、d）和它们的协方差，按 _prepare 的顺序在小矩阵上算。
+        log λ 的方差 = hᵀ C h（h 是第四部分里的 H 那一行）。为什么用 log λ 不用 a、d：每周挪平均值（_recentre）会改 a、d、mu，
+        但不改 log λ，也不改它的方差，所以不同时间算出的数能放在一起比。
+        拿不到（上赛季的补赛、有队不在状态里；联赛还没有数据）返回 None。步骤 6（src/models/gbdt.py）训练、预测都用它。
+        """
+        lg = self.leagues.get(comp)
+        if lg is None:
+            return None
+        t = _days(ko)
+        dt = t - lg.t if lg.t is not None and t > lg.t else 0.0
+        late = season < lg.season
+        rolling = season > lg.season
+        slots = []                                       # 每队：(估计值 (a, d), 方差) 是新的；None = 接着用状态里的
+        for team in (home, away):
+            if late or team in lg.members.get(season, []):
+                if team not in lg.idx:
+                    return None
+                slots.append(None)
+                continue
+            start = self._start(lg, season, team)
+            slots.append(None if start is None else (start[0], start[1]))
+            if start is None and team not in lg.idx:     # 不会发生（上赛季在的队一定在状态里），保险起见
+                return None
+        idx = [0, 1]
+        for team, slot in zip((home, away), slots):
+            idx += list(lg.pos(team)) if slot is None else [-1, -1]
+        mean = np.zeros(6)
+        C = np.zeros((6, 6))
+        keep = [k for k, i in enumerate(idx) if i >= 0]
+        src = [idx[k] for k in keep]
+        mean[keep] = lg.m[src]
+        C[np.ix_(keep, keep)] = lg.P[np.ix_(src, src)]
+        C[0, 0] += self.q_league * dt
+        C[1, 1] += self.q_league * dt
+        for n, (team, slot) in enumerate(zip((home, away), slots)):
+            k = 2 + 2 * n
+            if slot is None:
+                bump = self.season_bump if rolling and team in lg.members.get(lg.season, []) else 0.0
+                C[k, k] += self.q * dt + bump
+                C[k + 1, k + 1] += self.q * dt + bump
+            else:                                        # 新加进来的队：和其他数没有牵连，方差 = 初始方差
+                (a, d), var = slot
+                mean[k], mean[k + 1] = a, d
+                C[k, :] = C[:, k] = C[k + 1, :] = C[:, k + 1] = 0.0
+                C[k, k] = C[k + 1, k + 1] = var
+        hh = np.array([1.0, 1.0, 1.0, 0.0, 0.0, -1.0])   # log λ主 = mu + home + a主 − d客
+        ha = np.array([1.0, 0.0, 0.0, -1.0, 1.0, 0.0])   # log λ客 = mu + a客 − d主
+        return (float(hh @ mean), float(ha @ mean), float(np.sqrt(max(hh @ C @ hh, 0.0))),
+                float(np.sqrt(max(ha @ C @ ha, 0.0))), float(mean[1]))
+
     # ---------------- 给人看 ----------------
     def params(self) -> dict:
         out = {}

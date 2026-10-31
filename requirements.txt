@@ -9,3 +9,4 @@ pytest      # 自动检查（tests/ 文件夹）
 beautifulsoup4  # 读维基百科网页（HTML）：杯赛比赛框和表格、赛季最终积分榜
 lxml        # beautifulsoup4 用的 HTML 解析器，比自带的快、容错好
 matplotlib  # 画图：学习小分析（xG 射门图、运气回归散点图）
+lightgbm    # 梯度提升树（需求文档第 4 节步骤 6）：用比赛前能知道的特征预测两队进球

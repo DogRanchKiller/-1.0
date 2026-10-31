@@ -6,6 +6,9 @@
     2. 通过取数层拿到截止时间之前已经能知道的比赛结果（增量拿：只拿上次以来新知道的，用 since 参数）；
     3. 新结果交给模型 update()（Elo 每场赛后加减分就在这里）；离上次重新拟合满 refit_days 天（默认 7）就 fit() 一次；
     4. 模型给这场出预测（比分矩阵或胜平负三个概率）；
+  有模型要休息天数（uses_rest_days = True，步骤 6 的梯度提升树）时：每个截止时间再用「休息天数和欧战后标签」取一次
+  已经开球的赛程（联赛、杯赛、欧战），算出每队离上一场隔几天、上一场是不是欧战（src/features/rest_days.py），
+  加在交给模型的历史比赛和要预测的比赛上（四列：home_rest_days、away_rest_days、home_after_euro、away_after_euro）；
   全部跑完，再站在“开球后 72 小时”取本场比分打分（用途“评估”），顺便取两个参考标杆（第 5 节“两个标杆”）：
     标杆 1 pinnacle_close：平博收盘赔率去水（2012/13 起）；
     标杆 2 market_avg：多家公司平均的收盘赔率去水（2019/20 起）。没有收盘平均的比赛，用多家平均的“赛前”赔率代替，
@@ -49,6 +52,7 @@ from src.common.odds import devig
 from src.evaluate import metrics
 from src.features import FeatureStore, LookAheadError, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
+from src.features.rest_days import RestDays
 from src.models.base import Model, check_result_probs
 
 BENCHMARK = "pinnacle_close"   # 标杆 1 在结果表里的模型名：平博收盘
@@ -153,7 +157,21 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
 
     # 每场目标比赛的比分“什么时候能知道”：截止时间往前走，中间没有新结果能知道，就不用再去取数（省时间）
     known = np.sort(compute_known_times(targets, fs.fs)["result_known_utc"].to_numpy())
-    margin = pd.Timedelta(hours=float(settings["features"]["result_available_after_kickoff_hours"]) + 48)
+    # 增量取数往回多取一段（since 按最早开球筛，比分要到最晚开球 + 几小时才知道）：
+    # 只有“哪一轮”日期的比赛最早、最晚开球差 round_date_window_days 天，所以多取这么多天再加 2 天；取重了的按 match_id 去掉
+    margin = pd.Timedelta(days=float(settings["features"]["round_date_window_days"]) + 2,
+                          hours=float(settings["features"]["result_available_after_kickoff_hours"]))
+
+    # 休息天数（需求文档第 4 节“步骤 6 怎么做”）：有模型要（uses_rest_days）才算。
+    # 每个截止时间都把新开球的赛程取进来（杯赛赛程周中才有，不能等“有新比分”才取），给历史比赛和要预测的比赛加上休息天数四列
+    rest = None
+    if any(getattr(m, "uses_rest_days", False) for m in models):
+        rcfg = settings["rest_days"]
+        rest = RestDays(rcfg["euro_competitions"], rcfg["cap_days"], rcfg["euro_within_days"])
+        # 只有“哪一轮”日期的杯赛，最早、最晚开球差 round_date_window_days 天；往回多取这么多再加 2 天，免得漏
+        sched_margin = pd.Timedelta(days=float(settings["features"]["round_date_window_days"]) + 2)
+        last_sched: str | None = None
+        timing["取赛程次数"] = 0
 
     hist_parts: list[pd.DataFrame] = []
     hist: pd.DataFrame | None = None
@@ -169,6 +187,15 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
     for cutoff, group in plan.groupby("cutoff_utc", sort=True):
         t_start = time.perf_counter()
         cut_ts = pd.Timestamp(cutoff)
+        # ---- 取新赛程（只有要休息天数时） ----
+        if rest is not None:
+            since = None if last_sched is None else to_utc_text(pd.Timestamp(last_sched) - sched_margin)
+            sched = fs.schedule(cutoff, "休息天数和欧战后标签", since=since)
+            if (sched["known_at_utc"] > cutoff).any():
+                raise LookAheadError(f"取数层返回了截止时间 {cutoff} 之后才开球的赛程，回测停止")
+            rest.add(sched)
+            last_sched = cutoff
+            timing["取赛程次数"] += 1
         # ---- 取新结果（增量） ----
         need = last_fetch is None
         if not need:
@@ -182,6 +209,8 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
             if (new["known_at_utc"] > cutoff).any():
                 raise LookAheadError(f"取数层返回了截止时间 {cutoff} 之后才能知道的比赛，回测停止")
             if not new.empty:
+                if rest is not None:
+                    new = rest.annotate(new)
                 seen.update(int(x) for x in new["match_id"])
                 hist_parts.append(new)
                 if last_fetch is not None:
@@ -202,6 +231,8 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
             matrix_cache.clear()
         # ---- 出预测 ----
         info_cols = group.drop(columns=["horizon", "cutoff_utc"])
+        if rest is not None:
+            info_cols = rest.annotate(info_cols)
         for m in models:
             preds = m.predict(info_cols, cutoff)
             if len(preds) != len(group):

@@ -154,25 +154,28 @@ class EloModel(Model):
         for mid, comp, season, home, away, hg, ag, res, ko in new[
                 ["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
                  "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None):
-            season = int(season)
-            late = self.current_season.get(comp) is not None and season < self.current_season[comp]
-            if late and ((comp, home) not in self.ratings or (comp, away) not in self.ratings):
-                self.processed.add(int(mid))   # 极少见：上赛季的补赛结果在新赛季开始后才知道，而且有队没有评分 → 跳过
-                continue
-            if not late:
-                self._ensure_team(comp, season, home)
-                self._ensure_team(comp, season, away)
-            # late（上赛季补赛）：直接用两队现在的评分更新，不再改“这个赛季有哪些队”
-            rh, ra = self.ratings[(comp, home)], self.ratings[(comp, away)]
-            diff = rh + self.home_advantage - ra
-            if not late and season >= self.first_season[comp] + self.burn_in_seasons:
-                self.records[comp].append((ko, diff, RESULT_INDEX[res]))
-            e = expected_home(rh, ra, self.home_advantage)
-            k = self.k * (goal_diff_multiplier(hg, ag) if self.goal_diff else 1.0)
-            change = k * (RESULT_SCORE[res] - e)
-            self.ratings[(comp, home)] = rh + change
-            self.ratings[(comp, away)] = ra - change
-            self.processed.add(int(mid))
+            self.process_row(mid, comp, int(season), home, away, hg, ag, res, ko)
+
+    def process_row(self, mid, comp: str, season: int, home: str, away: str, hg, ag, res: str, ko: str) -> None:
+        """一场比赛更新进评分（_process 一场一场调用；步骤 6 的 src/models/gbdt.py 也一场一场调用）。"""
+        late = self.current_season.get(comp) is not None and season < self.current_season[comp]
+        if late and ((comp, home) not in self.ratings or (comp, away) not in self.ratings):
+            self.processed.add(int(mid))   # 极少见：上赛季的补赛结果在新赛季开始后才知道，而且有队没有评分 → 跳过
+            return
+        if not late:
+            self._ensure_team(comp, season, home)
+            self._ensure_team(comp, season, away)
+        # late（上赛季补赛）：直接用两队现在的评分更新，不再改“这个赛季有哪些队”
+        rh, ra = self.ratings[(comp, home)], self.ratings[(comp, away)]
+        diff = rh + self.home_advantage - ra
+        if not late and season >= self.first_season[comp] + self.burn_in_seasons:
+            self.records[comp].append((ko, diff, RESULT_INDEX[res]))
+        e = expected_home(rh, ra, self.home_advantage)
+        k = self.k * (goal_diff_multiplier(hg, ag) if self.goal_diff else 1.0)
+        change = k * (RESULT_SCORE[res] - e)
+        self.ratings[(comp, home)] = rh + change
+        self.ratings[(comp, away)] = ra - change
+        self.processed.add(int(mid))
 
     def update(self, new_rows: pd.DataFrame, cutoff: str) -> None:
         self._process(new_rows)

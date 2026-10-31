@@ -208,6 +208,17 @@ def test_cup_schedule_only_for_rest_days(dev):
         dev.historical_matches("2024-01-20", "A版输入", competition="FAC")
 
 
+def test_schedule_all_teams(dev):
+    """所有队的赛程：规则和 team_schedule 一样（A 版直接要报错，只给已经开球的，联赛 + 杯赛），since 只要以后的。"""
+    with pytest.raises(UsageNotAllowedError, match="休息天数"):
+        dev.schedule("2024-01-20", "A版输入")
+    assert ids(dev.schedule("2024-01-17 19:44", "休息天数和欧战后标签")) == [1, 2, 3]   # 4 号 19:45 才开球
+    s = dev.schedule("2024-01-20", "休息天数和欧战后标签")
+    assert ids(s) == [1, 2, 3, 4] and "home_goals" not in s.columns
+    assert (s["known_at_utc"] <= "2024-01-20 00:00:00").all()
+    assert ids(dev.schedule("2024-01-20", "休息天数和欧战后标签", since="2024-01-12")) == [3, 4]
+
+
 # ---------- 运行模式 ----------
 def test_dev_mode_locks_exam_season(dev):
     assert ids(dev.historical_matches("2024-07-01", "A版输入")) == [1, 2, 3]     # 考试赛季开始前：没问题
