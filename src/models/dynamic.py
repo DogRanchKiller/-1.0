@@ -63,6 +63,19 @@ def _days(text: str) -> float:
     return pd.Timestamp(text).value / 86400e9
 
 
+def new_result_rows(rows: pd.DataFrame, processed: set) -> list:
+    """还没处理过（不在 processed 里）、有比分的比赛，按开球顺序：(match_id, 联赛, 赛季, 主队, 客队, 主进球, 客进球, 开球时间)。
+    dyn 和 ada（src/models/adaptive.py）共用。"""
+    if rows is None or rows.empty:
+        return []
+    rows = rows[rows["result"].notna() & rows["home_goals"].notna() & ~rows["match_id"].isin(processed)]
+    if rows.empty:
+        return []
+    rows = rows.sort_values(["kickoff_earliest_utc", "match_id"])
+    return list(rows[["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
+                      "kickoff_earliest_utc"]].itertuples(index=False, name=None))
+
+
 class _League:
     """一个联赛的状态（说明见文件开头第二部分）。"""
 
@@ -228,32 +241,30 @@ class DynamicModel(Model):
         lg.P = (lg.P + lg.P.T) / 2                       # 去掉计算误差，保持对称
 
     # ---------------- 处理比赛结果 ----------------
+    def _prepare(self, comp: str, season: int, home: str, away: str, ko: str):
+        """一场比赛更新之前要做的：换赛季、把时间走到开球、加升班马。返回这个联赛的状态；这场要跳过时返回 None。
+        （单独写出来，是因为 src/models/adaptive.py 要在更新前先看每个 dyn 赛前的预期进球。）"""
+        lg = self._league(comp, season)
+        if season > lg.season:
+            self._new_season(lg, season)
+        if season < lg.season:
+            # 上赛季的补赛，结果在新赛季开始后才知道：用两队现在的估计更新；有队不在状态里就跳过（极少见）
+            if home not in lg.idx or away not in lg.idx:
+                return None
+            self._advance(lg, _days(ko))
+        else:
+            self._advance(lg, _days(ko))                 # 先把时间走到开球，再加升班马（第六部分）
+            self._ensure(lg, season, home)
+            self._ensure(lg, season, away)
+        return lg
+
     def _process(self, rows: pd.DataFrame) -> None:
         """按开球顺序处理还没处理过的比赛（有比分的才算）。"""
-        if rows is None or rows.empty:
-            return
-        rows = rows[rows["result"].notna() & rows["home_goals"].notna() & ~rows["match_id"].isin(self.processed)]
-        if rows.empty:
-            return
-        rows = rows.sort_values(["kickoff_earliest_utc", "match_id"])
-        for mid, comp, season, home, away, hg, ag, ko in rows[
-                ["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
-                 "kickoff_earliest_utc"]].itertuples(index=False, name=None):
+        for mid, comp, season, home, away, hg, ag, ko in new_result_rows(rows, self.processed):
             self.processed.add(int(mid))
-            season = int(season)
-            lg = self._league(comp, season)
-            if season > lg.season:
-                self._new_season(lg, season)
-            if season < lg.season:
-                # 上赛季的补赛，结果在新赛季开始后才知道：用两队现在的估计更新；有队不在状态里就跳过（极少见）
-                if home not in lg.idx or away not in lg.idx:
-                    continue
-                self._advance(lg, _days(ko))
-            else:
-                self._advance(lg, _days(ko))             # 先把时间走到开球，再加升班马（第六部分）
-                self._ensure(lg, season, home)
-                self._ensure(lg, season, away)
-            self._observe(lg, ko, home, away, hg, ag)
+            lg = self._prepare(comp, int(season), home, away, ko)
+            if lg is not None:
+                self._observe(lg, ko, home, away, hg, ag)
 
     def update(self, new_rows: pd.DataFrame, cutoff: str) -> None:
         if self.per_match:
