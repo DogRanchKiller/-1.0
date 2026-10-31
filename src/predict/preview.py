@@ -155,7 +155,7 @@ def model_inputs(fs: FeatureStore, settings: dict, model, cutoff: str, end: str,
       - 模型要休息天数（uses_rest_days）时，取截止时间之前已经开球的全部赛程（联赛 + 杯赛、欧战），
         给两张表都加上休息天数、欧战后四列（src/features/rest_days.py）。
     回测是一个截止时间一个截止时间往前走、一批一批取；这里只有“现在”这一个截止时间，一次取完。
-    tests/test_preview.py 检查同一个截止时间两边交给模型的数一样。
+    tests/test_backtest.py 的 test_preview_gives_model_same_inputs_as_backtest 检查同一个截止时间两边交给模型的数一样。
     """
     usage = getattr(model, "usage", "A版输入")
     data = tuple(getattr(model, "data", ("比分",)))

@@ -18,7 +18,9 @@
   回测框架 src/evaluate/backtest.py：每次截止时间往前走，就把新开球的赛程交给 add()；
   给模型的历史比赛、要预测的比赛先用 annotate() 加上上面四列。
   预测页 src/predict/preview.py：只有一个截止时间（“现在”），一次 add() 全部赛程，再 annotate()。
-  两边都用 from_settings() 造，设置一样；tests/test_preview.py 检查两边交给模型的数一样。
+  预测页的偏差更大：要预测未来 7 天，几天后开球的比赛，中间已经排好、还没踢的周中比赛不算（赛程只到“现在”），
+  休息天数偏多（需求文档第 8 节“早期简易页”已知的差别）。
+  两边都用 from_settings() 造，设置一样；tests/test_backtest.py 的 test_preview_gives_model_same_inputs_as_backtest 检查两边交给模型的数一样。
 """
 from __future__ import annotations
 

@@ -336,7 +336,8 @@ def test_preview_gives_model_same_inputs_as_backtest(fs, settings):
     live = FeatureStore(c, "实时", settings)
 
     def same(a, b):
-        assert set(b.columns) <= set(a.columns), set(b.columns) - set(a.columns)
+        # 两边的列必须完全一样：少一列（例如要预测的比赛没加休息天数）模型不会报错，只会悄悄当成空值
+        assert set(a.columns) == set(b.columns), set(a.columns) ^ set(b.columns)
         cols = list(b.columns)
         a = a[cols].sort_values("match_id").reset_index(drop=True)
         b = b[cols].sort_values("match_id").reset_index(drop=True)
@@ -348,6 +349,7 @@ def test_preview_gives_model_same_inputs_as_backtest(fs, settings):
             continue
         hist, targets = model_inputs(live, settings, spy, cutoff, "2023-07-01 00:00:00", ["E0"])
         assert {"home_shots_on_target", "home_rest_days", "away_after_euro"} <= set(hist.columns)
+        assert {"home_rest_days", "away_rest_days", "home_after_euro", "away_after_euro"} <= set(targets.columns)
         if kind == "fit" and len(df):
             same(df, hist)
             fits += 1
