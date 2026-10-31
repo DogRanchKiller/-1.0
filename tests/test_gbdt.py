@@ -273,3 +273,53 @@ def test_registry_builds_gbdt():
     m = build_model("gb_l31")
     assert isinstance(m, GBDTModel) and m.uses_rest_days and m.lgb_params["num_leaves"] == 31
     assert m.data == ("比分", "射门、xG") and m.usage == "A版输入"
+    assert not hasattr(m, "pre_match_data")
+
+
+# ======================= 步骤 7：伤停特征（研究实验） =======================
+EXT = {"tm_home_inj_n": 3.0, "tm_away_inj_n": 1.0, "tm_home_inj_share": 0.3, "tm_away_inj_share": 0.1,
+       "tm_home_inj_top_loss": 0.2, "tm_away_inj_top_loss": 0.05, "tm_home_top_value": 19.0, "tm_away_top_value": 18.0}
+
+
+def test_injury_features_own_opp_and_training_matches_predict():
+    """伤停特征：主队那一行“这队”是主队的数，客队那一行反过来；身价差两行互为相反数；
+    训练表里存的和出预测时算的一样；不加 extra 时特征和步骤 6 完全一样（多给几列也不用）。"""
+    h = promo_history()
+    g, base = gb(extra=["inj", "val"], usage="研究实验"), gb()
+    assert g.data == ("比分", "射门、xG", "伤停（研究）") and g.pre_match_data == ("伤停（研究）",) and g.usage == "研究实验"
+    assert g.names[len(base.names):] == ["inj_n_own", "inj_share_own", "inj_top_loss_own", "inj_n_opp",
+                                         "inj_share_opp", "inj_top_loss_opp", "top_value_diff"]
+    row = h[h["season"] == 2020].sort_values(["kickoff_earliest_utc", "match_id"]).head(1)
+    before = h[h["kickoff_earliest_utc"] < row["kickoff_earliest_utc"].iloc[0]]
+    for m in (g, base):
+        m.update(before.assign(**EXT), "2020-08-01 00:00:00")
+    r = row.iloc[0]
+    ext = tuple(EXT[c] for c in ["tm_home_inj_n", "tm_away_inj_n", "tm_home_inj_share", "tm_away_inj_share",
+                                 "tm_home_inj_top_loss", "tm_away_inj_top_loss", "tm_home_top_value", "tm_away_top_value"])
+    f = g._features("E0", 2020, r["home_team"], r["away_team"], r["kickoff_earliest_utc"], (7.0,) * 2 + (0.0,) * 2, ext)
+    hv, av = dict(zip(g.names, f[0])), dict(zip(g.names, f[1]))
+    assert [hv["inj_n_own"], hv["inj_n_opp"], av["inj_n_own"], av["inj_n_opp"]] == [3, 1, 1, 3]
+    assert hv["inj_share_own"] == 0.3 and av["inj_top_loss_own"] == 0.05 and av["inj_top_loss_opp"] == 0.2
+    assert hv["top_value_diff"] == 1.0 and av["top_value_diff"] == -1.0
+    fb = base._features("E0", 2020, r["home_team"], r["away_team"], r["kickoff_earliest_utc"], (7.0,) * 2 + (0.0,) * 2, ext)
+    assert np.array_equal(f[0][:len(base.names)], fb[0], equal_nan=True) and len(fb[0]) == len(base.names)
+    g.update(row.assign(**EXT, home_rest_days=7.0, away_rest_days=7.0, home_after_euro=0.0, away_after_euro=0.0),
+             "2020-08-01 00:00:00")
+    assert np.array_equal(g.rows[-2], f[0], equal_nan=True) and np.array_equal(g.rows[-1], f[1], equal_nan=True)
+    # 没有伤停的列（2010/11 以前、文件里没有）→ 空值，树照样能用
+    g2 = gb(extra=["inj"])
+    g2.update(before, "2020-08-01 00:00:00")
+    assert np.isnan(np.vstack(g2.rows)[:, -6:]).all()
+    with pytest.raises(ValueError):
+        gb(extra=["xg"])
+
+
+def test_injury_variants_in_registry():
+    """步骤 7 的四组：gb_l7_r 和 gb_l7 只差用途；gb_l7 的设置没变（预览页存档比较的是它）。"""
+    base, r = model_config("gb_l7"), model_config("gb_l7_r")
+    assert "usage" not in base and "extra" not in base
+    assert {k: v for k, v in r.items() if k != "usage"} == base and r["usage"] == "研究实验"
+    for name, extra in (("gb_inj", ("inj",)), ("gb_val", ("val",)), ("gb_inj_val", ("inj", "val"))):
+        m = build_model(name)
+        assert m.extra == extra and m.usage == "研究实验" and m.pre_match_data == ("伤停（研究）",)
+    assert build_model("gb_l7_r").data == ("比分", "射门、xG")

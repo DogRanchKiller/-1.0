@@ -37,7 +37,8 @@ DATA_TYPE_NAMES = {"fixtures": "懂球帝 赛程", "odds_live": "懂球帝 赛�
                    "history_page": "懂球帝 历届赛季列表", "season_page": "懂球帝 赛季页",
                    "match_detail": "懂球帝 比赛详情页（xG）",
                    "league_csv": "football-data 联赛文件", "notes": "football-data 说明文件",
-                   "understat_shots": "Understat 射门明细（GitHub 镜像）"}
+                   "understat_shots": "Understat 射门明细（GitHub 镜像）",
+                   "transfermarkt_csv": "Transfermarkt 球员数据（salimt GitHub 镜像）"}
 STATUS_NAMES = {"saved": "已保存", "unchanged": "没变化", "not_found": "网站没有", "suspicious": "内容可疑",
                 "failed": "失败"}
 

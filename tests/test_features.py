@@ -392,6 +392,59 @@ def test_research_usage_cannot_be_listed_for_exam(tmp_path, settings):
         DataUsage(settings, f)
 
 
+# ---------- 研究实验（伤停快照，步骤 7） ----------
+INJ_COLS = ["inj_n", "inj_share", "inj_top_loss", "top_value"]
+
+
+@pytest.fixture
+def injury_settings(tmp_path, settings):
+    """伤停文件换成测试用的：1 号、3 号有数（快照 = 开球前 24 小时），2 号没有。"""
+    f = tmp_path / "inj.csv"
+    rows = [{"match_id": 1, "competition": "E0", "season": 2023, "as_of_utc": "2024-01-09 20:00:00"},
+            {"match_id": 3, "competition": "E0", "season": 2023, "as_of_utc": "2024-01-13 15:00:00"}]
+    for r, base in zip(rows, (1, 3)):
+        for side, add in (("home", 0), ("away", 10)):
+            r.update({f"{side}_{c}": base + add + i / 10 for i, c in enumerate(INJ_COLS)})
+    pd.DataFrame(rows).to_csv(f, index=False)
+    s = copy.deepcopy(settings)
+    s["paths"]["injury_features"] = str(f)
+    return s
+
+
+def test_injury_snapshot_for_this_match(con, injury_settings):
+    """本场的伤停：截止时间到了快照时间才有数，早于快照时间是空值；列名加 tm_ 前缀，as_of_utc 不给出去。"""
+    fs = FeatureStore(con, "开发", injury_settings)
+    t = fs.prediction_targets("2024-01-14", "2024-01-15", "研究实验")
+    got = fs.attach_pre_match(t, "2024-01-13 15:00", "研究实验", ["伤停（研究）"])
+    assert got.loc[0, "tm_home_inj_n"] == 3 and got.loc[0, "tm_away_inj_n"] == 13
+    assert "as_of_utc" not in got.columns and "home_inj_n" not in got.columns
+    early = fs.attach_pre_match(t, "2024-01-13 14:59:59", "研究实验", ["伤停（研究）"])
+    assert early[[f"tm_{s}_{c}" for s in ("home", "away") for c in INJ_COLS]].isna().all().all()
+    assert len(early) == len(t) and early.loc[0, "home_team"] == "A"      # 其他列不动
+
+
+def test_injury_snapshot_checks_this_match(con, injury_settings):
+    """本场的伤停也按本场检查：开球以后不能拿来做赛前预测；只能用于研究实验。"""
+    fs = FeatureStore(con, "开发", injury_settings)
+    t = fs.prediction_targets("2024-01-14", "2024-01-15", "研究实验")
+    with pytest.raises(LookAheadError, match="截止时间必须早于本场开球"):
+        fs.attach_pre_match(t, "2024-01-14 15:00", "研究实验", ["伤停（研究）"])
+    with pytest.raises(UsageNotAllowedError):
+        fs.attach_pre_match(t, "2024-01-13 15:00", "A版输入", ["伤停（研究）"])
+    with pytest.raises(ValueError, match="不是按快照时间记的文件数据"):
+        fs.attach_pre_match(t, "2024-01-13 15:00", "研究实验", ["Understat xG（研究）"])
+
+
+def test_injury_for_past_matches(con, injury_settings):
+    """以前比赛的伤停：快照在开球前，比分能知道时快照早就有了，所以都有数；文件里没有的场次是空值。"""
+    fs = FeatureStore(con, "开发", injury_settings)
+    df = fs.historical_matches("2024-01-20", "研究实验", data=["比分", "伤停（研究）"]).set_index("match_id")
+    assert df.loc[1, "tm_home_inj_share"] == pytest.approx(1.1) and df.loc[3, "tm_away_top_value"] == pytest.approx(13.3)
+    assert pd.isna(df.loc[2, "tm_home_inj_n"]) and "as_of_utc" not in df.columns
+    with pytest.raises(UsageNotAllowedError, match="不能用于「A版输入」"):
+        fs.historical_matches("2024-01-20", "A版输入", data=["伤停（研究）"])
+
+
 def test_historical_matches_without_stats_columns(dev):
     """一类统计都不要时（data=()）也能取：只有比赛信息和挑出来的比分来源。"""
     df = dev.historical_matches("2024-01-12", "A版输入", data=())

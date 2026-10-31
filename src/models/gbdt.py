@@ -29,6 +29,14 @@
 四、里面的 dyn、Elo
   这里自己带一个 dyn 和一个 Elo，每场赛后照常更新（和单独跑时一样），dyn 每周 fit 一次（挪平均值、拟合 rho）。
   Elo 的“评分 → 概率”这里用不上，不拟合。
+
+五、步骤 7 的伤停研究（需求文档第 4 节“步骤 7 怎么做”，只能用“研究实验”用途、只在开发模式）
+  extra 写了 inj / val 时，多加几个特征，数据来自取数层的「伤停（研究）」（开球前 24 小时的快照）：
+    inj：这队、对手各三个：伤了几人（inj_n）、伤的人身价占全队的比例（inj_share）、
+         最贵 11 人身价因为伤病掉了多少（inj_top_loss，log 的差）；
+    val：最贵 11 人身价和（log）这队减对手（top_value_diff），对照用：看是“伤停”有用，还是只是“身价”有用。
+  训练时这些数从历史比赛那张表里拿，出预测时从回测框架接好的目标比赛那张表里拿（框架看 pre_match_data 去接）。
+  usage 跟着改成“研究实验”（一次回测里的模型用途要一样，所以对照组 gb_l7_r 也写 usage: 研究实验）。
 """
 from __future__ import annotations
 
@@ -46,6 +54,9 @@ RESULT_INDEX = {"H": 0, "D": 1, "A": 2}
 SHOT_COLS = ["home_shots_on_target", "away_shots_on_target"]
 REST_COLS = ["home_rest_days", "away_rest_days", "home_after_euro", "away_after_euro"]
 TABLE = ["played", "ppg", "gdpg", "rank"]
+INJURY_DATA = "伤停（研究）"
+INJ = ["inj_n", "inj_share", "inj_top_loss"]
+EXTRA_COLS = [f"tm_{s}_{n}" for n in [*INJ, "top_value"] for s in ("home", "away")]
 
 
 class GBDTModel(Model):
@@ -58,7 +69,14 @@ class GBDTModel(Model):
                  learning_rate: float = 0.03, feature_fraction: float = 0.8, bagging_fraction: float = 0.8,
                  lambda_l2: float = 1.0, max_rounds: int = 2000, early_stopping_rounds: int = 50,
                  valid_days: float = 365, retrain_days: float = 91, min_train_rows: int = 2000,
-                 seed: int = 0, max_goals: int = 10, min_matches: int = 200):
+                 seed: int = 0, max_goals: int = 10, min_matches: int = 200, extra=(), usage: str = "A版输入"):
+        self.extra = tuple(extra or ())
+        if any(e not in ("inj", "val") for e in self.extra):
+            raise ValueError(f"extra 只能是 inj / val，收到 {self.extra!r}")
+        self.usage = usage
+        if self.extra:
+            self.data = (*GBDTModel.data, INJURY_DATA)
+            self.pre_match_data = (INJURY_DATA,)     # 回测框架看到这个，给要预测的比赛接上本场的伤停（快照时间之前才有数）
         if features not in ("all", "nodyn", "dynonly"):
             raise ValueError(f"features 只能是 all / nodyn / dynonly，收到 {features!r}")
         if target not in ("goals", "result"):
@@ -87,7 +105,9 @@ class GBDTModel(Model):
                        "dyn_home", "elo_own", "elo_opp", "elo_diff", "pi_own", "pi_opp", "pi_egd"]
                       + [f"{n}_{w}" for n in ("promoted", "rest_days", "after_euro") for w in ("own", "opp")]
                       + side([f"table_{t}" for t in TABLE])
-                      + side(self.form.names))
+                      + side(self.form.names)
+                      + (side(INJ) if "inj" in self.extra else [])
+                      + (["top_value_diff"] if "val" in self.extra else []))
         if features == "all":
             self.use = list(range(len(self.names)))
         elif features == "nodyn":
@@ -104,8 +124,11 @@ class GBDTModel(Model):
         self.train_log: list[dict] = []
 
     # ---------------- 一场比赛的特征（不改状态，Elo 的换赛季除外，见下面） ----------------
-    def _features(self, comp: str, season: int, home: str, away: str, ko: str, rest) -> tuple | None:
-        """这场比赛开球前的特征：(主队那一行, 客队那一行)；dyn 给不出（上赛季补赛里有队不在状态里等）返回 None。"""
+    def _features(self, comp: str, season: int, home: str, away: str, ko: str, rest, ext=None) -> tuple | None:
+        """这场比赛开球前的特征：(主队那一行, 客队那一行)；dyn 给不出（上赛季补赛里有队不在状态里等）返回 None。
+
+        ext：伤停研究的八个数，顺序按 EXTRA_COLS（主、客队交替）；extra 为空时不用。
+        """
         v = self.dyn.pre_match_view(comp, season, home, away, ko)
         if v is None:
             return None
@@ -130,6 +153,16 @@ class GBDTModel(Model):
                 prh, pra, rh, ra, euh, eua, *th, *ta, *fh, *fa]
         arow = [lc, 0.0, lla, llh, sda, sdh, hm, ea, eh, ea - eh - H, pa[1], ph[0], -egd,
                 pra, prh, ra, rh, eua, euh, *ta, *th, *fa, *fh]
+        if self.extra:
+            e = list(ext) if ext is not None else [np.nan] * len(EXTRA_COLS)
+            hi, ai = e[0:6:2], e[1:6:2]          # 主队、客队的 inj_n、inj_share、inj_top_loss
+            hv, av = e[6], e[7]                  # 主队、客队最贵 11 人身价和（log）
+            if "inj" in self.extra:
+                hrow += [*hi, *ai]
+                arow += [*ai, *hi]
+            if "val" in self.extra:
+                hrow.append(hv - av)
+                arow.append(av - hv)
         return np.array(hrow, dtype=float), np.array(arow, dtype=float)
 
     # ---------------- 处理比赛结果 ----------------
@@ -149,7 +182,7 @@ class GBDTModel(Model):
             return
         r = r.sort_values(["kickoff_earliest_utc", "match_id"])
         num = {c: pd.to_numeric(r[c], errors="coerce").to_numpy(float) if c in r else np.full(len(r), np.nan)
-               for c in SHOT_COLS + REST_COLS}
+               for c in SHOT_COLS + REST_COLS + EXTRA_COLS}
         items = list(r[["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
                         "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None))
         start = 0
@@ -157,7 +190,8 @@ class GBDTModel(Model):
             end = start
             while end < len(items) and items[end][8] == items[start][8]:   # 同一个开球时间的一组
                 end += 1
-            feats = [self._features(it[1], int(it[2]), it[3], it[4], it[8], tuple(num[c][k] for c in REST_COLS))
+            feats = [self._features(it[1], int(it[2]), it[3], it[4], it[8], tuple(num[c][k] for c in REST_COLS),
+                                    tuple(num[c][k] for c in EXTRA_COLS))
                      for k, it in enumerate(items[start:end], start)]
             for k, f in zip(range(start, end), feats):
                 self._observe_row(items[k], f, num["home_shots_on_target"][k], num["away_shots_on_target"][k])
@@ -230,15 +264,16 @@ class GBDTModel(Model):
         if self.booster is None:
             return out
         base = self.dyn.predict(targets, cutoff)                # 只在 dyn 能出预测的比赛上出
-        rest = np.column_stack([pd.to_numeric(targets[c], errors="coerce").to_numpy(float) if c in targets
-                                else np.full(len(targets), np.nan) for c in REST_COLS])
+        cols = lambda names: np.column_stack([pd.to_numeric(targets[c], errors="coerce").to_numpy(float)
+                                              if c in targets else np.full(len(targets), np.nan) for c in names])
+        rest, ext = cols(REST_COLS), cols(EXTRA_COLS)
         items = []
         for r, (comp, season, home, away, ko) in enumerate(targets[
                 ["competition", "season", "home_team", "away_team", "kickoff_earliest_utc"]].itertuples(
                 index=False, name=None)):
             if base[r] is None:
                 continue
-            f = self._features(comp, int(season), home, away, ko, tuple(rest[r]))
+            f = self._features(comp, int(season), home, away, ko, tuple(rest[r]), tuple(ext[r]))
             if f is not None:
                 items.append((r, comp, f))
         if not items:
@@ -271,7 +306,8 @@ class GBDTModel(Model):
 
     def params(self) -> dict:
         imp = self.importance().head(15)
-        return {"特征": self.features, "目标": self.target, "训练次数": len(self.train_log),
+        extra = {"额外特征": list(self.extra)} if self.extra else {}
+        return {"特征": self.features, "目标": self.target, **extra, "训练次数": len(self.train_log),
                 "最后一次训练": self.train_log[-1] if self.train_log else None,
                 "每次训练的树数": [t["trees"] for t in self.train_log],
                 "用得最多的特征（增益占比）": {f: round(float(v), 4) for f, v in zip(imp["feature"], imp["gain_share"])},

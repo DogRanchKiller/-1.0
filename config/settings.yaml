@@ -14,6 +14,9 @@ paths:
   team_aliases_understat: config/team_aliases_understat.yaml  # Understat 镜像的队名 → teams.yaml 的球队
   # Understat 镜像算出的每场 xG（只做研究实验，不进数据库；src/clean/understat_match.py 生成，见需求文档 6.1）
   understat_xg: data/research/understat_xg.csv
+  team_aliases_transfermarkt: config/team_aliases_transfermarkt.yaml  # Transfermarkt（salimt 镜像）球队编号 → teams.yaml 的球队
+  # salimt 镜像算出的每场开球前 24 小时两队伤停（只做研究实验，不进数据库；src/clean/injury_features.py 生成，见需求文档第 4 节步骤 7）
+  injury_features: data/research/injury_features.csv
   # 备份放在项目文件夹外面：项目文件夹被误删时备份还在。硬盘坏了会一起丢（见需求文档第 13 节）
   backup: D:/足球预测系统_备份
 
@@ -39,6 +42,37 @@ football_data:
 
 scrape:
   min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）
+
+# GitHub 上别人从 Transfermarkt 抓的球员数据（需求文档 6.1“Transfermarkt 球员数据镜像（salimt）”）。下载程序 src/collect/salimt_mirror.py
+# 没有许可证；你决定（2026-10-31）下载到本机，只做伤停研究实验，不转发、不上传、不进数据库。不访问 transfermarkt.com 本身
+salimt_mirror:
+  repo: salimt/football-datasets
+  commit: da9227e1f42baf74561324290dbf1ad2e3c00edd   # 固定在这一版（2026-09-29 更新），以后仓库改了也不影响
+  files:                     # 保存的文件名 → 仓库里的路径、开头应该是哪些列（不是的话当“内容可疑”）
+    injuries:
+      path: datalake/transfermarkt/player_injuries/player_injuries_updated_20260929.csv
+      header: player_id,season_name,injury_reason,from_date,end_date
+    market_value:
+      path: datalake/transfermarkt/player_market_value/player_market_value.csv
+      header: player_id,date_unix,value
+    transfers:
+      path: datalake/transfermarkt/transfer_history/transfer_history.csv
+      lfs: true              # 大文件（81MB）放在 Git LFS，走 media.githubusercontent.com
+      header: player_id,season_name,transfer_date,from_team_id
+    team_seasons:
+      path: datalake/transfermarkt/team_competitions_seasons/team_competitions_seasons.csv
+      header: club_division,club_id,competition_id
+    team_details:
+      path: datalake/transfermarkt/team_details/team_details.csv
+      header: club_id,club_slug,club_name
+
+# 步骤 7 伤停研究实验（需求文档第 4 节“步骤 7 怎么做”）：src/clean/injury_features.py 用 salimt 镜像算每场两队伤停
+injury_research:
+  leagues: {E0: GB1, SP1: ES1, D1: L1, I1: IT1, F1: FR1}   # 我们的联赛代码 → Transfermarkt 的联赛编号
+  first_season: 2010         # 从这个赛季起算伤停（更早的伤病表记得太少，空值 = 不知道；事先定的，见需求文档）
+  mapping_seasons: [2000, 2023]   # 球队对照用哪几个赛季的成绩投票（不碰期末考试赛季）
+  hours_before_kickoff: 24   # 算“开球前几小时的情况”（和回测的 T-24 一样）
+  top_n: 11                  # “最贵几人”算主力
 
 # GitHub 上别人 2021 年从 Understat 抓的射门明细（需求文档 6.1“Understat 射门明细镜像”）。下载程序 src/collect/understat_mirror.py
 # 没有许可证；你决定（2026-10-31）下载到本机，只做个人学习和研究实验，不转发、不上传。不访问 understat.com 本身
@@ -331,6 +365,11 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     gb_nodyn: {num_leaves: 7, min_data_in_leaf: 200, features: nodyn}      # 不给 dyn 的特征
     gb_1x2: {num_leaves: 7, min_data_in_leaf: 200, target: result}        # 直接出胜平负三个概率
     gb_dynonly: {num_leaves: 7, min_data_in_leaf: 200, features: dynonly}  # 只给 dyn 的特征（加联赛、主客场）
+    # 步骤 7 伤停研究（需求文档第 4 节“步骤 7 怎么做”）：用途都是“研究实验”（只在开发模式），一次回测里的用途要一样
+    gb_l7_r: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验}                     # 和 gb_l7 一样，只是用途不同（对照组）
+    gb_inj: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [inj]}         # 加伤停六个特征
+    gb_val: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [val]}         # 只加身价差（对照，只报告）
+    gb_inj_val: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [inj, val]} # 两样都加（只报告）
 
 # 维基百科：杯赛、欧战赛程（需求文档 6.1、第 18 节待定问题 5，你选了方案 a）
 # robots.txt 不允许程序访问 /w/（包括 api.php）和 /api/（REST API），只欢迎“低速、友好”的程序看 /wiki/条目名 的页面。

@@ -24,7 +24,7 @@ _MODE_ALIASES = {"dev": "dev", "开发": "dev", "exam": "exam", "考试": "exam"
 ROLE_NAMES = {"dev": "开发", "exam": "期末考试", "live": "上线后"}
 
 # data_usage.yaml 里“什么时候能知道”可以写的规则名（具体算法在 known_time.py）
-KNOWN_RULES = {"赛程", "开球", "赛后", "赛前赔率", "收盘", "抓取时间", "变盘时间"}
+KNOWN_RULES = {"赛程", "开球", "赛后", "赛前赔率", "收盘", "抓取时间", "变盘时间", "快照时间"}
 
 
 def normalize_mode(mode: str) -> str:

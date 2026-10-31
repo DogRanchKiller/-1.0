@@ -10,6 +10,10 @@
   GitHub 镜像 douglasbc/scraping-understat-dataset（没有许可证）：用户决定（2026-10-31）下载到本机，只做研究实验，
   不转发、不上传、不导入数据库；只访问 raw.githubusercontent.com，已下完（`src.collect.understat_mirror`）。
   和我们的比赛对上后存 data/research/understat_xg.csv（`src.clean.understat_match`），只能通过 src/features 用“研究实验”用途、只在开发模式。
+- GitHub 镜像 salimt/football-datasets（Transfermarkt 球员数据，没有许可证）：用户决定（2026-10-31）下载到本机，只做伤停研究实验，
+  不转发、不上传、不导入数据库；只访问 raw.githubusercontent.com 和 media.githubusercontent.com，不访问 transfermarkt.com，已下完（`src.collect.salimt_mirror`）。
+  伤停特征存 data/research/injury_features.csv（`src.clean.injury_features`），只能通过 src/features 用“研究实验”用途、只在开发模式。
+  同一作者的 transfermarkt-datasets（历史首发）：用户决定先不下。
 - 新网站开工前先看 robots.txt 和使用条款，写进需求文档 6.1 / 6.2。
 
 ## 每次开工先做
