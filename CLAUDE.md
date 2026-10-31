@@ -7,6 +7,8 @@
 - football-data.co.uk：robots.txt 禁止 AI 爬虫，但用户决定（2026-10-30）由 Claude 替用户运行下载程序 `src.collect.football_data`，
   保持低频、只下个人学习要用的文件。
 - understat.com：禁止所有程序 → 不用。
+  GitHub 镜像 douglasbc/scraping-understat-dataset（没有许可证）：用户决定（2026-10-31）下载到本机，只做研究实验，
+  不转发、不上传、不导入数据库；只访问 raw.githubusercontent.com，已下完（`src.collect.understat_mirror`）。
 - 新网站开工前先看 robots.txt 和使用条款，写进需求文档 6.1 / 6.2。
 
 ## 每次开工先做

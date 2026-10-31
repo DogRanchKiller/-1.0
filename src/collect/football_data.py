@@ -48,6 +48,8 @@ def looks_like_csv(content: bytes) -> bool:
 
 
 class Downloader:
+    source = SOURCE   # 记进 fetch_log 的来源名；别的下载程序借用这个类时改这一项（例如 understat_mirror.py）
+
     def __init__(self, con, raw_dir: Path, min_interval: float, session=None, sleep=time.sleep, clock=time.monotonic):
         self.con = con
         self.raw_dir = raw_dir
@@ -85,7 +87,7 @@ class Downloader:
         self.con.execute(
             "insert into fetch_log (url, source, data_type, fetched_at_utc, status, http_status, file_path, bytes, sha256, note)"
             " values (?,?,?,?,?,?,?,?,?,?)",
-            (url, SOURCE, data_type, datetime.now(timezone.utc).isoformat(timespec="seconds"), status, http_status,
+            (url, self.source, data_type, datetime.now(timezone.utc).isoformat(timespec="seconds"), status, http_status,
              path.relative_to(PROJECT_ROOT).as_posix() if path and path.is_relative_to(PROJECT_ROOT) else (str(path) if path else None),
              len(content) if content is not None else None,
              hashlib.sha256(content).hexdigest() if content is not None else None, note),

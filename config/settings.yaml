@@ -37,6 +37,20 @@ football_data:
 scrape:
   min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）
 
+# GitHub 上别人 2021 年从 Understat 抓的射门明细（需求文档 6.1“Understat 射门明细镜像”）。下载程序 src/collect/understat_mirror.py
+# 没有许可证；你决定（2026-10-31）下载到本机，只做个人学习和研究实验，不转发、不上传。不访问 understat.com 本身
+understat_mirror:
+  repo: douglasbc/scraping-understat-dataset
+  commit: 87960c218d873b63daabdd851e93adbecab77faa   # 固定在这一版（2021-12-13 最后一次更新），以后仓库改了也不影响
+  first_season: 2014         # 有的赛季：2014/15 到 2021/22（2021/22 只到 2021-12-12，半季）
+  last_season: 2021
+  leagues:                   # 我们的联赛代码 → 仓库里的文件夹名
+    E0: epl
+    SP1: la_liga
+    D1: bundesliga
+    I1: serie_a
+    F1: ligue_1
+
 # 懂球帝（赔率来源，需求文档 6.2）。采集程序 src/collect/dongqiudi.py，只存原始层，暂不进数据库
 dongqiudi:
   min_interval_seconds: 5    # 两次请求至少隔几秒
