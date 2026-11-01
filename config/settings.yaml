@@ -547,3 +547,10 @@ standings_check:                 # 用维基百科赛季最终积分榜核对（
 # 定时任务的心跳文件（src/jobs/heartbeat.py，需求文档第 9 节“完整链路的分工和接口”）
 jobs:
   state_dir: data/jobs           # 每个定时任务一个 <任务名>.json：上次开始、结束、成功没有、摘要（data/ 不进 Git）
+
+# 定时预测 src/predict/scheduled.py（需求文档第 9 节“定时出 T-24 / T-6 / T-1 预测”）
+schedule:
+  horizons: [24, 6, 1]          # 预测时点：开球前几小时（T-24 / T-6 / T-1）
+  lock_file: data/jobs/scheduled_predict.lock   # 锁文件：防止两次运行重叠（data/ 不进 Git）
+  lock_stale_minutes: 60        # 锁文件超过这么多分钟没更新，视为残留锁，先清掉再拿
+  matrix_decimals: 6            # 比分矩阵存档精度（每格几位小数）

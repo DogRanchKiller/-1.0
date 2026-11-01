@@ -5,6 +5,7 @@
 #     Unregister-ScheduledTask -TaskName 足球预测_每日备份 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_懂球帝赔率 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_数据状态 -Confirm:$false
+#     Unregister-ScheduledTask -TaskName 足球预测_定时预测 -Confirm:$false
 
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path   # 项目文件夹
 $python = Join-Path $root ".venv\Scripts\python.exe"
@@ -32,5 +33,13 @@ $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(47)) -
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "足球预测_数据状态" -Action $action -Trigger $trigger -Settings $settings `
     -Description "每小时生成数据状态页和抓取日报，出问题时弹窗提醒" -Force | Out-Null
+
+# 定时预测（K1）：每 15 分钟一次（第 2、17、32、47 分起算错开整点），到点的比赛出 T-24 / T-6 / T-1，存进预测存档。
+# 电脑关着或睡眠时不补跑，开机后下一次运行会补出最晚到点的那一版（需求文档第 9 节“定时出 T-24 / T-6 / T-1 预测”）
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.scheduled_predict" -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes 15)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "足球预测_定时预测" -Action $action -Trigger $trigger -Settings $settings `
+    -Description "每 15 分钟出到点的 T-24 / T-6 / T-1 预测，存进预测存档" -Force | Out-Null
 
 Get-ScheduledTask -TaskName "足球预测_*" | Select-Object TaskName, State

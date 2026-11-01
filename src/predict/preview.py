@@ -241,6 +241,18 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
 
     fs：取数层（实时模式）。model：不给就按 settings.yaml 的 preview.model 新造一个（测试里可以换成假模型）。
     每场多出两项：fusion_odds（融合用的赔率，fusion_odds 的结果）、conclusion（conclusion.conclude 的结果）。
+    计算全部在 compute_predictions 里（定时预测 src/predict/scheduled.py 也用它，两边出的数一样）。
+    """
+    return compute_predictions(fs, settings, now, model)[0]
+
+
+def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=None) -> tuple[dict, dict]:
+    """预览页和定时预测共用的计算（2026-11-01 从 build_preview 抽出来，内容没改）。
+
+    返回 (result, preds)：
+      result：build_preview 的结果（页面、存档用）；
+      preds：{match_id: 模型原样给的预测}（比分矩阵 / 三个概率 / None）。定时预测要把整张比分矩阵存进存档，
+             result 里只有胜平负，所以另外交出来；放在 result 外面，预览页的结果一点不变。
     """
     cfg = settings["preview"]
     cutoff = to_utc_text(now)
@@ -260,8 +272,10 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
     before = to_utc_text(now - timedelta(hours=cfg["odds_move"]["hours"]))
     season = season_flags(hist, targets, settings)
     rows = []
+    preds = {}
     for t, p in zip(targets.to_dict("records"), probs):
         mid = int(t["match_id"])
+        preds[mid] = p
         mp = to_1x2(p)
         # 3. 各家公司“现在”的赔率。用途写“显示”：只给人看，不进模型
         market = market_summary(fs.latest_odds(mid, cutoff, "显示"))
@@ -278,13 +292,14 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
             # “差距”和信心等级的“分歧大”一样，和融合用的胜平负比
             "market": market, "gap": gap(mp, fo["p_1x2"], gap_th),
             "fusion_odds": fo, "conclusion": conclude(p, mp, fo, move, season.get(mid, {}), settings)})
-    return {"cutoff_utc": cutoff, "end_utc": end, "rows": rows, "model": name, "model_cfg": mcfg,
-            "model_version": model_version(name, mcfg), "hist_n": int(len(hist)),
-            "hist_last_date": hist["match_date"].max() if len(hist) else None,
-            # 其中有几场的比分是 football-data 还没更新、先用懂球帝的
-            "hist_n_dongqiudi": int((hist["stats_source"] == "dongqiudi").sum()) if len(hist) else 0,
-            "gap_threshold": gap_th, "days_ahead": cfg["days_ahead"], "odds_move": cfg["odds_move"],
-            "fusion_w": float(settings["fusion"]["w"]), "lean": settings["lean"]}
+    result = {"cutoff_utc": cutoff, "end_utc": end, "rows": rows, "model": name, "model_cfg": mcfg,
+              "model_version": model_version(name, mcfg), "hist_n": int(len(hist)),
+              "hist_last_date": hist["match_date"].max() if len(hist) else None,
+              # 其中有几场的比分是 football-data 还没更新、先用懂球帝的
+              "hist_n_dongqiudi": int((hist["stats_source"] == "dongqiudi").sum()) if len(hist) else 0,
+              "gap_threshold": gap_th, "days_ahead": cfg["days_ahead"], "odds_move": cfg["odds_move"],
+              "fusion_w": float(settings["fusion"]["w"]), "lean": settings["lean"]}
+    return result, preds
 
 
 def add_display_info(con, result: dict) -> None:
@@ -348,10 +363,7 @@ def archive(con, result: dict, now: datetime, code: str | None = None) -> dict:
         for r in result["rows"]:
             if r["model_p"] is None:
                 continue
-            p = [round(x, 4) for x in r["model_p"]]
-            c = r.get("conclusion") or {}
-            fused = None if c.get("p_1x2") is None else [round(x, 4) for x in c["p_1x2"]]
-            key = conclusion_key(c, fused)
+            p, fused, key = archive_key(r)
             last = con.execute("select p_home, p_draw, p_away, kickoff_utc, detail from predictions where match_id = ?"
                                " and kind = ? and model_version = ? order by prediction_id desc limit 1",
                                (r["match_id"], KIND, result["model_version"])).fetchone()
@@ -360,31 +372,51 @@ def archive(con, result: dict, now: datetime, code: str | None = None) -> dict:
                     and json.loads(last[4] or "{}").get("结论指纹") == key):
                 counts["没变化"] += 1
                 continue
-            m = r["market"]
-            lines = r.get("model_lines") or {}
-            fo = r.get("fusion_odds") or {}
-            detail = {"模型设置": result["model_cfg"], "代码版本": code, "拟合用的比赛场数": result["hist_n"],
-                      "比分截至": result["hist_last_date"], "赔率概率": m["p_1x2"], "赔率公司数": m["n_books_1x2"],
-                      "赔率最后变动": m["last_change_utc"],
-                      # 模型在赔率主盘口上的胜算（只记下来，不参与判断“和上次一样”）
-                      "亚盘主盘口": m["ah"]["line"] if m["ah"] else None, "模型亚盘主队胜算": lines.get("ah_home"),
-                      "大小球主盘口": m["ou"]["line"] if m["ou"] else None, "模型大球胜算": lines.get("ou_over"),
-                      # 融合后的结论（需求文档第 5 节“预测页怎么接融合、倾向、信心等级”）
-                      "融合概率": fused, "结论指纹": key,
-                      "融合": {"状态": c.get("status"), "w": c.get("w"), "胜平负用平博": fo.get("pinnacle"),
-                               "胜平负几家": fo.get("n_books_1x2"), "大小球": fo.get("ou"), "亚盘": fo.get("ah"),
-                               "大2.5球": c.get("over25"), "双方进球": c.get("btts"), "市场矩阵还原误差": c.get("fit_error"),
-                               "倾向": c.get("leans"), "信心等级": c.get("level"), "降级候选因素": c.get("flags"),
-                               "不确定因素": c.get("uncertain"), "赔率变动": c.get("odds_move")}}
-            con.execute(
-                "insert into predictions (match_id, competition, season, home_team, away_team, kickoff_utc, match_date,"
-                " kind, model, model_version, cutoff_utc, created_at_utc, p_home, p_draw, p_away, detail)"
-                " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (r["match_id"], r["competition"], r["season"], r["home_team"], r["away_team"], r["kickoff_utc"],
-                 r["match_date"], KIND, result["model"], result["model_version"], result["cutoff_utc"], created,
-                 *p, json.dumps(detail, ensure_ascii=False)))
+            insert_prediction(con, result, r, KIND, created, p, prediction_detail(result, r, code))
             counts["新存"] += 1
     return counts
+
+
+# 下面三个函数 2026-11-01 从 archive 抽出来（内容没改），定时预测 src/predict/scheduled.py 也用，两边存的格式一样
+def archive_key(r: dict) -> tuple[list, list | None, list]:
+    """一场比赛要存档的三样：模型概率（4 位小数）、融合概率（4 位小数，没有是 None）、结论指纹（conclusion_key）。"""
+    p = [round(x, 4) for x in r["model_p"]]
+    c = r.get("conclusion") or {}
+    fused = None if c.get("p_1x2") is None else [round(x, 4) for x in c["p_1x2"]]
+    return p, fused, conclusion_key(c, fused)
+
+
+def prediction_detail(result: dict, r: dict, code: str | None) -> dict:
+    """存档 detail 列的内容（预览页的那些键）。定时预测在这之外再加自己的几个键。"""
+    _p, fused, key = archive_key(r)
+    c = r.get("conclusion") or {}
+    m = r["market"]
+    lines = r.get("model_lines") or {}
+    fo = r.get("fusion_odds") or {}
+    return {"模型设置": result["model_cfg"], "代码版本": code, "拟合用的比赛场数": result["hist_n"],
+            "比分截至": result["hist_last_date"], "赔率概率": m["p_1x2"], "赔率公司数": m["n_books_1x2"],
+            "赔率最后变动": m["last_change_utc"],
+            # 模型在赔率主盘口上的胜算（只记下来，不参与判断“和上次一样”）
+            "亚盘主盘口": m["ah"]["line"] if m["ah"] else None, "模型亚盘主队胜算": lines.get("ah_home"),
+            "大小球主盘口": m["ou"]["line"] if m["ou"] else None, "模型大球胜算": lines.get("ou_over"),
+            # 融合后的结论（需求文档第 5 节“预测页怎么接融合、倾向、信心等级”）
+            "融合概率": fused, "结论指纹": key,
+            "融合": {"状态": c.get("status"), "w": c.get("w"), "胜平负用平博": fo.get("pinnacle"),
+                     "胜平负几家": fo.get("n_books_1x2"), "大小球": fo.get("ou"), "亚盘": fo.get("ah"),
+                     "大2.5球": c.get("over25"), "双方进球": c.get("btts"), "市场矩阵还原误差": c.get("fit_error"),
+                     "倾向": c.get("leans"), "信心等级": c.get("level"), "降级候选因素": c.get("flags"),
+                     "不确定因素": c.get("uncertain"), "赔率变动": c.get("odds_move")}}
+
+
+def insert_prediction(con, result: dict, r: dict, kind: str, created: str, p: list, detail: dict) -> None:
+    """往 predictions 表加一行（只加不改）。截止时间用 result 的 cutoff_utc（真正算这一版的时间）。"""
+    con.execute(
+        "insert into predictions (match_id, competition, season, home_team, away_team, kickoff_utc, match_date,"
+        " kind, model, model_version, cutoff_utc, created_at_utc, p_home, p_draw, p_away, detail)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (r["match_id"], r["competition"], r["season"], r["home_team"], r["away_team"], r["kickoff_utc"],
+         r["match_date"], kind, result["model"], result["model_version"], result["cutoff_utc"], created,
+         *p, json.dumps(detail, ensure_ascii=False)))
 
 
 def main() -> None:
