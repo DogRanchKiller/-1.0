@@ -179,49 +179,96 @@ def test_reference_check(tmp_path):
 
 
 class _Args:
-    def __init__(self, dry_run=False, reference="ref", skip_backtest=False, reason=None):
-        self.dry_run, self.reference, self.skip_backtest, self.reason = dry_run, reference, skip_backtest, reason
+    def __init__(self, dry_run=False, reference="ref", skip_backtest=False, restart=False, reason=None):
+        self.dry_run, self.reference, self.skip_backtest, self.restart, self.reason = (dry_run, reference, skip_backtest,
+                                                                                       restart, reason)
+
+
+DB = {"路径": "D:/snap.db", "大小": 10, "sha256": "aa"}
+CLEAN = {"commit": "abc", "有没提交的改动": False}
+
+
+def _settings():
+    s = copy.deepcopy(SETTINGS)
+    s["final_exam"]["done"] = False
+    return s
 
 
 def test_exam_guards(tmp_path):
-    s = copy.deepcopy(SETTINGS)
-    s["final_exam"]["done"] = False
-    clean = {"commit": "abc", "有没提交的改动": False}
-    assert fe.exam_guards(s, tmp_path, {"commit": "x", "有没提交的改动": True}, _Args(dry_run=True)) is None  # 试跑不查
+    s = _settings()
+    assert fe.exam_guards(s, tmp_path, {"commit": "x", "有没提交的改动": True}, _Args(dry_run=True), None) is None  # 试跑不查
     with pytest.raises(RuntimeError):                                   # 有没提交的改动
-        fe.exam_guards(s, tmp_path, {"commit": "abc", "有没提交的改动": True}, _Args())
+        fe.exam_guards(s, tmp_path, {"commit": "abc", "有没提交的改动": True}, _Args(), DB)
     with pytest.raises(RuntimeError):                                   # 查不到 git 状态
-        fe.exam_guards(s, tmp_path, {"commit": None, "有没提交的改动": None}, _Args())
+        fe.exam_guards(s, tmp_path, {"commit": None, "有没提交的改动": None}, _Args(), DB)
     with pytest.raises(RuntimeError):                                   # 没给 --reference
-        fe.exam_guards(s, tmp_path, clean, _Args(reference=None))
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(reference=None), DB)
     with pytest.raises(RuntimeError):                                   # 没开考过就想重跑
-        fe.exam_guards(s, tmp_path, clean, _Args(skip_backtest=True, reason="修 bug"))
-    rec = fe.exam_guards(s, tmp_path, clean, _Args())                   # 开考：写开考记录
-    assert (tmp_path / fe.STARTED_FILE).exists() and rec["重跑"] == [] and rec["git"] == clean
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(skip_backtest=True, reason="修 bug"), DB)
+    with pytest.raises(ValueError):                                     # 两个开关只能用一个
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(skip_backtest=True, restart=True, reason="修 bug"), DB)
+    rec = fe.exam_guards(s, tmp_path, CLEAN, _Args(), DB)               # 开考：写开考记录
+    assert (tmp_path / fe.STARTED_FILE).exists() and rec["重跑"] == [] and rec["git"] == CLEAN
+    assert rec["数据库快照"] == DB
     with pytest.raises(fe.ExamAlreadyDone):                             # 开考过，不能当新考试再来
-        fe.exam_guards(s, tmp_path, clean, _Args())
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(), DB)
+    # 回测还没存下来（没有 predictions.csv）：只能重开，不能重跑
+    with pytest.raises(RuntimeError):
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(skip_backtest=True, reason="修 bug"), DB)
+    with pytest.raises(RuntimeError):                                   # 重开没写原因
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(restart=True), DB)
+    with pytest.raises(RuntimeError):                                   # 换了快照
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(restart=True, reason="回测崩了"), {**DB, "sha256": "bb"})
+    rec = fe.exam_guards(s, tmp_path, CLEAN, _Args(restart=True, reason="回测崩了"), DB)
+    assert [r["哪种"] for r in rec["重跑"]] == ["重开"]
+    # 回测存下来以后：只能重跑，不能重开
+    (tmp_path / "predictions.csv").write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(restart=True, reason="又崩了"), DB)
     with pytest.raises(RuntimeError):                                   # 重跑没写原因
-        fe.exam_guards(s, tmp_path, clean, _Args(skip_backtest=True))
-    s2 = copy.deepcopy(s)
-    s2["lean"]["result"] = 0.05
-    with pytest.raises(RuntimeError):                                   # 开考后改了设置
-        fe.exam_guards(s2, tmp_path, clean, _Args(skip_backtest=True, reason="修 bug"))
-    s3 = copy.deepcopy(s)
-    s3["final_exam"]["done"] = False                                    # done 不算设置的一部分
-    rec = fe.exam_guards(s3, tmp_path, clean, _Args(skip_backtest=True, reason="修 bug"))
-    assert len(rec["重跑"]) == 1 and rec["重跑"][0]["原因"] == "修 bug"
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(skip_backtest=True), DB)
+    for key, val in (("lean", ("result", 0.05)), ("market_odds", None), ("calc", None)):
+        s2 = copy.deepcopy(s)
+        if val:
+            s2[key][val[0]] = val[1]
+        else:                                                           # 改这一段里随便一个数
+            k = next(k for k, v in s2[key].items() if isinstance(v, (int, float)) and not isinstance(v, bool))
+            s2[key][k] = s2[key][k] + 1
+        with pytest.raises(RuntimeError):                               # 开考后改了设置
+            fe.exam_guards(s2, tmp_path, CLEAN, _Args(skip_backtest=True, reason="修 bug"), DB)
+    rec = fe.exam_guards(s, tmp_path, CLEAN, _Args(skip_backtest=True, reason="修 bug"), DB)
+    assert [r["哪种"] for r in rec["重跑"]] == ["重开", "重跑"] and rec["重跑"][1]["原因"] == "修 bug"
     saved = json.loads((tmp_path / fe.STARTED_FILE).read_text(encoding="utf-8"))
-    assert len(saved["重跑"]) == 1
+    assert len(saved["重跑"]) == 2
     (tmp_path / fe.DONE_FILE).write_text("{}", encoding="utf-8")
     with pytest.raises(fe.ExamAlreadyDone):                             # 考完了，重跑也不行
-        fe.exam_guards(s, tmp_path, clean, _Args(skip_backtest=True, reason="修 bug"))
+        fe.exam_guards(s, tmp_path, CLEAN, _Args(skip_backtest=True, reason="修 bug"), DB)
+
+
+def test_frozen_settings_ignores_done():
+    s, s2 = _settings(), _settings()
+    s2["final_exam"]["done"] = True                                     # done 是考完才改的，不算设置
+    assert fe.frozen_settings(s) == fe.frozen_settings(s2)
+    assert "数据字典 sha256" in fe.frozen_settings(s)
+    s2["final_exam"]["calibration_step"] = 0.2
+    assert fe.frozen_settings(s) != fe.frozen_settings(s2)
+
+
+def test_db_fingerprint(tmp_path):
+    f = tmp_path / "a.db"
+    f.write_bytes(b"abc")
+    d = fe.db_fingerprint(f)
+    assert d["大小"] == 3 and d["sha256"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    f.write_bytes(b"abd")
+    assert fe.db_fingerprint(f)["sha256"] != d["sha256"]
 
 
 def test_check_reference():
-    ok = {"胜平负概率最大差": 0.0, "两边都没出预测的不算，一边出一边没出的场数": 0, "两边都有": 5, "参考的场数": 5}
+    ok = {"胜平负概率最大差": 0.0, "两边都没出预测的不算，一边出一边没出的场数": 0, "两边都有": 5, "参考的场数": 5,
+          "这次的场数": 5}
     fe.check_reference(ok)
     for bad in ({"胜平负概率最大差": 1e-6}, {"两边都没出预测的不算，一边出一边没出的场数": 1}, {"两边都有": 4},
-                {"胜平负概率最大差": None}):
+                {"胜平负概率最大差": None}, {"这次的场数": 6}):
         with pytest.raises(RuntimeError):
             fe.check_reference({**ok, **bad})
     with pytest.raises(RuntimeError):
@@ -290,4 +337,5 @@ def test_confidence_pair_ok():
     pre = pre[pre["match_id"] <= 40]                                    # 前 40 场有多家平均赛前
     _, _, check = fe.confidence_check(pd.concat([pred, pre]), odds, promoted, SETTINGS)
     want = sum(1 for i in range(2, 41) if i % 9 != 0)                   # 第 1 场没赔率；每 9 场没有平博
-    assert check["两家都有赛前的比赛（“没有平博”那条能不能算）"] == want
+    key = next(k for k in check if k.startswith("“没有平博”那条能算的比赛"))
+    assert check[key] == want

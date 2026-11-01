@@ -8,7 +8,8 @@
 二、只考一次
   考完写 data/backtest/<final_exam.run_name>/exam_done.json；之后要把 settings.yaml 的 final_exam.done 改成 true 提交。
   两样有一样在，考试模式直接报错，不留“强制再考”的开关。
-  开考（回测之前）先写 exam_started.json（commit、设置）；程序出错重跑用 --skip-backtest --reason，设置要和开考时一样。
+  开考（回测之前）先写 exam_started.json（commit、设置、快照 sha256）；程序出错重算用 --skip-backtest 或 --restart 加 --reason，
+  设置和快照要和开考时一样。
   正式考要给 --reference：热身赛季（打分赛季之前）的预测要和 W9 一模一样，对不上就报错、不打分。
   正式考之前，用 --dry-run 在开发赛季（默认 2023/24，开发模式）试跑一次，和 W9 / W10 同一批比赛核对。
 
@@ -86,38 +87,65 @@ def check_not_done(settings: dict, run_dir) -> None:
 
 STARTED_FILE = "exam_started.json"
 FROZEN = ("fusion", "lean", "confidence", "models", "final_exam", "fusion_study", "confidence_study", "compare",
-          "backtest", "features", "rest_days", "seasons", "leagues")
+          "backtest", "features", "rest_days", "seasons", "leagues", "market_odds", "calc", "paths")
 
 
 def frozen_settings(settings: dict) -> dict:
     """考试用到的设置（开考时记下来；中途出错重跑时要和开考时一模一样，不能看了分数再改设置）。done 不算（考完才改）。"""
     out = json.loads(json.dumps({k: settings[k] for k in FROZEN}, default=str))
     out["final_exam"].pop("done", None)
+    usage = resolve_path(settings["features"]["data_usage"])
+    if usage.exists():                                 # 数据字典（用途规则）不在 settings 里，记它的 sha256
+        import hashlib
+        out["数据字典 sha256"] = hashlib.sha256(usage.read_bytes()).hexdigest()
     return out
 
 
-def start_record(settings: dict, run_dir, git: dict, resume: bool, reason: str | None) -> dict:
-    """正式考开考前调用（check_not_done 之后）。
+def db_fingerprint(db) -> dict:
+    """数据库快照是哪个文件（路径、大小、sha256）：开考记录里存一份，重跑、重开时要是同一份快照。"""
+    import hashlib
+    from pathlib import Path
+    f = Path(db).resolve()
+    h = hashlib.sha256()
+    with open(f, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return {"路径": str(f), "大小": f.stat().st_size, "sha256": h.hexdigest()}
 
-    不是重跑（resume = False）：结果文件夹里不能已经有 exam_started.json（开考过一次就不能当新考试再来），写一份开考记录。
-    重跑（resume = True，--skip-backtest）：必须已经有开考记录、设置和开考时一样、写了重跑原因；在记录里追加一条（时间、commit、原因）。
-    这是需求文档允许的“程序算错可以改程序重算”，每次重跑都留记录，考完一起写进 exam_done.json。
+
+def start_record(settings: dict, run_dir, git: dict, db: dict, kind: str, reason: str | None) -> dict:
+    """正式考开考前调用（check_not_done 之后、回测之前）。kind 是下面三种之一：
+
+    "开考"：结果文件夹里不能已经有 exam_started.json（开考过一次就不能当新考试再来），写一份开考记录（commit、设置、快照）。
+    "重跑"（--skip-backtest）：回测已经存下来、后面一步程序出错，读存下来的预测接着算。
+    "重开"（--restart）：开考后、回测还没存下来（没有 predictions.csv）就出错了（例如回测中途崩了），从头再跑回测。
+    重跑和重开都要：已经有开考记录、设置和快照都和开考时一样、写了原因（--reason）；在记录里追加一条，不删原来的。
+    这是需求文档允许的“程序算错可以改程序重算”，每次都留记录，考完一起写进 exam_done.json。
     """
     path = run_dir / STARTED_FILE
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    if not resume:
+    if kind == "开考":
         if path.exists():
-            raise ExamAlreadyDone(f"{path} 已经有了：期末考试开考过。程序出错要重算，用 --skip-backtest 加 --reason 说明原因")
-        rec = {"开考时间_utc": now, "git": git, "设置": frozen_settings(settings), "重跑": []}
-    else:
+            raise ExamAlreadyDone(f"{path} 已经有了：期末考试开考过。程序出错要重算，用 --skip-backtest 或 --restart 加 --reason")
+        rec = {"开考时间_utc": now, "git": git, "数据库快照": db, "设置": frozen_settings(settings), "重跑": []}
+    elif kind in ("重跑", "重开"):
         if not path.exists():
-            raise RuntimeError(f"没有开考记录 {path}：--skip-backtest 只能用在开考过、中途出错的考试上")
+            raise RuntimeError(f"没有开考记录 {path}：--skip-backtest、--restart 只能用在开考过、中途出错的考试上")
         if not reason:
-            raise RuntimeError("重跑要用 --reason 写清楚是什么程序错误、改了什么")
+            raise RuntimeError(f"{kind}要用 --reason 写清楚是什么程序错误、改了什么")
+        has_pred = (run_dir / "predictions.csv").exists()
+        if kind == "重开" and has_pred:
+            raise RuntimeError("回测已经存下来了，不能重开（重开会重新出预测）：后面一步出错用 --skip-backtest")
+        if kind == "重跑" and not has_pred:
+            raise RuntimeError("回测还没存下来，没法重跑：用 --restart 从头跑回测")
         rec = json.loads(path.read_text(encoding="utf-8"))
         if rec["设置"] != frozen_settings(settings):
             raise RuntimeError("设置和开考时不一样：考试中不能改设置（需求文档第 5 节“期末考试怎么考”）")
-        rec["重跑"].append({"时间_utc": now, "git": git, "原因": reason})
+        if rec.get("数据库快照") != db:
+            raise RuntimeError(f"数据库快照和开考时不一样：开考 {rec.get('数据库快照')}，现在 {db}")
+        rec["重跑"].append({"时间_utc": now, "哪种": kind, "git": git, "原因": reason})
+    else:
+        raise ValueError(kind)
     run_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
     return rec
@@ -275,7 +303,8 @@ def confidence_check(pred: pd.DataFrame, odds: pd.DataFrame, promoted: pd.Series
              "没有赔率（只出模型概率）": int((~t["has_odds"]).sum()), "胜平负用平博": int((t["mo_pinnacle"] == 1).sum()),
              "能算 d 的比赛（平博赛前 + 平博收盘）": int(t["d_ok"].sum()),
              "d 平均": float(t["d"].mean()) if t["d_ok"].any() else None,
-             "两家都有赛前的比赛（“没有平博”那条能不能算）": int(t["pair_ok"].sum()),
+             "“没有平博”那条能算的比赛（多家平均赛前只从回测的“赛前代替”取，有多家平均收盘的比赛没有）":
+                 int(t["pair_ok"].sum()),
              "各因素场数（全部比赛）": {cs.FACTOR_NAMES[f]: int(t[f].sum()) for f in cs.FACTORS},
              "现在的降级因素": list(cfg["downgrade_factors"]), "“高”的 d 不大于“中”“低”": rule}
     return lt, ft, check
@@ -367,21 +396,26 @@ def check_reference(reference: dict | None) -> None:
     if reference is None:
         raise RuntimeError("正式考要给 --reference（W9 的 w9_gb_l7），先核对热身赛季")
     gap, one_side = reference["胜平负概率最大差"], reference["两边都没出预测的不算，一边出一边没出的场数"]
-    if gap is None or gap != 0 or one_side != 0 or reference["两边都有"] != reference["参考的场数"]:
+    if (gap is None or gap != 0 or one_side != 0 or reference["两边都有"] != reference["参考的场数"]
+            or reference["这次的场数"] != reference["参考的场数"]):
         raise RuntimeError(f"热身赛季和参考回测对不上，不打分：{reference}")
 
 
-def exam_guards(settings: dict, run_dir, git: dict, args) -> dict | None:
+def exam_guards(settings: dict, run_dir, git: dict, args, db: dict | None) -> dict | None:
     """正式考开考前的检查（试跑不查，返回 None）：
-    没考过；代码和设置都提交了；给了 --reference；然后写（或追加）开考记录 exam_started.json。"""
+    没考过；代码和设置都提交了；给了 --reference；然后写（或追加）开考记录 exam_started.json。
+    db 是 db_fingerprint 的结果：main 在这之前先打开过快照（打不开就在写开考记录之前报错）。"""
     if args.dry_run:
         return None
+    if args.skip_backtest and args.restart:
+        raise ValueError("--skip-backtest 和 --restart 只能用一个")
     check_not_done(settings, run_dir)
     if git["有没提交的改动"] is not False:        # 考试用的代码和设置要是一次提交（以后能查），有改动或查不到都不考
         raise RuntimeError(f"正式考试前要先提交全部改动（git 状态：{git}）")
     if not args.reference:
         raise RuntimeError("正式考要给 --reference（W9 的 w9_gb_l7），先核对热身赛季")
-    return start_record(settings, run_dir, git, args.skip_backtest, args.reason)
+    kind = "重跑" if args.skip_backtest else ("重开" if args.restart else "开考")
+    return start_record(settings, run_dir, git, db, kind, args.reason)
 
 
 # ======================= 主程序 =======================
@@ -402,7 +436,9 @@ def main() -> None:
     ap.add_argument("--skip-backtest", action="store_true",
                     help="回测已经跑完、后面一步出了程序错误时用：直接读上次存的预测、矩阵和赔率"
                          "（正式考要有开考记录、设置没变、还没写 exam_done.json）")
-    ap.add_argument("--reason", default=None, help="正式考用 --skip-backtest 重跑时必须写：是什么程序错误、改了什么")
+    ap.add_argument("--restart", action="store_true",
+                    help="正式考开考后、回测还没存下来就出错时用：从头再跑回测（要有开考记录、设置和快照没变）")
+    ap.add_argument("--reason", default=None, help="正式考用 --skip-backtest 或 --restart 时必须写：是什么程序错误、改了什么")
     a = ap.parse_args()
 
     # first–last：打分的赛季；回测从 backtest_first 连着跑到 last（重训日期和 W9 一样），前面的赛季只当“热身”、不打分
@@ -418,9 +454,9 @@ def main() -> None:
         raise ValueError("fusion.model、fusion_study.model、confidence_study.model 要是同一个模型")
     print(f"{'试跑' if a.dry_run else '期末考试'}：{mode}模式，回测 {season_label(bt_first)} 起，"
           f"打分 {season_label(first)}–{season_label(last)}，结果放 {run_dir}")
-    started = exam_guards(settings, run_dir, git, a)
+    fs = FeatureStore(open_readonly(a.db), mode, settings)      # 先打开快照：打不开就在写开考记录之前报错
+    started = exam_guards(settings, run_dir, git, a, None if a.dry_run else db_fingerprint(a.db))
 
-    fs = FeatureStore(open_readonly(a.db), mode, settings)
     t0 = time.perf_counter()
     if a.skip_backtest:
         out = run_dir
