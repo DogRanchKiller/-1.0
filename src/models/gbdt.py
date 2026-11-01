@@ -37,6 +37,12 @@
     val：最贵 11 人身价和（log）这队减对手（top_value_diff），对照用：看是“伤停”有用，还是只是“身价”有用。
   训练时这些数从历史比赛那张表里拿，出预测时从回测框架接好的目标比赛那张表里拿（框架看 pre_match_data 去接）。
   usage 跟着改成“研究实验”（一次回测里的模型用途要一样，所以对照组 gb_l7_r 也写 usage: 研究实验）。
+
+六、步骤 8 的 B 版（需求文档第 4 节“步骤 8 怎么做”，用途「B版输入」）
+  extra 写了 odds 时，多加 7 个赔率特征（src/features/market_odds.py 算好，回测框架看 uses_pre_odds 去接）：
+    这队赢、平、对手赢的概率（赛前赔率去水）；大 2.5 球的概率；市场预期进球 log（这队、对手）；胜平负用的是不是平博。
+  features = mktonly（对照组 gb_mkt）：只用联赛、是不是主场 + 这 7 个赔率特征。
+  A版输入不能用赔率：用途是 A版输入 又写了 odds 直接报错。
 """
 from __future__ import annotations
 
@@ -44,6 +50,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from src.features.market_odds import ODDS_COLS
 from src.features.team_form import Form, PiRating, Standings
 from src.models.base import Model, window_start
 from src.models.dynamic import DynamicModel, _days
@@ -57,6 +64,9 @@ TABLE = ["played", "ppg", "gdpg", "rank"]
 INJURY_DATA = "伤停（研究）"
 INJ = ["inj_n", "inj_share", "inj_top_loss"]
 EXTRA_COLS = [f"tm_{s}_{n}" for n in [*INJ, "top_value"] for s in ("home", "away")]
+# 赔率特征的名字（按“这队 / 对手”的角度；ODDS_COLS 是按主队角度的原始列，见 _features）
+ODDS_FEATS = ["mkt_p_win", "mkt_p_draw", "mkt_p_loss", "mkt_over25", "mkt_loglam_for", "mkt_loglam_against",
+              "mkt_pinnacle"]
 
 
 class GBDTModel(Model):
@@ -71,14 +81,21 @@ class GBDTModel(Model):
                  valid_days: float = 365, retrain_days: float = 91, min_train_rows: int = 2000,
                  seed: int = 0, max_goals: int = 10, min_matches: int = 200, extra=(), usage: str = "A版输入"):
         self.extra = tuple(extra or ())
-        if any(e not in ("inj", "val") for e in self.extra):
-            raise ValueError(f"extra 只能是 inj / val，收到 {self.extra!r}")
+        if any(e not in ("inj", "val", "odds") for e in self.extra):
+            raise ValueError(f"extra 只能是 inj / val / odds，收到 {self.extra!r}")
         self.usage = usage
-        if self.extra:
+        self.injury = "inj" in self.extra or "val" in self.extra
+        if self.injury:
             self.data = (*GBDTModel.data, INJURY_DATA)
             self.pre_match_data = (INJURY_DATA,)     # 回测框架看到这个，给要预测的比赛接上本场的伤停（快照时间之前才有数）
-        if features not in ("all", "nodyn", "dynonly"):
-            raise ValueError(f"features 只能是 all / nodyn / dynonly，收到 {features!r}")
+        self.odds = "odds" in self.extra
+        if self.odds and usage == "A版输入":
+            raise ValueError("A 版不用赔率作输入：extra 写了 odds，用途要是「B版输入」")
+        self.uses_pre_odds = self.odds               # 回测框架看到这个，给历史比赛、要预测的比赛接上赔率特征
+        if features not in ("all", "nodyn", "dynonly", "mktonly"):
+            raise ValueError(f"features 只能是 all / nodyn / dynonly / mktonly，收到 {features!r}")
+        if features == "mktonly" and not self.odds:
+            raise ValueError("features = mktonly 只用赔率特征，extra 要写 odds")
         if target not in ("goals", "result"):
             raise ValueError(f"target 只能是 goals / result，收到 {target!r}")
         self.name = name
@@ -107,13 +124,16 @@ class GBDTModel(Model):
                       + side([f"table_{t}" for t in TABLE])
                       + side(self.form.names)
                       + (side(INJ) if "inj" in self.extra else [])
-                      + (["top_value_diff"] if "val" in self.extra else []))
+                      + (["top_value_diff"] if "val" in self.extra else [])
+                      + (ODDS_FEATS if self.odds else []))
         if features == "all":
             self.use = list(range(len(self.names)))
         elif features == "nodyn":
             self.use = [i for i, n in enumerate(self.names) if not n.startswith("dyn_")]
-        else:
+        elif features == "dynonly":
             self.use = [i for i, n in enumerate(self.names) if n in ("league", "is_home") or n.startswith("dyn_")]
+        else:
+            self.use = [i for i, n in enumerate(self.names) if n in ("league", "is_home") or n in ODDS_FEATS]
         self.processed: set[int] = set()
         self.rows: list[np.ndarray] = []         # 训练用的特征（每场两行：主队一行、客队一行）
         self.goals: list[int] = []               # 每行：这队进了几个
@@ -124,10 +144,12 @@ class GBDTModel(Model):
         self.train_log: list[dict] = []
 
     # ---------------- 一场比赛的特征（不改状态，Elo 的换赛季除外，见下面） ----------------
-    def _features(self, comp: str, season: int, home: str, away: str, ko: str, rest, ext=None) -> tuple | None:
+    def _features(self, comp: str, season: int, home: str, away: str, ko: str, rest, ext=None,
+                  odds=None) -> tuple | None:
         """这场比赛开球前的特征：(主队那一行, 客队那一行)；dyn 给不出（上赛季补赛里有队不在状态里等）返回 None。
 
-        ext：伤停研究的八个数，顺序按 EXTRA_COLS（主、客队交替）；extra 为空时不用。
+        ext：伤停研究的八个数，顺序按 EXTRA_COLS（主、客队交替）；没写 inj / val 时不用。
+        odds：赔率特征的七个数，顺序按 ODDS_COLS（主队角度）；没写 odds 时不用。
         """
         v = self.dyn.pre_match_view(comp, season, home, away, ko)
         if v is None:
@@ -153,7 +175,7 @@ class GBDTModel(Model):
                 prh, pra, rh, ra, euh, eua, *th, *ta, *fh, *fa]
         arow = [lc, 0.0, lla, llh, sda, sdh, hm, ea, eh, ea - eh - H, pa[1], ph[0], -egd,
                 pra, prh, ra, rh, eua, euh, *ta, *th, *fa, *fh]
-        if self.extra:
+        if self.injury:
             e = list(ext) if ext is not None else [np.nan] * len(EXTRA_COLS)
             hi, ai = e[0:6:2], e[1:6:2]          # 主队、客队的 inj_n、inj_share、inj_top_loss
             hv, av = e[6], e[7]                  # 主队、客队最贵 11 人身价和（log）
@@ -163,6 +185,10 @@ class GBDTModel(Model):
             if "val" in self.extra:
                 hrow.append(hv - av)
                 arow.append(av - hv)
+        if self.odds:
+            ph_, pd_, pa_, ov, llh_, lla_, pin = list(odds) if odds is not None else [np.nan] * len(ODDS_COLS)
+            hrow += [ph_, pd_, pa_, ov, llh_, lla_, pin]          # 主队看：这队赢 = 主胜
+            arow += [pa_, pd_, ph_, ov, lla_, llh_, pin]          # 客队看：这队赢 = 客胜，预期进球对调
         return np.array(hrow, dtype=float), np.array(arow, dtype=float)
 
     # ---------------- 处理比赛结果 ----------------
@@ -182,7 +208,7 @@ class GBDTModel(Model):
             return
         r = r.sort_values(["kickoff_earliest_utc", "match_id"])
         num = {c: pd.to_numeric(r[c], errors="coerce").to_numpy(float) if c in r else np.full(len(r), np.nan)
-               for c in SHOT_COLS + REST_COLS + EXTRA_COLS}
+               for c in SHOT_COLS + REST_COLS + EXTRA_COLS + ODDS_COLS}
         items = list(r[["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
                         "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None))
         start = 0
@@ -191,7 +217,7 @@ class GBDTModel(Model):
             while end < len(items) and items[end][8] == items[start][8]:   # 同一个开球时间的一组
                 end += 1
             feats = [self._features(it[1], int(it[2]), it[3], it[4], it[8], tuple(num[c][k] for c in REST_COLS),
-                                    tuple(num[c][k] for c in EXTRA_COLS))
+                                    tuple(num[c][k] for c in EXTRA_COLS), tuple(num[c][k] for c in ODDS_COLS))
                      for k, it in enumerate(items[start:end], start)]
             for k, f in zip(range(start, end), feats):
                 self._observe_row(items[k], f, num["home_shots_on_target"][k], num["away_shots_on_target"][k])
@@ -266,14 +292,14 @@ class GBDTModel(Model):
         base = self.dyn.predict(targets, cutoff)                # 只在 dyn 能出预测的比赛上出
         cols = lambda names: np.column_stack([pd.to_numeric(targets[c], errors="coerce").to_numpy(float)
                                               if c in targets else np.full(len(targets), np.nan) for c in names])
-        rest, ext = cols(REST_COLS), cols(EXTRA_COLS)
+        rest, ext, odds = cols(REST_COLS), cols(EXTRA_COLS), cols(ODDS_COLS)
         items = []
         for r, (comp, season, home, away, ko) in enumerate(targets[
                 ["competition", "season", "home_team", "away_team", "kickoff_earliest_utc"]].itertuples(
                 index=False, name=None)):
             if base[r] is None:
                 continue
-            f = self._features(comp, int(season), home, away, ko, tuple(rest[r]), tuple(ext[r]))
+            f = self._features(comp, int(season), home, away, ko, tuple(rest[r]), tuple(ext[r]), tuple(odds[r]))
             if f is not None:
                 items.append((r, comp, f))
         if not items:

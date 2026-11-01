@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from src.common.config import load_settings, resolve_path
+from src.common.markets import fit_market_lambdas, matrix_probs  # noqa: F401（别处按 mc.xxx 用）
 from src.common.odds import devig
 from src.evaluate import metrics
 from src.evaluate.compare import block_ids, bootstrap_mean_diff, verdict
@@ -203,48 +204,10 @@ def check3(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
         rows.append(row)
     return pd.DataFrame(rows)
 
+
 # ======================= 市场比分矩阵 =======================
-def matrix_probs(lh, la, n: int = 10) -> np.ndarray:
-    """一批比赛的独立泊松比分矩阵 → 每场 [主胜, 平, 客胜, 大 2.5 球] 四个概率。"""
-    m = score_matrices(np.asarray(lh, float), np.asarray(la, float), 0.0, 0.0, n)
-    i, j = np.indices(m.shape[1:])
-    return np.stack([(m * (i > j)).sum(axis=(1, 2)), (m * (i == j)).sum(axis=(1, 2)),
-                     (m * (i < j)).sum(axis=(1, 2)), (m * (i + j > 2)).sum(axis=(1, 2))], axis=1)
-
-
-def fit_market_lambdas(target: np.ndarray, n: int = 10, iters: int = 60, tol: float = 1e-10
-                       ) -> tuple[np.ndarray, np.ndarray]:
-    """每场找 (λ主, λ客)，让 matrix_probs 的四个概率和 target（每场一行四个数）的差的平方和最小。
-
-    在 log λ 上做高斯-牛顿：每一步用数值斜率 J（4×2）解 (JᵀJ + 一点点阻尼) Δ = −Jᵀ r，几万场同时走。
-    走了以后误差变大的场，那一步减半再试（最多 20 次），保证每场误差只降不升。返回 (λ主, λ客)。
-    """
-    t = np.asarray(target, float)
-    x = np.tile(np.log([1.45, 1.15]), (len(t), 1))           # 从平均水平出发（主队 1.45、客队 1.15 个）
-    h = 1e-5
-
-    def resid(x):
-        return matrix_probs(np.exp(x[:, 0]), np.exp(x[:, 1]), n) - t
-
-    r = resid(x)
-    for _ in range(iters):
-        J = np.stack([(resid(x + [h, 0]) - r) / h, (resid(x + [0, h]) - r) / h], axis=2)   # 场数 × 4 × 2
-        A = np.einsum("nki,nkj->nij", J, J) + 1e-9 * np.eye(2)
-        step = -np.linalg.solve(A, np.einsum("nki,nk->ni", J, r)[..., None])[..., 0]
-        cost = (r ** 2).sum(axis=1)
-        scale = np.ones(len(t))
-        for _ in range(20):                                   # 误差变大就把步子减半
-            x_new = x + step * scale[:, None]
-            r_new = resid(x_new)
-            worse = (r_new ** 2).sum(axis=1) > cost
-            if not worse.any():
-                break
-            scale[worse] /= 2
-        keep = ~worse
-        x[keep], r[keep] = x_new[keep], r_new[keep]
-        if np.abs(step * scale[:, None]).max() < tol:
-            break
-    return np.exp(x[:, 0]), np.exp(x[:, 1])
+# matrix_probs、fit_market_lambdas 搬到了 src/common/markets.py（步骤 8 的赔率特征在取数层也要用，取数层不能引用模型），
+# 这里照旧能用 mc.matrix_probs、mc.fit_market_lambdas。
 
 
 def market_matrix(df: pd.DataFrame, scores: pd.DataFrame, settings: dict

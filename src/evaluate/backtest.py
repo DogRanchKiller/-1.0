@@ -52,6 +52,7 @@ from src.common.odds import devig
 from src.evaluate import metrics
 from src.features import FeatureStore, LookAheadError, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
+from src.features.market_odds import attach_odds_features, history_odds_features
 from src.features.rest_days import RestDays
 from src.models.base import Model, check_result_probs
 
@@ -173,6 +174,13 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         last_sched: str | None = None
         timing["取赛程次数"] = 0
 
+    # 赛前赔率（步骤 8 B 版，需求文档第 4 节“步骤 8 怎么做”）：有模型要（uses_pre_odds）才取。
+    # 历史比赛的赔率特征和历史比赛同一个截止时间、同一个 since 增量取；要预测的比赛按“本场”取（src/features/market_odds.py）
+    pre_odds = any(getattr(m, "uses_pre_odds", False) for m in models)
+    if pre_odds and max(horizons) > 24:
+        # football-data 的赛前赔率按 T-24 算：比 24 小时更早的时点，要预测的比赛全拿不到赔率（训练时却有），这样比不公平
+        print(f"注意：赛前赔率按开球前 24 小时算，{max(horizons):g} 小时这个时点要预测的比赛都没有赔率特征")
+
     hist_parts: list[pd.DataFrame] = []
     hist: pd.DataFrame | None = None
     seen: set[int] = set()
@@ -211,6 +219,9 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
             if not new.empty:
                 if rest is not None:
                     new = rest.annotate(new)
+                if pre_odds:
+                    feats = history_odds_features(fs, cutoff, usage, competition=comps, since=since)
+                    new = new.merge(feats, on="match_id", how="left")
                 seen.update(int(x) for x in new["match_id"])
                 hist_parts.append(new)
                 if last_fetch is not None:
@@ -236,6 +247,8 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         # 本场的赛前文件数据（例如步骤 7 的「伤停（研究）」）：有模型要（pre_match_data）才接，取数层按本场检查、按快照时间给数
         if pre_data:
             info_cols = fs.attach_pre_match(info_cols, cutoff, usage, pre_data)
+        if pre_odds:
+            info_cols = attach_odds_features(fs, info_cols, cutoff, usage)
         for m in models:
             preds = m.predict(info_cols, cutoff)
             if len(preds) != len(group):

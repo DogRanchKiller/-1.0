@@ -156,3 +156,66 @@ def top_scores(matrix, n: int = 5) -> list[tuple[int, int, float]]:
     m = check_score_matrix(matrix)
     order = np.argsort(m, axis=None)[::-1][:n]
     return [(int(i), int(j), float(m[i, j])) for i, j in zip(*np.unravel_index(order, m.shape))]
+
+
+# ======================= 从赔率反推市场比分矩阵（第 5 节“市场比分矩阵”、第 4 节步骤 8 的赔率特征共用） =======================
+def poisson_matrices(lam_h, lam_a, n: int = 10) -> np.ndarray:
+    """一批比赛的独立泊松比分矩阵，形状 (场数, n + 1, n + 1)；最后一行 / 列是 “n 球及以上”，每个矩阵加起来是 1。
+
+    和 src/models/goals.py 的 score_matrices(lam_h, lam_a, rho=0, alpha=0, n) 结果一样（测试里核对），
+    放在这里是因为取数层（src/features）也要用，而数据只能往一个方向流，取数层不能引用模型（src/models）。
+    递推算：进 0 球 e^(−λ)，进 k+1 球 = 进 k 球 × λ ÷ (k + 1)。
+    """
+    def one_team(lam) -> np.ndarray:
+        lam = np.atleast_1d(np.asarray(lam, dtype=float))[:, None]
+        ratio = lam / (np.arange(n - 1) + 1)
+        p = np.exp(-lam) * np.concatenate([np.ones_like(lam), np.cumprod(ratio, axis=1)], axis=1)   # 进 0 … n−1 球
+        tail = np.clip(1 - p.sum(axis=1, keepdims=True), 0, None)                                  # n 球及以上
+        return np.concatenate([p, tail], axis=1)
+
+    m = one_team(lam_h)[:, :, None] * one_team(lam_a)[:, None, :]
+    return m / m.sum(axis=(1, 2), keepdims=True)
+
+
+def matrix_probs(lh, la, n: int = 10) -> np.ndarray:
+    """一批比赛的独立泊松比分矩阵 → 每场 [主胜, 平, 客胜, 大 2.5 球] 四个概率。"""
+    m = poisson_matrices(lh, la, n)
+    i, j = np.indices(m.shape[1:])
+    return np.stack([(m * (i > j)).sum(axis=(1, 2)), (m * (i == j)).sum(axis=(1, 2)),
+                     (m * (i < j)).sum(axis=(1, 2)), (m * (i + j > 2)).sum(axis=(1, 2))], axis=1)
+
+
+def fit_market_lambdas(target, n: int = 10, iters: int = 60, tol: float = 1e-10) -> tuple[np.ndarray, np.ndarray]:
+    """每场找 (λ主, λ客)，让 matrix_probs 的四个概率和 target（每场一行四个数）的差的平方和最小。
+
+    在 log λ 上做高斯-牛顿：每一步用数值斜率 J（4×2）解 (JᵀJ + 一点点阻尼) Δ = −Jᵀ r，几万场同时走。
+    走了以后误差变大的场，那一步减半再试（最多 20 次），保证每场误差只降不升。返回 (λ主, λ客)。
+    """
+    t = np.asarray(target, float).reshape(-1, 4)
+    if len(t) == 0:
+        return np.zeros(0), np.zeros(0)
+    x = np.tile(np.log([1.45, 1.15]), (len(t), 1))           # 从平均水平出发（主队 1.45、客队 1.15 个）
+    h = 1e-5
+
+    def resid(x):
+        return matrix_probs(np.exp(x[:, 0]), np.exp(x[:, 1]), n) - t
+
+    r = resid(x)
+    for _ in range(iters):
+        J = np.stack([(resid(x + [h, 0]) - r) / h, (resid(x + [0, h]) - r) / h], axis=2)   # 场数 × 4 × 2
+        A = np.einsum("nki,nkj->nij", J, J) + 1e-9 * np.eye(2)
+        step = -np.linalg.solve(A, np.einsum("nki,nk->ni", J, r)[..., None])[..., 0]
+        cost = (r ** 2).sum(axis=1)
+        scale = np.ones(len(t))
+        for _ in range(20):                                   # 误差变大就把步子减半
+            x_new = x + step * scale[:, None]
+            r_new = resid(x_new)
+            worse = (r_new ** 2).sum(axis=1) > cost
+            if not worse.any():
+                break
+            scale[worse] /= 2
+        keep = ~worse
+        x[keep], r[keep] = x_new[keep], r_new[keep]
+        if np.abs(step * scale[:, None]).max() < tol:
+            break
+    return np.exp(x[:, 0]), np.exp(x[:, 1])
