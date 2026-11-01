@@ -178,15 +178,15 @@ def factor_table(t: pd.DataFrame, settings: dict) -> pd.DataFrame:
     return out
 
 
-def levels(t: pd.DataFrame, counted: list[str]) -> np.ndarray:
-    """每场的等级：3 − 碰上的“算数”因素个数；一家赔率都没有再减 1；最低 1。
+def levels(t: pd.DataFrame, counted: list[str], no_odds_down: int = 1) -> np.ndarray:
+    """每场的等级：3 − 碰上的“算数”因素个数；一家赔率都没有再减 no_odds_down（settings 的 confidence.no_odds_downgrade）；最低 1。
 
     没有赔率时“分歧”“没有平博”两条没法算（build 里已经是 False），只看前几轮、升班马。
     """
     lv = np.full(len(t), 3)
     for f in counted:
         lv -= t[f].to_numpy(bool).astype(int)
-    lv -= (~t["has_odds"].to_numpy(bool)).astype(int)
+    lv -= (~t["has_odds"].to_numpy(bool)).astype(int) * no_odds_down
     return np.maximum(lv, 1)
 
 
@@ -208,7 +208,7 @@ def run(pred: pd.DataFrame, odds: pd.DataFrame, settings: dict) -> dict:
     ft = factor_table(t, settings)
     key = {v: k for k, v in FACTOR_NAMES.items()}
     counted = [key[n] for n in ft.loc[ft["算数"], "因素"]]
-    t["level"] = levels(t, counted)
+    t["level"] = levels(t, counted, settings["confidence"]["no_odds_downgrade"])
     lt = level_table(t)
     check = {"有预测和结果的比赛": int(len(t)), "有赛前赔率": int(t["has_odds"].sum()),
              "没有赔率（只出模型概率）": int((~t["has_odds"]).sum()),
