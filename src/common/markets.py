@@ -252,15 +252,37 @@ def dc_matrices(lam_h, lam_a, rho, n: int = 10) -> np.ndarray:
     return m / m.sum(axis=(1, 2), keepdims=True)
 
 
-def fit_market_dc(target, n: int = 10, iters: int = 60, tol: float = 1e-10
+def over_shares(lh, la, line: float, n: int = 10) -> np.ndarray:
+    """一批比赛的独立泊松矩阵在大小球 line 这条线上“大”的胜算（赢半、输半算一半，走盘不计，和 win_share 一样）。
+
+    line = 2.5 时就是 matrix_probs 的第 4 个数（大 2.5 球的概率）。
+    只用于 line ≥ 2.5：这时 DC 的 rho 不改胜算（rho 只在 0-0、0-1、1-0、1-1 四格之间挪概率，总进球 0–2 这三档合起来不变，
+    而 2.5 以上的线，总进球 0–2 全是输），所以泊松算的胜算就是 DC 矩阵的胜算。
+    """
+    m = poisson_matrices(lh, la, n)
+    i, j = np.indices(m.shape[1:])
+    up, down = np.zeros(len(m)), np.zeros(len(m))
+    for total in range(2 * n + 1):
+        p = (m * (i + j == total)).sum(axis=(1, 2))
+        res = settle_margin(*over_under_margin(total, line, "over"))
+        up += p * {"win": 1.0, "half_win": 0.5}.get(res, 0.0)
+        down += p * {"loss": 1.0, "half_loss": 0.5}.get(res, 0.0)
+    return up / (up + down)
+
+
+def fit_market_dc(target, n: int = 10, iters: int = 60, tol: float = 1e-10, ou_line: float = 2.5
                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """每场找 (λ主, λ客, rho)，让 DC 比分矩阵的 [主胜, 平, 客胜, 大 2.5 球] 和 target（每场一行四个数，胜平负加起来是 1）一样。
 
     rho 不改“主胜 − 客胜”和大 2.5 球（见 dc_matrices），所以分两步：
       1. 两个 λ：让独立泊松矩阵的“主胜 − 客胜”和大 2.5 球对上（高斯-牛顿，两个数解两个数）；
       2. rho：平局还差多少就补多少，rho = (泊松的平局 − 要的平局) ÷ (2c)；超出 dc_rho_bounds 的取边界（这场平局就对不上，报告里看还原误差）。
+    ou_line：target 第 4 个数是哪条大小球线上“大”的胜算（预测页没有 2.5 球赔率时用主盘口，例如 2.75）。
+      默认 2.5，和回测一样；只能 ≥ 2.5（更低的线 rho 会改胜算，这样分两步就不对了）。
     返回 (λ主, λ客, rho)。
     """
+    if ou_line < 2.5:
+        raise ValueError(f"大小球线 {ou_line} 低于 2.5：rho 会改它的胜算，不能这样反推")
     t = np.asarray(target, float).reshape(-1, 4)
     if len(t) == 0:
         return np.zeros(0), np.zeros(0), np.zeros(0)
@@ -268,7 +290,8 @@ def fit_market_dc(target, n: int = 10, iters: int = 60, tol: float = 1e-10
 
     def resid(x):
         p = matrix_probs(np.exp(x[:, 0]), np.exp(x[:, 1]), n)
-        return np.stack([p[:, 0] - p[:, 2], p[:, 3]], axis=1) - goal
+        over = p[:, 3] if ou_line == 2.5 else over_shares(np.exp(x[:, 0]), np.exp(x[:, 1]), ou_line, n)
+        return np.stack([p[:, 0] - p[:, 2], over], axis=1) - goal
 
     x = _gauss_newton(resid, np.tile(np.log([1.45, 1.15]), (len(t), 1)), iters, tol)
     lh, la = np.exp(x[:, 0]), np.exp(x[:, 1])

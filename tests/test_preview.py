@@ -189,6 +189,24 @@ def test_build_preview_targets_and_odds(env):
     assert by_id[14]["date_precision"] == "round" and by_id[14]["kickoff_utc"] is None
 
 
+def test_build_preview_conclusion(env):
+    """结论：10 号有胜平负和大小球（只有 2.75 这条线）→ 已融合；11、14 没有赔率 → 模型自己的概率，信心降一级。"""
+    res = run_preview(env)
+    by_id = {r["match_id"]: r for r in res["rows"]}
+    fo, c = by_id[10]["fusion_odds"], by_id[10]["conclusion"]
+    assert fo["pinnacle"] is False and fo["n_books_1x2"] == 2 and fo["ou"]["line"] == 2.75
+    assert fo["p_1x2"] == pytest.approx(by_id[10]["market"]["p_1x2"])       # 没有平博：和“赔率概率”一样是各家平均
+    assert c["status"] == "已融合" and c["level"] == 3 and c["fit_error"] < 1e-6
+    assert c["p_1x2"] == pytest.approx(fo["p_1x2"], abs=1e-6)               # w = 1：结论就是赔率
+    assert c["leans"]["ah"]["line"] == -0.5 and c["leans"]["over25"] is not None
+    # 24 小时前（11-05 12:00）只有 Bet365 第一组赔率：变动算得出来，但不到 5 个百分点
+    assert 0 < c["odds_move"] < 0.05 and not c["flags"]["odds_move"]
+    for mid in (11, 14):
+        c = by_id[mid]["conclusion"]
+        assert c["status"] == "无赔率，未融合" and c["level"] == 2 and c["p_1x2"] == pytest.approx([0.5, 0.3, 0.2])
+    assert res["gap_threshold"] == env[1]["confidence_study"]["gap"]
+
+
 def test_gap_flag_uses_threshold(env):
     res = run_preview(env, FakeModel((0.75, 0.15, 0.10)))     # 赔率主胜约 51%，差 20 多个百分点
     g = {r["match_id"]: r["gap"] for r in res["rows"]}
@@ -211,6 +229,29 @@ def test_archive_insert_only_and_dedup(env):
     assert d["代码版本"] == "abc1234" and d["赔率公司数"] == 2
     assert d["模型设置"] == json.loads(json.dumps(model_config(_s["preview"]["model"], _s)))   # 存的是预览现在用的模型的设置
     assert d["亚盘主盘口"] == -0.5 and d["模型亚盘主队胜算"] is None       # 假模型只给胜平负，算不出盘口胜算
+    assert len(d["融合概率"]) == 3 and d["融合"]["状态"] == "已融合" and d["融合"]["大小球"]["line"] == 2.75
+    assert d["融合"]["信心等级"] == 3 and d["融合"]["倾向"]["ah"]["line"] == -0.5
+
+
+def test_archive_saves_again_when_odds_change(env):
+    """模型概率没变、赔率变了（融合概率跟着变）：这一场存一行新的，其他场不重复存。"""
+    con, _s = env
+    assert archive(con, run_preview(env), NOW, "abc1234") == {"新存": 3, "没变化": 0}
+    con.execute("insert into odds_changes (match_id, source, bookmaker, bookmaker_raw, market, line, home, draw, away,"
+                " over, under, changed_at_utc, fetched_at_utc, raw_file) values (10, 'dongqiudi', '威廉希尔', '威廉希尔',"
+                " '1x2', null, 1.7, 3.8, 5.0, null, null, '2026-11-06 10:00:00', '2026-11-06 10:00:00', 'x.json.gz')")
+    con.commit()
+    assert archive(con, run_preview(env), NOW, "abc1234") == {"新存": 1, "没变化": 2}
+
+
+def test_archive_saves_again_when_only_status_changes(env):
+    """胜平负没变、只是状态变了（例如大小球赔率刚出来，赔率不全 → 已融合）：也要存一行新的。"""
+    con, _s = env
+    res = run_preview(env)
+    assert archive(con, res, NOW)["新存"] == 3
+    c = {r["match_id"]: r for r in res["rows"]}[10]["conclusion"]
+    c.update(status="赔率不全", over25=None, btts=None)
+    assert archive(con, res, NOW) == {"新存": 1, "没变化": 2}
 
 
 def test_archive_skips_rows_without_model(env):
@@ -229,6 +270,11 @@ def test_render_escapes_and_labels(env):
     assert "时间待定" in page and "还没有赔率" in page and "主让半球" in page
     assert "推荐下注" not in page and "建议买" not in page
     assert "11 月 7 日 星期六" in page                                       # 2026-11-07 15:00 UTC = 北京 23:00
+    # 结论一列：已融合、没有赔率的写明；倾向、信心等级；差距界限和信心等级的“分歧大”一样是 6%
+    assert "结论（融合后）" in page and "无赔率，未融合" in page and "●●● 高" in page and "●●○ 中" in page
+    assert "倾向 主胜" in page or "胜平负 无明显倾向" in page
+    assert "差 6 个百分点以上" in page and "已融合 1 场" in page and "和回测不一样的地方" in page
+    assert "还没有用数据验证过" not in page                                  # 旧的 10% 那句删掉了
     info = s["preview"]["model_info"]
     assert f"模型 {info['label']}" in page                                   # 模型名字、回测赛季从 settings 读
     assert f"在 {info['backtest_period']} 赛季" in page and f"{info['backtest_n']:,} 场" in page
@@ -268,6 +314,6 @@ def test_page_uses_shared_dark_theme(env):
     assert 'name="viewport"' in page and "color-scheme: dark" in page
     assert page.count("data-label='差距'") == len(res["rows"])                    # 每场一行
     assert page.count("<tr class=has-gap") == sum(r["gap"] is not None for r in res["rows"])
-    for name in ("开球", "联赛", "比赛", "赔率概率", "差距", "亚盘", "大小球"):
+    for name in ("开球", "联赛", "比赛", "结论", "赔率概率", "差距", "亚盘", "大小球"):
         assert f"data-label='{name}'" in page
     assert "<script" not in page                                   # 只用样式，不用脚本

@@ -142,9 +142,13 @@ preview:
     backtest_n: 18083
     backtest_model: 0.979
     backtest_pinnacle: 0.964
-  # 模型和赔率的概率差多少算“差距大”，在页面上标出来。0.10 = 10 个百分点。
-  # 这是先定的一个数，没有用数据验证过；以后用回测看“差距大的场次”模型到底对不对，再调
-  gap_threshold: 0.10
+  # “差距大”的界限不在这里：用 confidence_study.gap（6%，检验二的最高一组，和信心等级的“分歧大”同一个数）。
+  # 2026-11-01 之前这里是 gap_threshold: 0.10（先定的、没检验过），接融合时删掉（需求文档第 5 节“预测页怎么接融合、倾向、信心等级”）
+  # 不确定因素“赔率最近大幅变动”：融合用的胜平负概率和 hours 小时前比，有一项变了不少于 min_change 就列出来。
+  # 先定的数，没有用数据检验过（回测只有一个赛前时点，检验不了）；只是提醒，不改信心等级
+  odds_move:
+    hours: 24
+    min_change: 0.05
   output: data/reports/preview.html   # 生成的网页（在 data/ 里，不上传 GitHub）
 
 inventory:
