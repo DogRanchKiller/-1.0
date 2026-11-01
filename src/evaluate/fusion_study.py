@@ -20,7 +20,7 @@
   fusion_odds.csv        每场取到的赔率（下次直接读，不再查数据库；取赔率的设置变了或加 --refresh-odds 会重新取，
                          设置存在 fusion_odds_settings.json）
   fusion_check.json      场数（融合 / 未融合）、市场矩阵还原误差、rho 取边界的场数、模型矩阵和 predictions.csv 对不对得上、
-                         两种融合算法在胜平负上差多少、选出的 w、最后定的 w
+                         两种融合算法在胜平负、大 2.5 球上差多少（w = 0.5）、选出的 w、最后定的 w
   fusion_grid.csv        每档 w 的各项分数（全部、每个联赛、两段），“最好”标出每一份里胜平负 log loss 最小的那档
   fusion_rolling_w.csv   滚动选 w：每个赛季选出的 w
   fusion_compare.csv     滚动融合 对 纯赔率、两者各自 对 平博收盘（全部、每个联赛、两段）
@@ -418,13 +418,19 @@ def main() -> None:
     npz = np.load(run_dir / f"matrices_{st['model']}.npz")
     ids, mats = npz["match_id"], npz["matrix"]
     cache, key_file = run_dir / "fusion_odds.csv", run_dir / "fusion_odds_settings.json"
-    # 取赔率用到的设置变了（换公司、换线、换用途）就重新取，不用旧的
+    targets = pred[(pred["model"] == st["model"]) & (pred["horizon"] == st["horizon"])][["match_id", "cutoff_utc"]]
+    # 取赔率用到的设置变了（换公司、换线、换用途、赛前赔率几小时前算知道、换数据库）就重新取，不用旧的
     key = json.dumps({"market_odds": settings["market_odds"], "usage": st["usage"], "ah_book": st["ah_book"],
-                      "model": st["model"], "horizon": st["horizon"]}, ensure_ascii=False, sort_keys=True)
+                      "model": st["model"], "horizon": st["horizon"], "db": str(a.db),
+                      "pre_odds_hours": settings["features"]["pre_odds_hours_before_kickoff"]},
+                     ensure_ascii=False, sort_keys=True)
+    odds = None
     if cache.exists() and key_file.exists() and key_file.read_text(encoding="utf-8") == key and not a.refresh_odds:
         odds = pd.read_csv(cache)
-    else:
-        targets = pred[(pred["model"] == st["model"]) & (pred["horizon"] == st["horizon"])][["match_id", "cutoff_utc"]]
+        # 回测重跑过、比赛不一样了，旧的赔率也不能用
+        if set(odds["match_id"]) != set(targets["match_id"]):
+            odds = None
+    if odds is None:
         fs = FeatureStore(open_readonly(a.db), "开发", settings)
         odds = fetch_odds(fs, targets.drop_duplicates("match_id"), settings)
         odds.to_csv(cache, index=False, encoding="utf-8-sig")
