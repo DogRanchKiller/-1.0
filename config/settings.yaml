@@ -278,6 +278,18 @@ lean:                         # 倾向门槛（同上；页面以后按它写“
   btts: 0.02                     # 双方进球：同上
   ah: 0.02                       # 亚盘（多家平均赛前主盘口）：两边较大的胜算 − 0.5 不小于这个
 
+confidence_study:             # 定信心等级规则 src/evaluate/confidence_study.py（需求文档第 5 节“信心等级规则怎么定”，跑之前写下）
+  model: gb_l7                   # 用哪个模型算“分歧”（上线的 A 版）
+  horizon: T-24                  # 用哪个时点（赛前赔率 T-24 起才能知道）
+  gap: 0.06                      # 模型和赔率在主胜、平、客胜上差得最多的那个不小于这个 = “分歧大”（检验二的最高一组）
+  early_rounds: 10               # 赛季前几轮（和 early_rounds.py 同一个数法）
+  min_diff: 0.002                # 一个因素“算数”：差的区间下限 > 0，而且差不小于这个（事先定的主观判断）
+  period_split: 2014             # 两段分开报告（只报告）
+
+confidence:                   # 信心等级规则（confidence_study 选出来的，需求文档第 5 节“信心等级规则结果”）。从 3（●●● 高）开始，最低 1（●○○ 低）
+  downgrade_factors: []          # 每碰上一个降一级。候选 gap / early / promoted / no_pinnacle，开发赛季回测一个都不算数
+  no_odds_downgrade: 1           # 一家赔率都没有（只出模型概率）再降几级（第 5 节“融合用哪家赔率”第 3 条）
+
 models:                      # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
   frequency:                 # 历史频率基线：按联赛的主胜 / 平 / 客胜比例
