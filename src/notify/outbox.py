@@ -84,14 +84,16 @@ class Outbox:
 
     # ---------- 读 ----------
     def pending(self) -> list[tuple[Path, dict]]:
-        """还没发出去的消息，按创建时间从早到晚（文件名开头就是时间，按文件名排就行）。读不了的文件跳过。"""
+        """还没发出去的消息，按创建时间从早到晚；同一时间的按标题排（拆成几条的“（1/3）”“（2/3）”按顺序发）。
+        读不了的文件跳过。"""
         out = []
         if self.folder.exists():
-            for p in sorted(self.folder.glob("*.json")):
+            for p in self.folder.glob("*.json"):
                 try:
                     out.append((p, json.loads(p.read_text(encoding="utf-8"))))
                 except (OSError, ValueError):
                     continue
+        out.sort(key=lambda x: (str(x[1].get("创建时间", "")), str(x[1].get("标题", "")), x[0].name))
         return out
 
     # ---------- 发完以后 ----------
