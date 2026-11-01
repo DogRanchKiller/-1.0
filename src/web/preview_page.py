@@ -162,6 +162,72 @@ def time_cell(r: dict) -> str:
     return t.strftime("%H:%M") if t else "未定"
 
 
+def lean_texts(c: dict) -> list[str]:
+    """结论里每个玩法的倾向，一项一句（src/predict/conclusion.py 的 leans 算好的）。
+
+    例：倾向 主胜 52%、无明显倾向、平局风险高、倾向 大 2.5 球 55%、倾向 双方进球 是 56%、倾向 主队（主让半球）54%。
+    算不出来的玩法（没有这个玩法的赔率）不写。
+    """
+    ln = c["leans"]
+    out = []
+    if ln["result"]:
+        res = ln["result"]
+        out.append(f"倾向 {OUTCOMES[res['side']]} {pct(res['p'])}" if res["lean"] else "胜平负 无明显倾向")
+    if ln["draw"] and ln["draw"]["risk"]:
+        out.append(f"平局风险高（{pct(ln['draw']['p'])}）")
+    if ln["over25"]:
+        o = ln["over25"]
+        out.append(f"倾向 {'大' if o['side'] == 'over' else '小'} 2.5 球 {pct(o['p'])}" if o["lean"] else "大小球 无明显倾向")
+    if ln["btts"]:
+        b = ln["btts"]
+        out.append(f"倾向 双方进球 {'是' if b['side'] == 'yes' else '否'} {pct(b['p'])}" if b["lean"]
+                   else "双方进球 无明显倾向")
+    if ln["ah"]:
+        a = ln["ah"]
+        out.append(f"倾向 {'主队' if a['side'] == 'home' else '客队'}（{ah_text(a['line'])}）{pct(a['p'])}" if a["lean"]
+                   else "亚盘 无明显倾向")
+    return out
+
+
+def conclusion_cell(c: dict) -> str:
+    """“结论”一格：融合后的胜平负概率、信心等级、各玩法倾向、不确定因素；赔率不全、没有赔率时写明。"""
+    if c["status"] is None:
+        return "<span class='muted'>没算出来</span>"
+    parts = [probs_cell(c["p_1x2"]), f"<span class='tag'>{e(c['level_name'])}</span>"]
+    if c["status"] != "已融合":
+        note = ("只有胜平负赔率，大小球、双方进球、亚盘不写倾向" if c["status"] == "赔率不全"
+                else "还没有赔率，下面是模型自己的概率，信心等级降一级")
+        parts.append(f"<span class='tag warn'>{e(c['status'])}</span><br><span class='small muted'>{e(note)}</span>")
+    parts.append("<br><span class='small'>" + "<br>".join(e(t) for t in lean_texts(c)) + "</span>")
+    if c["uncertain"]:
+        parts.append(f"<br><span class='small muted'>要注意：{e('、'.join(c['uncertain']))}</span>")
+    return f"<div>{''.join(parts)}</div>"
+
+
+def lean_rule_text(lean: dict) -> str:
+    """倾向门槛那一句（数字从 settings.yaml 的 lean 来，改了门槛这句跟着变）。"""
+    def th(key, word):
+        v = lean.get(key)
+        return f"{word}不写倾向" if v is None else f"{word}偏向那边 ≥ {(0.5 + v) * 100:.0f}% 才写"
+    result = ("胜平负不写倾向" if lean.get("result") is None
+              else f"胜平负最高的比第二高的多 {lean['result'] * 100:.0f} 个百分点以上才写“倾向”，不然写“无明显倾向”")
+    draw = "" if lean.get("draw") is None else f"；平局概率 ≥ {lean['draw'] * 100:.0f}% 另外写“平局风险高”"
+    return (f"{result}{draw}；{th('over25', '大小球 2.5 球')}；{th('btts', '双方进球')}；"
+            f"{th('ah', '亚盘（懂球帝主盘口，两边平均赔率都在 1.5–2.7 之间才算）')}")
+
+
+def confidence_text(settings: dict) -> str:
+    """信心等级那一句。settings.yaml 的 confidence.downgrade_factors 改了，这句跟着变。"""
+    from src.evaluate.confidence_study import FACTOR_NAMES   # 只在这里用，免得网页模块一导入就带上回测的东西
+    counted = settings["confidence"]["downgrade_factors"]
+    if not counted:
+        return ("回测（W10）里分歧大、赛季前几轮、有升班马、没有平博这四种情况，都没看出赛前赔率更不准，所以一个都不降级，"
+                "有赔率的比赛几乎都是 ●●● 高。这不等于每场都好猜：好不好猜看概率本身（例如 40% / 30% / 30% 就很难猜），"
+                "也不等于这些情况一定没影响（样本量看不出差 0.002 以内的影响）。")
+    names = "、".join(FACTOR_NAMES.get(f, f) for f in counted)
+    return f"碰上这些情况每种降一级：{e(names)}。"
+
+
 def row_html(r: dict, threshold: float, label: str) -> str:
     tag = STATUS_TAGS.get(r.get("status"))
     tag_html = f"<span class='tag warn'>{e(tag)}</span>" if tag else ""
@@ -175,6 +241,7 @@ def row_html(r: dict, threshold: float, label: str) -> str:
         market = f"<div>{probs_cell(m['p_1x2'])}<span class='small'>{m['n_books_1x2']} 家平均</span></div>"
     # data-label：手机上表格变成卡片时，写在每一项前面的名字（见 CSS 里的 @media）
     cells = [("开球", "time", e(time_cell(r))), ("联赛", "league", e(r["league"])), ("比赛", "match", match),
+             ("结论", "", conclusion_cell(r["conclusion"])),
              (f"模型 {label}", "", probs_cell(r["model_p"])), ("赔率概率", "", market),
              ("差距", "", gap_cell(r["gap"], threshold)),
              ("亚盘", "", line_cell(m["ah"], "ah", lines.get("ah_home"))),
@@ -195,6 +262,7 @@ def render(result: dict, settings: dict, now: datetime) -> str:
     label = info.get("label") or result["model"]
     has_lines = any((r.get("model_lines") or {}).get(k) is not None for r in rows for k in ("ah_home", "ou_over"))
     head = ("<thead><tr><th>开球<br>（北京时间）</th><th>联赛</th><th>比赛（主 对 客）</th>"
+            "<th>结论（融合后）<br>主胜 / 平 / 客胜</th>"
             f"<th>模型 {e(label)}<span class='tag temp'>临时模型</span><br>主胜 / 平 / 客胜</th>"
             "<th>赔率概率<br>主胜 / 平 / 客胜</th><th>差距</th><th>亚盘主盘口</th><th>大小球主盘口</th></tr></thead>")
     # 每一天一张卡片；卡片里是一张表，手机上每一行变成一张小卡片
@@ -209,22 +277,30 @@ def render(result: dict, settings: dict, now: datetime) -> str:
     n_model = sum(r["model_p"] is not None for r in rows)
     n_market = sum(r["market"]["p_1x2"] is not None for r in rows)
     n_gap = sum(r["gap"] is not None for r in rows)
+    n_fused = sum(r["conclusion"]["status"] == "已融合" for r in rows)
+    w = result["fusion_w"]
+    w_text = (f"w = {w:g}：结论完全按赔率，从赔率反推出每种比分的概率，各玩法都从它算；模型的概率不进结论"
+              if w == 1 else f"w = {w:g}：结论 = {w:g} × 赔率 + {1 - w:g} × 模型（按每种比分的概率混合）")
     hist_last = result["hist_last_date"]
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 {VIEWPORT}
 <title>足球预测 预览版</title><style>{CSS}</style></head><body><div class="wrap">
 <h1>五大联赛未来 {result['days_ahead']} 天 · <span class="accent">预测预览版</span></h1>
 <p class="small">生成时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。
-共 {len(rows)} 场：模型算出概率 {n_model} 场，有赔率 {n_market} 场，差距大 {n_gap} 场。
+共 {len(rows)} 场：模型算出概率 {n_model} 场，有赔率 {n_market} 场，已融合 {n_fused} 场，差距大 {n_gap} 场。
 这一页只是本机的一个文件，不连网，不会自动刷新；要看最新的，重新双击“查看预测预览.bat”。</p>
 <div class="stats"><div class="stat"><b>{len(rows)}</b><span>场比赛</span></div>
 <div class="stat"><b>{n_model}</b><span>模型算出</span></div>
 <div class="stat"><b>{n_market}</b><span>有赔率</span></div>
+<div class="stat"><b>{n_fused}</b><span>已融合</span></div>
 <div class="stat hi"><b>{n_gap}</b><span>差距大</span></div></div>
 <p class="small legend"><span><i style="background:var(--green)"></i>主胜</span>
 <span><i style="background:var(--draw)"></i>平</span><span><i style="background:var(--blue)"></i>客胜</span>
 <span><i style="background:var(--lime)"></i>模型和赔率差距大（亮绿边）</span></p>
-<div class="note"><b>只给自己看，不是下注建议。</b>页面只显示“模型怎么看”和“赔率怎么看”，不推荐买哪一边。<br>
+<div class="note"><b>只给自己看，不是下注建议。</b>页面只写“哪边更可能发生”和“有多可信”，不推荐买哪一边：
+“倾向”不等于“值得买”，赔率已经把这个可能性算进去了，再扣掉抽水，多数倾向没有利润空间。<br>
+<b>结论怎么来的：</b>回测里赔率比模型准，所以结论按回测定下的比例把两边合起来（{e(w_text)}）。<br>
+<b>首发、伤停：</b>现在一场都还没有，结论里没算进去，开球前一两个小时首发出来后可能有变化。<br>
 <b>模型是临时的：</b>现在用 {e(label)}{f"（{e(info['desc'])}）" if info.get("desc") else ""}，不知道伤停、轮换、首发、天气。
 {backtest_text(info, label)}<br>
 <b>比分截至 {e(hist_last)}：</b>模型用到这一天为止的比分（{result['hist_n']:,} 场）。
@@ -234,13 +310,25 @@ def render(result: dict, settings: dict, now: datetime) -> str:
 赔率最后一次变动：{e(f"{last_odds:%m-%d %H:%M}") if last_odds else "没有"}（北京时间）。</p>
 {body}
 <h2>怎么看这张表</h2><div class="note">
+“结论”：融合后的主胜 / 平 / 客胜概率。融合用的胜平负赔率有平博就只用平博，没有就各家去水后平均（懂球帝上几乎没有平博）；
+大小球用开 2.5 球的各家，没有一家开 2.5 时用主盘口（2.75 球以上）反推。
+只有胜平负赔率时写“赔率不全”，只给胜平负；还没有赔率时写“无赔率，未融合”，用模型自己的概率。<br>
+“倾向”：{e(lean_rule_text(result['lean']))}。门槛是回测里定的（够门槛的那一边，回测里确实更常发生）。<br>
+“信心等级”：从 ●●● 高开始，碰上算数的情况降一级，没有赔率再降一级，最低 ●○○ 低。{confidence_text(settings)}<br>
+“要注意”：只是提醒，不改信心等级。模型和赔率分歧大（胜平负某一项差 {th * 100:.0f} 个百分点以上）、赛季前几轮、有升班马、平局风险高、
+赔率最近大幅变动（和 {result['odds_move']['hours']} 小时前比，某一项变了 {result['odds_move']['min_change'] * 100:.0f} 个百分点以上；这个界限是先定的，没检验过）。<br>
 “赔率概率”：懂球帝上各家公司现在的胜平负赔率，每家去掉抽水（按比例）换成概率，再几家取平均。<br>
-“差距”：模型和赔率概率在某个结果上差 {th * 100:.0f} 个百分点以上就标出来，只说明两边看法不同，不说明谁对。
-{th * 100:.0f} 个百分点这个界限是先定的，还没有用数据验证过。<br>
+“差距”：模型和结论用的胜平负赔率在某个结果上差 {th * 100:.0f} 个百分点以上就标出来，只说明两边看法不同，不说明谁对。
+{th * 100:.0f} 个百分点和信心等级回测里的“分歧大”是同一个数；回测里差这么多的比赛，赛前赔率并没有看出更不准。<br>
 “亚盘主盘口”“大小球主盘口”：各家公司开的盘口不一定一样，取开的公司最多的那条；下面是这几家的平均赔率（含本金），
 和去掉抽水后两边的概率。平手、整数球和四分之一球有走盘（退钱）或赢一半，这个概率只是“不算走盘时哪边赢的机会”。
 {lines_text(has_lines)}<br>
 “时间待定”：网站还没公布具体开球时间，日期是“这一轮大约从哪天开始”。鼠标停在队名上能看到英文名。
+</div>
+<h2>和回测不一样的地方</h2><div class="note">
+回测用的是 football-data 的平博或多家平均赔率、开球前 24 小时的价格；这一页用的是懂球帝几家公司“现在”的价格，
+离开球可能只有几小时，也可能还有好几天，而且几乎没有平博（回测里多家平均比平博差一点点，没到要降级的程度）。
+所以回测的成绩只能大致参考，以后用存下来的预测和赛果再核对一次。
 </div>
 <footer class="small">数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk，最近几天的比分来自懂球帝。只供个人学习，不转发。</footer>
 </div></body></html>
