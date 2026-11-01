@@ -139,6 +139,25 @@ def fusion_odds(odds: pd.DataFrame, settings: dict) -> dict:
     return out
 
 
+def move_pair(now: pd.DataFrame, before: pd.DataFrame, settings: dict) -> tuple[list, list] | None:
+    """看“赔率最近有没有大幅变动”用的一对胜平负概率：(N 小时前, 现在)。
+
+    只比两个时刻都有胜平负赔率的那几家公司（免得“多了几家公司”或“平博刚开盘”被当成赔率变了）：
+    两个时刻都有平博就只比平博，不然这几家每家去水再平均。一家都对不上返回 None（不算变动）。
+    """
+    a = now[now["market"] == "1x2"].set_index("bookmaker")
+    b = before[before["market"] == "1x2"].set_index("bookmaker")
+    a, b = valid_1x2(a), valid_1x2(b)
+    common = sorted(set(a.index) & set(b.index))
+    pin = settings["market_odds"]["pinnacle_book"]
+    if pin in common:
+        common = [pin]
+    if not common:
+        return None
+    return ([float(x) for x in devig(b.loc[common].to_numpy(float)).mean(axis=0)],
+            [float(x) for x in devig(a.loc[common].to_numpy(float)).mean(axis=0)])
+
+
 def gap(model_p, market_p, threshold: float) -> dict | None:
     """模型和赔率概率差得最多的那个结果。差距没超过界限返回 None。
 
@@ -246,9 +265,10 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
         mp = to_1x2(p)
         # 3. 各家公司“现在”的赔率。用途写“显示”：只给人看，不进模型
         market = market_summary(fs.latest_odds(mid, cutoff, "显示"))
-        # 4. 融合用的赔率（用途「融合」）：现在的，和 N 小时前的（看赔率有没有大幅变动）
-        fo = fusion_odds(fs.latest_odds(mid, cutoff, "融合"), settings)
-        fo_before = fusion_odds(fs.latest_odds(mid, before, "融合"), settings)
+        # 4. 融合用的赔率（用途「融合」）：现在的；和 N 小时前同几家公司比，看赔率有没有大幅变动
+        odds_now = fs.latest_odds(mid, cutoff, "融合")
+        fo = fusion_odds(odds_now, settings)
+        move = move_pair(odds_now, fs.latest_odds(mid, before, "融合"), settings)
         rows.append({
             "match_id": int(t["match_id"]), "competition": t["competition"], "league": leagues[t["competition"]],
             "season": int(t["season"]), "home_team": t["home_team"], "away_team": t["away_team"],
@@ -257,7 +277,7 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
             "model_p": mp, "model_lines": model_lines(p, market),
             # “差距”和信心等级的“分歧大”一样，和融合用的胜平负比
             "market": market, "gap": gap(mp, fo["p_1x2"], gap_th),
-            "fusion_odds": fo, "conclusion": conclude(p, mp, fo, fo_before, season.get(mid, {}), settings)})
+            "fusion_odds": fo, "conclusion": conclude(p, mp, fo, move, season.get(mid, {}), settings)})
     return {"cutoff_utc": cutoff, "end_utc": end, "rows": rows, "model": name, "model_cfg": mcfg,
             "model_version": model_version(name, mcfg), "hist_n": int(len(hist)),
             "hist_last_date": hist["match_date"].max() if len(hist) else None,
@@ -303,10 +323,20 @@ def code_version() -> str | None:
 
 
 # ---------- 预测存档 ----------
+def conclusion_key(c: dict, fused) -> list:
+    """结论里要存档的部分（判断“和上次一样”用）：状态、融合概率、大 2.5 球、双方进球（4 位小数）、亚盘那条线、信心等级。
+
+    只比融合概率不够：例如大小球赔率刚出来，从“赔率不全”变成“已融合”，胜平负几乎不变，但多了大小球、亚盘的倾向。
+    """
+    ah = (c.get("leans") or {}).get("ah")
+    r4 = (lambda x: None if x is None else round(x, 4))
+    return [c.get("status"), fused, r4(c.get("over25")), r4(c.get("btts")), ah["line"] if ah else None, c.get("level")]
+
+
 def archive(con, result: dict, now: datetime, code: str | None = None) -> dict:
     """把模型的预测存进 predictions 表。只加不改不删。
 
-    同一场比赛、同一个模型版本，模型概率、融合概率（都保留 4 位小数）和开球时间都和上次存的一样，就不再存一行
+    同一场比赛、同一个模型版本，模型概率（4 位小数）、开球时间、结论（conclusion_key）都和上次存的一样，就不再存一行
     （每次打开预览页都会运行一次，不去重的话表会白白变大）。模型没给概率的比赛不存。
     p_home / p_draw / p_away 列仍是模型自己的概率（回头和赛果对比“模型准不准”）；融合后的概率、倾向、信心等级
     记在 detail 的“融合概率”“融合”里。
@@ -321,12 +351,13 @@ def archive(con, result: dict, now: datetime, code: str | None = None) -> dict:
             p = [round(x, 4) for x in r["model_p"]]
             c = r.get("conclusion") or {}
             fused = None if c.get("p_1x2") is None else [round(x, 4) for x in c["p_1x2"]]
+            key = conclusion_key(c, fused)
             last = con.execute("select p_home, p_draw, p_away, kickoff_utc, detail from predictions where match_id = ?"
                                " and kind = ? and model_version = ? order by prediction_id desc limit 1",
                                (r["match_id"], KIND, result["model_version"])).fetchone()
-            # 模型概率、开球时间、融合概率都没变才算“和上次一样”（赔率变了融合概率就变，要存一行新的）
+            # 模型概率、开球时间、结论都没变才算“和上次一样”（赔率变了结论就变，要存一行新的）
             if (last and [round(x, 4) for x in last[:3]] == p and last[3] == r["kickoff_utc"]
-                    and json.loads(last[4] or "{}").get("融合概率") == fused):
+                    and json.loads(last[4] or "{}").get("结论指纹") == key):
                 counts["没变化"] += 1
                 continue
             m = r["market"]
@@ -339,7 +370,7 @@ def archive(con, result: dict, now: datetime, code: str | None = None) -> dict:
                       "亚盘主盘口": m["ah"]["line"] if m["ah"] else None, "模型亚盘主队胜算": lines.get("ah_home"),
                       "大小球主盘口": m["ou"]["line"] if m["ou"] else None, "模型大球胜算": lines.get("ou_over"),
                       # 融合后的结论（需求文档第 5 节“预测页怎么接融合、倾向、信心等级”）
-                      "融合概率": fused,
+                      "融合概率": fused, "结论指纹": key,
                       "融合": {"状态": c.get("status"), "w": c.get("w"), "胜平负用平博": fo.get("pinnacle"),
                                "胜平负几家": fo.get("n_books_1x2"), "大小球": fo.get("ou"), "亚盘": fo.get("ah"),
                                "大2.5球": c.get("over25"), "双方进球": c.get("btts"), "市场矩阵还原误差": c.get("fit_error"),

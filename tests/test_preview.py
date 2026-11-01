@@ -244,6 +244,16 @@ def test_archive_saves_again_when_odds_change(env):
     assert archive(con, run_preview(env), NOW, "abc1234") == {"新存": 1, "没变化": 2}
 
 
+def test_archive_saves_again_when_only_status_changes(env):
+    """胜平负没变、只是状态变了（例如大小球赔率刚出来，赔率不全 → 已融合）：也要存一行新的。"""
+    con, _s = env
+    res = run_preview(env)
+    assert archive(con, res, NOW)["新存"] == 3
+    c = {r["match_id"]: r for r in res["rows"]}[10]["conclusion"]
+    c.update(status="赔率不全", over25=None, btts=None)
+    assert archive(con, res, NOW) == {"新存": 1, "没变化": 2}
+
+
 def test_archive_skips_rows_without_model(env):
     con, _s = env
     res = run_preview(env)

@@ -12,7 +12,7 @@ from src.common.config import load_settings
 from src.common.markets import (dc_matrices, fit_market_dc, matrix_probs, over_shares, over_under, result_probs)
 from src.common.odds import devig
 from src.predict.conclusion import FUSED, NO_ODDS, PARTIAL, conclude, fuse, leans, odds_move, season_flags
-from src.predict.preview import fusion_odds
+from src.predict.preview import fusion_odds, move_pair
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ def test_conclude_levels_and_flags(s):
     mm = model_matrix()
     mp = result_probs(mm).tolist()
     fo = fo_of(TARGET, {"line": 2.5, "p_over": 0.52, "n_books": 2}, {"line": -0.5, "home": 1.9, "away": 1.95})
-    c = conclude(mm, mp, fo, fo_of([0.45, 0.27, 0.28]), {"early": True, "promoted": False}, s)
+    c = conclude(mm, mp, fo, (TARGET, TARGET), {"early": True, "promoted": False}, s)
     assert c["status"] == FUSED and c["level"] == 3 and c["level_name"].startswith("●●●")    # 现在没有算数的因素
     assert c["flags"]["early"] and c["flags"]["no_pinnacle"] and not c["flags"]["odds_move"]
     assert "赛季前几轮" in c["uncertain"] and c["leans"]["ah"] is not None
@@ -164,28 +164,65 @@ def test_conclude_levels_and_flags(s):
     assert c["flags"]["gap"] == (gap >= s["confidence_study"]["gap"])
     # 算数的因素：碰上一个降一级
     s["confidence"]["downgrade_factors"] = ["early", "no_pinnacle"]
-    assert conclude(mm, mp, fo, fo, {"early": True}, s)["level"] == 1
+    assert conclude(mm, mp, fo, None, {"early": True}, s)["level"] == 1
     # 没有赔率：降一级，分歧、没有平博不算
     s["confidence"]["downgrade_factors"] = []
-    c = conclude(mm, mp, fo_of(), fo_of(), {}, s)
+    c = conclude(mm, mp, fo_of(), None, {}, s)
     assert c["status"] == NO_ODDS and c["level"] == 2 and not c["flags"]["gap"] and not c["flags"]["no_pinnacle"]
     # 什么都没有：没有结论
-    assert conclude(None, None, fo_of(), fo_of(), {}, s)["level"] is None
+    assert conclude(None, None, fo_of(), None, {}, s)["level"] is None
 
 
 def test_conclude_gap_and_odds_move(s):
     fo = fo_of(TARGET, pinnacle=True)
-    c = conclude([0.6, 0.2, 0.2], [0.6, 0.2, 0.2], fo, fo_of([0.52, 0.24, 0.24]), {}, s)
+    c = conclude([0.6, 0.2, 0.2], [0.6, 0.2, 0.2], fo, ([0.52, 0.24, 0.24], TARGET), {}, s)
     assert c["flags"]["gap"] and c["flags"]["odds_move"] and not c["flags"]["no_pinnacle"]
     assert c["odds_move"] == pytest.approx(0.07)
     assert c["uncertain"] == ["模型和赔率分歧大", "赔率最近大幅变动"]
-    assert odds_move(TARGET, None) is None
+    assert odds_move(None) is None
+
+
+def test_move_pair_only_compares_same_books(s):
+    """赔率变动只比两个时刻都有的公司：多了一家、平博刚开盘，都不当成赔率变了。"""
+    before = odds_rows([["A", "1x2", None, 2.0, 3.5, 4.0, None, None]])
+    now = odds_rows([["A", "1x2", None, 2.0, 3.5, 4.0, None, None],
+                     ["B", "1x2", None, 1.5, 4.0, 7.0, None, None],
+                     ["平博 Pinnacle", "1x2", None, 1.6, 4.0, 6.0, None, None]])
+    b, a = move_pair(now, before, s)
+    assert odds_move((b, a)) == pytest.approx(0)
+    assert move_pair(now, before.iloc[0:0], s) is None
+    # 两个时刻都有平博：只比平博
+    before2 = pd.concat([before, odds_rows([["平博 Pinnacle", "1x2", None, 2.0, 3.5, 4.0, None, None]])])
+    b, a = move_pair(now, before2, s)
+    assert a == pytest.approx(devig([1.6, 4.0, 6.0]).tolist()) and b == pytest.approx(devig([2.0, 3.5, 4.0]).tolist())
+
+
+def test_lean_exactly_at_threshold_counts(s):
+    """正好等于门槛算够（和回测一样有 1e-12 的容差）：0.44 − 0.40 在电脑里是 0.0399999…"""
+    ln = leans(lean_input([0.44, 0.40, 0.16], over25=0.52), None, s)
+    assert ln["result"]["lean"] is True and ln["over25"]["lean"] is True
+    assert leans(lean_input([0.36, 0.28, 0.36]), None, s)["draw"]["risk"] is True
+
+
+def test_fuse_w_below_1_with_other_matrix_size_and_three_probs(s):
+    s["fusion"]["w"] = 0.5
+    fo = fo_of(TARGET, {"line": 2.5, "p_over": 0.52, "n_books": 2})
+    small = dc_matrices(np.array([1.6]), np.array([1.0]), np.array([-0.05]), n=6)[0]   # 模型矩阵比市场的小
+    f = fuse(small, fo, s)
+    assert f["p_1x2"] == pytest.approx((0.5 * np.array(TARGET) + 0.5 * result_probs(small)).tolist(), abs=1e-6)
+    assert np.isclose(f["matrix"].sum(), 1)
+    # 模型只给三个概率：两样都有、只有胜平负，都只用赔率（不混），两种情况一致
+    assert fuse([0.6, 0.2, 0.2], fo, s)["p_1x2"] == pytest.approx(TARGET, abs=1e-6)
+    assert fuse([0.6, 0.2, 0.2], fo_of(TARGET), s)["p_1x2"] == pytest.approx(TARGET)
+    # 没有赔率、模型只给三个概率：没有大小球、双方进球
+    f = fuse([0.6, 0.2, 0.2], fo_of(), s)
+    assert f["status"] == NO_ODDS and f["over25"] is None and f["btts"] is None
 
 
 def test_conclude_rejects_unknown_factor(s):
     s["confidence"]["downgrade_factors"] = ["weather"]
     with pytest.raises(ValueError, match="weather"):
-        conclude(None, None, fo_of(), fo_of(), {}, s)
+        conclude(None, None, fo_of(), None, {}, s)
 
 
 def test_season_flags(s):
