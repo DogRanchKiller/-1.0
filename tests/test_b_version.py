@@ -14,7 +14,7 @@ import pytest
 from src.common import markets
 from src.common.odds import devig_proportional
 from src.evaluate.backtest import run_backtest
-from src.features import UsageNotAllowedError
+from src.features import FeatureStore, UsageNotAllowedError
 from src.features.market_odds import ODDS_COLS, odds_features
 from src.models.base import Model
 from src.models.goals import score_matrices
@@ -24,7 +24,7 @@ from tests.test_adaptive import promo_history
 from tests.test_backtest import CONST, MATCHES, fs, settings  # noqa: F401（pytest 的 fixture）
 from tests.test_gbdt import gb
 
-CFG = {"source": "football-data", "result_books": ["平博 Pinnacle", "多家平均"], "ou_book": "多家平均", "ou_line": 2.5,
+CFG = {"source": "football-data", "result_books": ["平博 Pinnacle", "多家平均"], "pinnacle_book": "平博 Pinnacle", "ou_book": "多家平均", "ou_line": 2.5,
        "devig_method": "proportional", "max_goals": 10}
 COLS = ["match_id", "source", "bookmaker", "market", "line", "home", "draw", "away", "over", "under"]
 
@@ -232,3 +232,12 @@ def test_b_study_gap_groups():
                   **dict(zip(["p_home", "p_draw", "p_away"], pb))}]
     g = gap_groups(pd.DataFrame(rows), "gb_b", "market_pre", [0.03, 0.06])
     assert g.to_dict() == {1: "分歧 3% 以内", 2: "分歧 3%–6%", 3: "分歧 6% 以上"}
+
+
+def test_preview_refuses_b_version_models(fs, settings):
+    """预测页只给 A 版取数：要赛前赔率的模型（gb_b、market_pre）在预测页直接报错，不悄悄用空值出预测。"""
+    from src.models.market import MarketModel
+    from src.predict.preview import model_inputs
+    live = FeatureStore(fs.conn, "实时", settings)
+    with pytest.raises(ValueError, match="预测页不支持"):
+        model_inputs(live, settings, MarketModel("market_pre"), "2022-08-01 00:00:00", "2023-07-01 00:00:00", ["E0"])

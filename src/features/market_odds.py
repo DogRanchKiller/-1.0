@@ -50,7 +50,7 @@ def odds_features(odds: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         return _empty()
     o = odds[odds["source"] == cfg["source"]]
     method = cfg["devig_method"]
-    first_book = cfg["result_books"][0]          # 排第一的是平博：mo_pinnacle = 胜平负用的是不是它
+    pin_book = cfg["pinnacle_book"]              # mo_pinnacle = 胜平负用的是不是平博（按名字认，改了顺序也不会弄错）
     # 胜平负：按 result_books 的顺序，每场用排在最前面、三个赔率都齐的那家
     parts, seen = [], set()
     for book in cfg["result_books"]:
@@ -61,7 +61,7 @@ def odds_features(odds: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         p = devig(r[RES].to_numpy(dtype=float), method)
         parts.append(pd.DataFrame({"match_id": r["match_id"].to_numpy(int), "mo_p_home": p[:, 0],
                                    "mo_p_draw": p[:, 1], "mo_p_away": p[:, 2],
-                                   "mo_pinnacle": float(book == first_book)}))
+                                   "mo_pinnacle": float(book == pin_book)}))
         seen.update(int(x) for x in r["match_id"])
     res = pd.concat(parts, ignore_index=True) if parts else _empty()[["match_id", "mo_p_home", "mo_p_draw",
                                                                      "mo_p_away", "mo_pinnacle"]]

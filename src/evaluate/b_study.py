@@ -58,8 +58,13 @@ def run(pred: pd.DataFrame, pairs: list[tuple[str, str]], models: list[str], gap
         for base, new in pairs:
             rows.append(compare(sub, base, new, horizon, settings=settings).assign(分法=kind, 哪一份=name))
     pin = pred[(pred["model"] == PIN) & (pred["horizon"] == CLOSE)]
-    for m in models:                      # 离平博收盘多远（全部比赛）
-        rows.append(compare(pd.concat([t, pin]), m, PIN, horizon, CLOSE, settings=settings)
+    # 离平博收盘多远：只用这几个模型都有预测、平博收盘也有的比赛，几个模型的差才能直接比
+    ok = set(pin.dropna(subset=P)["match_id"])
+    for m in models:
+        ok &= set(t[t["model"] == m].dropna(subset=P)["match_id"])
+    same = lambda d: d[d["match_id"].isin(ok)]
+    for m in models:
+        rows.append(compare(pd.concat([same(t), same(pin)]), m, PIN, horizon, CLOSE, settings=settings)
                     .assign(分法="离平博收盘", 哪一份="全部"))
     out = pd.concat(rows, ignore_index=True)
     first = ["分法", "哪一份"]

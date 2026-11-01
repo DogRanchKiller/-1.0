@@ -177,6 +177,9 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
     # 赛前赔率（步骤 8 B 版，需求文档第 4 节“步骤 8 怎么做”）：有模型要（uses_pre_odds）才取。
     # 历史比赛的赔率特征和历史比赛同一个截止时间、同一个 since 增量取；要预测的比赛按“本场”取（src/features/market_odds.py）
     pre_odds = any(getattr(m, "uses_pre_odds", False) for m in models)
+    if pre_odds and max(horizons) > 24:
+        # football-data 的赛前赔率按 T-24 算：比 24 小时更早的时点，要预测的比赛全拿不到赔率（训练时却有），这样比不公平
+        print(f"注意：赛前赔率按开球前 24 小时算，{max(horizons):g} 小时这个时点要预测的比赛都没有赔率特征")
 
     hist_parts: list[pd.DataFrame] = []
     hist: pd.DataFrame | None = None

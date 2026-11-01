@@ -157,6 +157,10 @@ def model_inputs(fs: FeatureStore, settings: dict, model, cutoff: str, end: str,
     回测是一个截止时间一个截止时间往前走、一批一批取；这里只有“现在”这一个截止时间，一次取完。
     tests/test_backtest.py 的 test_preview_gives_model_same_inputs_as_backtest 检查同一个截止时间两边交给模型的数一样。
     """
+    if getattr(model, "uses_pre_odds", False) or getattr(model, "injury", False):
+        # 预测页只给 A 版取数：B 版（要赛前赔率）、伤停研究模型在这里拿不到它们要的数，
+        # 硬跑的话这些特征全是空值，和训练时看到的不一样，出的预测不可信，所以直接停下
+        raise ValueError(f"预测页不支持 {model.name}：它要赛前赔率或伤停，预测页只给 A 版模型取数")
     usage = getattr(model, "usage", "A版输入")
     data = tuple(getattr(model, "data", ("比分",)))
     hist = fs.historical_matches(cutoff, usage, competition=leagues, data=data)
