@@ -185,28 +185,22 @@ def matrix_probs(lh, la, n: int = 10) -> np.ndarray:
                      (m * (i < j)).sum(axis=(1, 2)), (m * (i + j > 2)).sum(axis=(1, 2))], axis=1)
 
 
-def fit_market_lambdas(target, n: int = 10, iters: int = 60, tol: float = 1e-10) -> tuple[np.ndarray, np.ndarray]:
-    """每场找 (λ主, λ客)，让 matrix_probs 的四个概率和 target（每场一行四个数）的差的平方和最小。
+def _gauss_newton(resid, x, iters: int, tol: float) -> np.ndarray:
+    """每场一组参数 x（场数 × k），让 resid(x)（场数 × 目标个数）的平方和最小。几万场同时走。
 
-    在 log λ 上做高斯-牛顿：每一步用数值斜率 J（4×2）解 (JᵀJ + 一点点阻尼) Δ = −Jᵀ r，几万场同时走。
-    走了以后误差变大的场，那一步减半再试（最多 20 次），保证每场误差只降不升。返回 (λ主, λ客)。
+    每一步用数值斜率 J 解 (JᵀJ + 一点点阻尼) Δ = −Jᵀ r。走了以后误差变大的场，那一步减半再试（最多 20 次），
+    保证每场误差只降不升。fit_market_lambdas、fit_market_dc 共用。
     """
-    t = np.asarray(target, float).reshape(-1, 4)
-    if len(t) == 0:
-        return np.zeros(0), np.zeros(0)
-    x = np.tile(np.log([1.45, 1.15]), (len(t), 1))           # 从平均水平出发（主队 1.45、客队 1.15 个）
     h = 1e-5
-
-    def resid(x):
-        return matrix_probs(np.exp(x[:, 0]), np.exp(x[:, 1]), n) - t
-
+    k = x.shape[1]
+    eye = np.eye(k)
     r = resid(x)
     for _ in range(iters):
-        J = np.stack([(resid(x + [h, 0]) - r) / h, (resid(x + [0, h]) - r) / h], axis=2)   # 场数 × 4 × 2
-        A = np.einsum("nki,nkj->nij", J, J) + 1e-9 * np.eye(2)
+        J = np.stack([(resid(x + h * eye[i]) - r) / h for i in range(k)], axis=2)        # 场数 × 目标个数 × k
+        A = np.einsum("nki,nkj->nij", J, J) + 1e-9 * eye
         step = -np.linalg.solve(A, np.einsum("nki,nk->ni", J, r)[..., None])[..., 0]
         cost = (r ** 2).sum(axis=1)
-        scale = np.ones(len(t))
+        scale = np.ones(len(x))
         for _ in range(20):                                   # 误差变大就把步子减半
             x_new = x + step * scale[:, None]
             r_new = resid(x_new)
@@ -218,4 +212,67 @@ def fit_market_lambdas(target, n: int = 10, iters: int = 60, tol: float = 1e-10)
         x[keep], r[keep] = x_new[keep], r_new[keep]
         if np.abs(step * scale[:, None]).max() < tol:
             break
+    return x
+
+
+def fit_market_lambdas(target, n: int = 10, iters: int = 60, tol: float = 1e-10) -> tuple[np.ndarray, np.ndarray]:
+    """每场找 (λ主, λ客)，让 matrix_probs 的四个概率和 target（每场一行四个数）的差的平方和最小。
+
+    在 log λ 上做高斯-牛顿（_gauss_newton），从平均水平出发（主队 1.45、客队 1.15 个）。返回 (λ主, λ客)。
+    """
+    t = np.asarray(target, float).reshape(-1, 4)
+    if len(t) == 0:
+        return np.zeros(0), np.zeros(0)
+    x = np.tile(np.log([1.45, 1.15]), (len(t), 1))
+    x = _gauss_newton(lambda x: matrix_probs(np.exp(x[:, 0]), np.exp(x[:, 1]), n) - t, x, iters, tol)
     return np.exp(x[:, 0]), np.exp(x[:, 1])
+
+
+def dc_rho_bounds(lam_h, lam_a) -> tuple[np.ndarray, np.ndarray]:
+    """DC 修正的 rho 能取的范围（每场一个）：让 0-0、0-1、1-0、1-1 四格乘的数都不小于 0。
+    1 − λ主·λ客·rho ≥ 0、1 + λ主·rho ≥ 0、1 + λ客·rho ≥ 0、1 − rho ≥ 0 → 下限 −1 / max(λ主, λ客)，上限 min(1, 1 / (λ主·λ客))。"""
+    lh, la = np.atleast_1d(np.asarray(lam_h, float)), np.atleast_1d(np.asarray(lam_a, float))
+    return -1 / np.maximum(lh, la), np.minimum(1.0, 1 / (lh * la))
+
+
+def dc_matrices(lam_h, lam_a, rho, n: int = 10) -> np.ndarray:
+    """一批比赛的泊松 + DC 小比分修正比分矩阵，rho 每场可以不一样（和 src/models/goals.py 的 score_matrices 同一个公式）。
+
+    四格：0-0 乘 (1 − λ主·λ客·rho)，0-1 乘 (1 + λ主·rho)，1-0 乘 (1 + λ客·rho)，1-1 乘 (1 − rho)。
+    这四格加减正好抵消（总和不变），所以大小球不变；平局变化 −2·rho·c、主胜和客胜各变化 +rho·c（c = λ主·λ客·e^(−λ主−λ客)）。
+    rho 是负数时平局变多（市场一般是这样）。
+    """
+    lh, la = np.atleast_1d(np.asarray(lam_h, float)), np.atleast_1d(np.asarray(lam_a, float))
+    r = np.broadcast_to(np.asarray(rho, float), lh.shape)
+    m = poisson_matrices(lh, la, n)
+    m[:, 0, 0] *= np.maximum(1 - lh * la * r, 0)
+    m[:, 0, 1] *= np.maximum(1 + lh * r, 0)
+    m[:, 1, 0] *= np.maximum(1 + la * r, 0)
+    m[:, 1, 1] *= np.maximum(1 - r, 0)
+    return m / m.sum(axis=(1, 2), keepdims=True)
+
+
+def fit_market_dc(target, n: int = 10, iters: int = 60, tol: float = 1e-10
+                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """每场找 (λ主, λ客, rho)，让 DC 比分矩阵的 [主胜, 平, 客胜, 大 2.5 球] 和 target（每场一行四个数，胜平负加起来是 1）一样。
+
+    rho 不改“主胜 − 客胜”和大 2.5 球（见 dc_matrices），所以分两步：
+      1. 两个 λ：让独立泊松矩阵的“主胜 − 客胜”和大 2.5 球对上（高斯-牛顿，两个数解两个数）；
+      2. rho：平局还差多少就补多少，rho = (泊松的平局 − 要的平局) ÷ (2c)；超出 dc_rho_bounds 的取边界（这场平局就对不上，报告里看还原误差）。
+    返回 (λ主, λ客, rho)。
+    """
+    t = np.asarray(target, float).reshape(-1, 4)
+    if len(t) == 0:
+        return np.zeros(0), np.zeros(0), np.zeros(0)
+    goal = np.stack([t[:, 0] - t[:, 2], t[:, 3]], axis=1)
+
+    def resid(x):
+        p = matrix_probs(np.exp(x[:, 0]), np.exp(x[:, 1]), n)
+        return np.stack([p[:, 0] - p[:, 2], p[:, 3]], axis=1) - goal
+
+    x = _gauss_newton(resid, np.tile(np.log([1.45, 1.15]), (len(t), 1)), iters, tol)
+    lh, la = np.exp(x[:, 0]), np.exp(x[:, 1])
+    c = lh * la * np.exp(-lh - la)
+    rho = (matrix_probs(lh, la, n)[:, 1] - t[:, 1]) / (2 * c)
+    lo, hi = dc_rho_bounds(lh, la)
+    return lh, la, np.clip(rho, lo, hi)

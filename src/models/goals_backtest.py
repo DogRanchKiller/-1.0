@@ -20,6 +20,7 @@
   goals_calibration.csv   进球分布核对（每个模型 × 联赛，另有“全部”）
   compare_goals.csv       --pairs 的比较结果
   shot_coefficients.csv   步骤 4：用射门推算进球的模型（target = shots）每次拟合每个联赛的 a、b
+  matrices_<模型>.npz      加 --save-matrices 时：每场最早时点的整张比分矩阵（match_id + 矩阵），融合研究用（src/evaluate/fusion_study.py）
 步骤 4 的两个实验（需求文档第 4 节“步骤 4 事先定的比较”）也用这个入口，命令写在进度记录里。
 一次回测里的模型要用同一种用途：实验一的组都是“研究实验”，实验二的组都是“A版输入”，分开跑。
 """
@@ -68,6 +69,15 @@ class MatrixRecorder(Model):
 
     def params(self):
         return self.inner.params()
+
+
+def save_matrices(models: list[MatrixRecorder], out) -> None:
+    """每个有矩阵的模型存一个 matrices_<模型>.npz：match_id（从小到大）和对应的比分矩阵（float32，压缩）。"""
+    for m in models:
+        if not m.matrices:
+            continue
+        ids = np.array(sorted(m.matrices), dtype=np.int64)
+        np.savez_compressed(out / f"matrices_{m.name}.npz", match_id=ids, matrix=np.stack([m.matrices[i] for i in ids]))
 
 
 # ======================= 用整张矩阵算的分数 =======================
@@ -155,6 +165,7 @@ def main() -> None:
     ap.add_argument("--pairs", nargs="*", default=[], help="要比较的 旧:新，例如 poisson:dc")
     ap.add_argument("--horizons", nargs="+", type=float, default=[24])
     ap.add_argument("--db", default=None)
+    ap.add_argument("--save-matrices", action="store_true", help="把每场的整张比分矩阵存成 matrices_<模型>.npz")
     a = ap.parse_args()
 
     fs = FeatureStore(open_readonly(a.db), "开发", settings)
@@ -172,6 +183,8 @@ def main() -> None:
     # 只留每个有矩阵的模型都有预测的比赛（和回测框架的“同一批比赛”一样）
     k = scores.groupby("match_id")["model"].nunique()
     scores = scores[scores["match_id"].isin(k[k == scores["model"].nunique()].index)]
+    if a.save_matrices:
+        save_matrices(models, out)
     scores.to_csv(out / "scores_matrix.csv", index=False, encoding="utf-8-sig", float_format="%.6f")
     calib = goals_calibration(scores)
     calib.to_csv(out / "goals_calibration.csv", index=False, encoding="utf-8-sig", float_format="%.5f")
