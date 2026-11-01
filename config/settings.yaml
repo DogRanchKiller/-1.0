@@ -554,3 +554,28 @@ schedule:
   lock_file: data/jobs/scheduled_predict.lock   # 锁文件：防止两次运行重叠（data/ 不进 Git）
   lock_stale_minutes: 60        # 锁文件超过这么多分钟没更新，视为残留锁，先清掉再拿
   matrix_decimals: 6            # 比分矩阵存档精度（每格几位小数）
+
+# ---------- 赛后对账、单场复盘、周报月报（工作树 K2，src/review/reconcile.py 等，需求文档第 15 节、第 9 节接口 3） ----------
+# 只用来记录和展示，不会反过来改模型、融合、倾向、信心等级的任何参数。
+review:
+  output_dir: data/review        # 输出文件夹（data/ 不进 Git）：scores.csv、matches/<match_id>.json、reports/*.md，每次全部重算
+  # 预测版本的显示顺序（信息从少到多）；表里出现别的 kind 也照样对账，排在最后
+  kinds: [T-24, T-6, T-1, preview]
+  # 每场的“正式成绩”用哪一版（第 15 节：T-1 为准；还没有定时版本时用预览页最后一版）。按顺序取这场有的第一个
+  official_order: [T-1, T-6, T-24, preview]
+  # 收盘赔率用哪家：按顺序，这场有胜平负收盘赔率的第一家（和第 5 节两个标杆同一套写法：平博 → 多家平均）
+  close_bookmakers: [平博 Pinnacle, 多家平均]
+  close_devig_method: proportional  # 收盘赔率去水方法（和 backtest.benchmark_devig_method 一样用按比例）
+  # 存档里的概率是 4 位小数，三个加起来可能差 0.0001 左右；差得比这个多就当这一行坏了，不对账（摘要里记下）
+  prob_sum_tol: 0.001
+  # 取比分、xG、红牌时从这一联赛最早一场要复盘的比赛往前多看几天（改期提前的比赛也能找到）
+  stats_margin_days: 3
+  # 单场误差归类（第 15 节“误差原因怎么归类”）
+  errors:
+    miss_below: 0.334            # 正式那一版给实际结果的概率低于这个（约三分之一）才算“明显没料到”，才归类
+    close_move: 0.05             # 收盘时实际结果的概率比出预测时的赔率高这么多（5 个百分点）以上 → 信息缺失型
+    direction_min: 0.01          # “赔率往模型的方向走”：变动小于 1 个百分点算“基本没动”
+    xg_margin: 0.5               # 两队 xG 差小于这个算“xG 看是平局”；大于等于算 xG 支持多的那队
+  reports:
+    min_matches: 300             # 少于这么多场写“样本太少，不能下结论”（第 5 节：真实成绩要几百场以上才下结论）
+    top_misses: 5                # 每份报告列几次最大的失误
