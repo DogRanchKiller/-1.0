@@ -547,3 +547,17 @@ standings_check:                 # 用维基百科赛季最终积分榜核对（
 # 定时任务的心跳文件（src/jobs/heartbeat.py，需求文档第 9 节“完整链路的分工和接口”）
 jobs:
   state_dir: data/jobs           # 每个定时任务一个 <任务名>.json：上次开始、结束、成功没有、摘要（data/ 不进 Git）
+
+# 新闻资料库（第 9 阶段，需求文档 7.1）。这次只从本地文件导入，不联网、不抓任何网站
+news:
+  inbox_dir: data/news_inbox      # 导入程序读这里的 news_*.jsonl（新闻条目）和 news_facts_*.jsonl（结构化信息）；data/ 不进 Git
+  raw_subdir: news                # 导入的文件原样压缩，存到 paths.raw 下的这个文件夹
+  report: 新闻导入.md             # 导入报告，放在 paths.reports 里
+  fetched_future_tolerance_minutes: 10   # 抓到时间 / 录入时间比现在晚超过这么多分钟就拒绝（多半是时钟或时区写错）
+  fact_types: [coach_change, long_injury]   # 结构化信息的种类：主帅更换、核心长期伤缺。要加新种类先改需求文档 7.1 和数据字典
+  min_team_name_chars: 2          # 标题里认球队：中文名至少几个字
+  min_team_name_chars_ascii: 4    # 标题里认球队：英文名至少几个字母（太短的缩写会认错）
+  # 允许抓 / 导入的来源，由你决定后一行一个，例如：
+  #   某某社: {status: 允许, note: robots.txt 和使用条款的核对结果}
+  # status 只有写“允许”的来源才会导入；待定、不用、没登记的一行都不导入。现在一个都没有登记
+  sources: {}

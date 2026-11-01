@@ -556,6 +556,16 @@ class FeatureStore:
                               competition=competition, team=team, since=since)
         return self._check_rows_mode(df, usage)
 
+    def news_for_match(self, match_id: int, cutoff, usage: str, days=None) -> pd.DataFrame:
+        """和这场比赛有关的新闻标题（第 9 阶段，只能复盘、显示）。规则见 src/features/news.py 和需求文档 7.1。"""
+        from src.features.news import news_for_match
+        return news_for_match(self, match_id, cutoff, usage, days)
+
+    def news_facts_for_match(self, match_id: int, cutoff, usage: str, fact_type=None) -> pd.DataFrame:
+        """主队、客队的主帅更换、核心长期伤缺等结构化信息。规则见 src/features/news.py 和需求文档 7.1。"""
+        from src.features.news import news_facts_for_match
+        return news_facts_for_match(self, match_id, cutoff, usage, fact_type)
+
 
 def _team_view(df: pd.DataFrame, team: str) -> pd.DataFrame:
     """把“主队 / 客队”的表换成“这支队 / 对手”的视角。
