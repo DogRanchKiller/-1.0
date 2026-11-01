@@ -239,7 +239,8 @@ def dc_matrices(lam_h, lam_a, rho, n: int = 10) -> np.ndarray:
     """一批比赛的泊松 + DC 小比分修正比分矩阵，rho 每场可以不一样（和 src/models/goals.py 的 score_matrices 同一个公式）。
 
     四格：0-0 乘 (1 − λ主·λ客·rho)，0-1 乘 (1 + λ主·rho)，1-0 乘 (1 + λ客·rho)，1-1 乘 (1 − rho)。
-    这四格加减正好抵消（总和不变），所以大小球不变；平局多 2·rho·c、主胜和客胜各少 rho·c（c = λ主·λ客·e^(−λ主−λ客)）。
+    这四格加减正好抵消（总和不变），所以大小球不变；平局变化 −2·rho·c、主胜和客胜各变化 +rho·c（c = λ主·λ客·e^(−λ主−λ客)）。
+    rho 是负数时平局变多（市场一般是这样）。
     """
     lh, la = np.atleast_1d(np.asarray(lam_h, float)), np.atleast_1d(np.asarray(lam_a, float))
     r = np.broadcast_to(np.asarray(rho, float), lh.shape)

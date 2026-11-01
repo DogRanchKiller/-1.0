@@ -106,7 +106,8 @@ def test_fusion_study_runs_and_market_matrix_reproduces_odds():
     assert c["融合"] == len(ids) - 1 and c["未融合（胜平负或大 2.5 球赔率缺）"] == 1
     assert c["市场矩阵还原误差（最大）"] < 1e-6
     assert c["亚盘线不是主盘口、不用的场数"] == 17 and c["没有亚盘线的场数"] == 0   # 第 1 场没融合
-    assert c["两种融合算法胜平负概率最大差"] < 1e-6        # 市场矩阵还原得一样 → 矩阵上融合 = 各玩法各自融合
+    gap = c["两种融合算法差多少（w = 0.5）"]                # 市场矩阵还原得一样 → 矩阵上融合 = 各玩法各自融合
+    assert gap["胜平负概率最大差"] < 1e-6 and gap["大 2.5 球概率最大差"] < 1e-6
     g = res["grid"]
     assert len(g[(g["分法"] == "全部")]) == 21 and g[g["分法"] == "全部"]["最好"].sum() == 1
     # 赔率噪声小得多 → 选出的 w 偏向赔率

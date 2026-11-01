@@ -17,7 +17,8 @@
      每档算平均和 95% 区间；门槛 = 从它往上每一档都“区间下限 > 0、平均不小于最低差距”的最低一档的下沿（没有就是“无明显倾向”）。
 
 三、结果（都在 data/backtest/<回测名>/ 下面）
-  fusion_odds.csv        每场取到的赔率（下次直接读，不再查数据库；加 --refresh-odds 重新取）
+  fusion_odds.csv        每场取到的赔率（下次直接读，不再查数据库；取赔率的设置变了或加 --refresh-odds 会重新取，
+                         设置存在 fusion_odds_settings.json）
   fusion_check.json      场数（融合 / 未融合）、市场矩阵还原误差、rho 取边界的场数、模型矩阵和 predictions.csv 对不对得上、
                          两种融合算法在胜平负上差多少、选出的 w、最后定的 w
   fusion_grid.csv        每档 w 的各项分数（全部、每个联赛、两段），“最好”标出每一份里胜平负 log loss 最小的那档
@@ -157,8 +158,7 @@ def build(pred: pd.DataFrame, ids: np.ndarray, mats: np.ndarray, odds: pd.DataFr
     check["亚盘线不是主盘口、不用的场数"] = int((t["ah_line"].notna() & ~main).sum())
     check["没有亚盘线的场数"] = int(t["ah_line"].isna().sum())
     t["ah_line"] = t["ah_line"].where(main)
-    t["period"] = np.where(t["season"] < st["period_split"],
-                           f"{int(t['season'].min())}–{st['period_split'] - 1}", f"{st['period_split']} 起")
+    t["period"] = np.where(t["season"] < st["period_split"], f"{st['period_split']} 之前", f"{st['period_split']} 起")
     return t, model, market, check
 
 
@@ -322,7 +322,8 @@ def lean_bands(strength: np.ndarray, value: np.ndarray, dates: pd.Series, edges,
 
 
 def pick_threshold(bands: pd.DataFrame) -> float | None:
-    """门槛 = 最低的那一档的下沿：从它往上每一档（没有比赛的档跳过）都满足。最高一档就不满足 → None（一律“无明显倾向”）。"""
+    """门槛 = 最低的那一档的下沿：从它往上每一档都满足。最高一档就不满足 → None（一律“无明显倾向”）。
+    没有比赛的档没法判断，跳过（不算满足也不算不满足）；门槛那一档自己一定有比赛。"""
     thr = None
     for _, r in bands.iloc[::-1].iterrows():
         if r["n"] == 0:
@@ -361,10 +362,21 @@ def lean_study(t: pd.DataFrame, d: dict, settings: dict) -> tuple[pd.DataFrame, 
     return bands[["玩法", *[c for c in bands.columns if c != "玩法"]]], pd.DataFrame(thr_rows)
 
 
-def per_market_gap(t: pd.DataFrame, model: dict, w: float) -> dict:
-    """两种融合算法在胜平负上差多少：比分矩阵上融合 对 每个玩法各自融合（w × 去水赔率 + (1 − w) × 模型概率）。"""
+def per_market_gap(t: pd.DataFrame, model: dict, market: dict, w: float) -> dict:
+    """两种融合算法差多少：比分矩阵上融合 对 每个玩法各自融合（w × 去水赔率 + (1 − w) × 模型概率），看胜平负和大 2.5 球。
+
+    两边都是直线关系，所以差 = w × 市场矩阵的还原误差：市场矩阵还原得一样，两种算法就一样。返回最大差和 log loss 平均差。
+    """
+    y = t["y"].to_numpy()
+    fused = mix(model, market, w)
+    mat = fused["p3"] / fused["p3"].sum(axis=1, keepdims=True)
     per = w * t[["mo_p_home", "mo_p_draw", "mo_p_away"]].to_numpy(float) + (1 - w) * model["p3"]
-    return per
+    per = per / per.sum(axis=1, keepdims=True)
+    per_over = w * t["mo_over25"].to_numpy(float) + (1 - w) * model["over25"]
+    return {"w": w, "胜平负概率最大差": float(np.abs(mat - per).max()),
+            "大 2.5 球概率最大差": float(np.abs(fused["over25"] - per_over).max()),
+            "胜平负 log loss 平均差（矩阵 − 各自）": float(metrics.log_loss_per_match(mat, y).mean()
+                                                  - metrics.log_loss_per_match(per, y).mean())}
 
 
 # ======================= 主程序 =======================
@@ -383,13 +395,10 @@ def run(pred: pd.DataFrame, ids: np.ndarray, mats: np.ndarray, odds: pd.DataFram
     better = bool(len(main_row)) and main_row["verdict"].iloc[0] == BETTER
     w_final = w_all if better else 1.0
     fused = mix(model, market, w_final)
-    per = per_market_gap(t, model, w_final)
-    mat_p3 = fused["p3"] / fused["p3"].sum(axis=1, keepdims=True)
     y = t["y"].to_numpy()
     check.update({"全部融合场次选出的 w": w_all, "滚动融合比纯赔率更准": better, "最后定的 w": w_final,
-                  "两种融合算法胜平负概率最大差": float(np.abs(mat_p3 - per).max()),
-                  "两种融合算法胜平负 log loss 平均差": float(metrics.log_loss_per_match(mat_p3, y).mean()
-                                                      - metrics.log_loss_per_match(per / per.sum(1, keepdims=True), y).mean()),
+                  # 差 = w × 市场矩阵还原误差（见 per_market_gap），w 取 0.5 看一半模型一半赔率时两种算法差多少
+                  "两种融合算法差多少（w = 0.5）": per_market_gap(t, model, market, 0.5),
                   "全部场次平局比例": float((y == 1).mean())})
     bands, thr = lean_study(t, fused, settings)
     rolling = pd.DataFrame({"season": list(rw), "w": list(rw.values())})
@@ -408,14 +417,18 @@ def main() -> None:
     pred = load_predictions(run_dir)
     npz = np.load(run_dir / f"matrices_{st['model']}.npz")
     ids, mats = npz["match_id"], npz["matrix"]
-    cache = run_dir / "fusion_odds.csv"
-    if cache.exists() and not a.refresh_odds:
+    cache, key_file = run_dir / "fusion_odds.csv", run_dir / "fusion_odds_settings.json"
+    # 取赔率用到的设置变了（换公司、换线、换用途）就重新取，不用旧的
+    key = json.dumps({"market_odds": settings["market_odds"], "usage": st["usage"], "ah_book": st["ah_book"],
+                      "model": st["model"], "horizon": st["horizon"]}, ensure_ascii=False, sort_keys=True)
+    if cache.exists() and key_file.exists() and key_file.read_text(encoding="utf-8") == key and not a.refresh_odds:
         odds = pd.read_csv(cache)
     else:
         targets = pred[(pred["model"] == st["model"]) & (pred["horizon"] == st["horizon"])][["match_id", "cutoff_utc"]]
         fs = FeatureStore(open_readonly(a.db), "开发", settings)
         odds = fetch_odds(fs, targets.drop_duplicates("match_id"), settings)
         odds.to_csv(cache, index=False, encoding="utf-8-sig")
+        key_file.write_text(key, encoding="utf-8")
     res = run(pred, ids, mats, odds, settings)
     for key, name in [("grid", "fusion_grid"), ("rolling", "fusion_rolling_w"), ("compare", "fusion_compare"),
                       ("bands", "lean_bands"), ("thresholds", "lean_thresholds")]:
