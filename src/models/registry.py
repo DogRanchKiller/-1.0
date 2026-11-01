@@ -12,6 +12,7 @@
                      默认设置在 models.adaptive；每个候选 dyn 的其余设置 = models.dynamic + adaptive.base 那一组
   gb_l15 等           models.gbdt_variants 里事先写好的特征表 + 梯度提升树（src/models/gbdt.py），默认设置在 models.gbdt；
                      里面带的 dyn、Elo 用 gbdt.dyn、gbdt.elo 那两组的设置
+  market_pre         models.market_variants：直接用赛前赔率去水后的胜平负（src/models/market.py，步骤 8 的比较对象）
 加新模型：在这里加一个名字，回测框架不用改。
 """
 from __future__ import annotations
@@ -24,13 +25,14 @@ from src.models.elo import EloModel
 from src.models.frequency import FrequencyModel, FrequencyPoissonModel
 from src.models.gbdt import GBDTModel
 from src.models.goals import GoalsModel
+from src.models.market import MarketModel
 
 
 def available(settings: dict | None = None) -> list[str]:
     """所有能用的模型名字。"""
     s = (settings or load_settings())["models"]
     return ["frequency", "frequency_poisson", "elo", *s.get("elo_variants", {}), *(s.get("goals_variants") or {}), *(s.get("dynamic_variants") or {}), *(s.get("adaptive_variants") or {}),
-            *(s.get("gbdt_variants") or {})]
+            *(s.get("gbdt_variants") or {}), *(s.get("market_variants") or {})]
 
 
 def model_config(name: str, settings: dict | None = None) -> dict:
@@ -67,6 +69,9 @@ def model_config(name: str, settings: dict | None = None) -> dict:
         lg = full["leagues"]
         return {**g, "leagues": sorted({c for grp in lg.values() for c in grp}), "min_matches": s["min_matches"],
                 "max_goals": full["calc"]["max_goals"]}
+    mk = s.get("market_variants") or {}
+    if name in mk:                                       # 赔率怎么选、怎么去水在 market_odds 段，一起记下来
+        return {**(mk[name] or {}), "market_odds": full["market_odds"]}
     raise ValueError(f"没有叫「{name}」的模型。能用的：{'、'.join(available(settings))}")
 
 
@@ -85,4 +90,6 @@ def build_model(name: str, settings: dict | None = None) -> Model:
         return AdaptiveDynamicModel(name=name, **cfg)
     if name in ((settings or load_settings())["models"].get("gbdt_variants") or {}):
         return GBDTModel(name=name, **cfg)
+    if name in ((settings or load_settings())["models"].get("market_variants") or {}):
+        return MarketModel(name=name, usage=cfg["usage"])
     return EloModel(name=name, **cfg)
