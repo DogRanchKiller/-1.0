@@ -526,3 +526,7 @@ standings_check:                 # 用维基百科赛季最终积分榜核对（
   raw_dir: data/raw/wikipedia/standings
   first_season: 1993
   last_season: 2025              # 2026/27 还没踢完，不核对
+
+# 定时任务的心跳文件（src/jobs/heartbeat.py，需求文档第 9 节“完整链路的分工和接口”）
+jobs:
+  state_dir: data/jobs           # 每个定时任务一个 <任务名>.json：上次开始、结束、成功没有、摘要（data/ 不进 Git）
