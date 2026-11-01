@@ -65,13 +65,21 @@ def promoted_flags(m: pd.DataFrame) -> pd.Series:
     return pd.Series(out, index=m["match_id"].to_numpy())
 
 
-def build(pred: pd.DataFrame, odds: pd.DataFrame, settings: dict) -> pd.DataFrame:
-    """每场一行：模型概率、赛前赔率概率（胜平负、用不用平博）、平博收盘、多家平均赛前、四个因素、d。"""
+def build(pred: pd.DataFrame, odds: pd.DataFrame, settings: dict, promoted: pd.Series | None = None) -> pd.DataFrame:
+    """每场一行：模型概率、赛前赔率概率（胜平负、用不用平博）、平博收盘、多家平均赛前、四个因素、d。
+
+    promoted：每场有没有升班马（index = match_id）。不给就从 pred 自己的比赛里看上一季（开发赛季从 2005 起都在 pred 里）；
+    期末考试只预测 2024/25 起，2024/25 的上一季不在 pred 里，要从全部历史算好传进来。
+    """
     st = settings["confidence_study"]
     m = pred[(pred["model"] == st["model"]) & (pred["horizon"] == st["horizon"])].drop_duplicates("match_id")
     m = m.dropna(subset=["result"]).copy()
     m["early"] = m["match_id"].map(early_flags(m, st["early_rounds"])).astype(bool)
-    m["promoted"] = m["match_id"].map(promoted_flags(m)).astype(bool)
+    if promoted is None:
+        promoted = promoted_flags(m)
+    if not m["match_id"].isin(promoted.index).all():
+        raise ValueError("有比赛不知道有没有升班马（promoted 里没有这些 match_id）")
+    m["promoted"] = m["match_id"].map(promoted).astype(bool)
     m = m.merge(odds[["match_id", *MO3, "mo_pinnacle"]], on="match_id", how="left")
     close = pred[(pred["model"] == "pinnacle_close") & (pred["horizon"] == "收盘")].drop_duplicates("match_id")
     avg = pred[(pred["model"] == "market_avg") & (pred["horizon"] == "赛前代替")].drop_duplicates("match_id")

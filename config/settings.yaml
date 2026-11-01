@@ -294,6 +294,23 @@ confidence:                   # 信心等级规则（confidence_study 选出来�
   downgrade_factors: []          # 每碰上一个降一级。候选 gap / early / promoted / no_pinnacle，开发赛季回测一个都不算数
   no_odds_downgrade: 1           # 一家赔率都没有（只出模型概率）再降几级（第 5 节“融合用哪家赔率”第 3 条）
 
+final_exam:                   # 期末考试（预测部分）src/evaluate/final_exam.py（需求文档第 5 节“期末考试怎么考”，跑之前写下）
+  done: false                    # 考过一次后改成 true 提交，程序就不能再考（只考一次）
+  run_name: final_exam           # 结果放 data/backtest/<这个名字>/（data/ 不进 Git），里面的 exam_done.json 也算“考过了”
+  dry_run_name: final_exam_dry   # 开发赛季试跑放这里（开发模式，不算考试）
+  backtest_first: 2005           # 回测从这个赛季连着跑到最后一个考试赛季，只给考试赛季打分（和 W9 同一个起点：gb_l7 每 91 天重训一次，
+                                 # 从哪天开始数会改变重训日期，起点不同预测就不同；起点一样，开发赛季的预测应和 W9 一模一样，拿来核对）
+  calibration_step: 0.1          # 第 5 条校准：每 0.1 一档
+  dev_reference:                 # 开发赛季的数，只用来和考试结果并排看（第 1 条模型、第 3 条倾向）
+    model_log_loss_2014_2023: 0.979      # 第 4 节步骤 6：gb_l7 2014–2023，T-24
+    pinnacle_log_loss_2014_2023: 0.964
+    lean_actual_mean:                    # W9 lean_thresholds.csv“实际的平均”（w = 1、现在的门槛，开发赛季 34,514 场）
+      result: 0.291787
+      draw: 0.043703
+      over25: 0.173017
+      btts: 0.123263
+      ah: 0.066950
+
 models:                      # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
   frequency:                 # 历史频率基线：按联赛的主胜 / 平 / 客胜比例
