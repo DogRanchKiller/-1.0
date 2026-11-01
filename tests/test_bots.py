@@ -154,3 +154,94 @@ def test_stop_drawdown(cfg):
     # 一直不输：不会停
     _, sim = bt.simulate_bankroll(_bets(60, days, 0.0), _bot(cfg, "跟模型_平博"), cfg)
     assert sim["停了没有"] == "没停" and sim["实际下了几注"] == 60
+
+
+# ---------------- 取数：回测概率只留开发赛季、赔率按截止时间、结算 ----------------
+import sqlite3                                             # noqa: E402
+
+from src.bots import data as bd                            # noqa: E402
+from src.clean.schema import create_tables                 # noqa: E402
+from src.features import FeatureStore                      # noqa: E402
+
+# 假比赛：(match_id, 赛季, 日期, 结果)。第 4 场是考试赛季
+FAKE = [(1, 2015, "2015-08-10", "H"), (2, 2015, "2015-08-17", "D"), (3, 2016, "2016-08-15", "A"),
+        (4, 2024, "2024-08-17", "H")]
+
+
+def _matrix(lh, la, n=10):
+    from scipy.stats import poisson
+    m = np.outer(poisson.pmf(np.arange(n + 1), lh), poisson.pmf(np.arange(n + 1), la))
+    return m / m.sum()
+
+
+def _fake_db(settings):
+    c = sqlite3.connect(":memory:")
+    create_tables(c)
+    c.executemany("insert into teams (team_id, country) values (?, 'England')", [("A",), ("B",)])
+    # 同一赛季同一对主客队只能有一场：第 2 场换成 B 主场
+    c.executemany("insert into matches (match_id, competition, season, home_team, away_team, match_date, status)"
+                  " values (?, 'E0', ?, ?, ?, ?, 'finished')",
+                  [(r[0], r[1], *(("B", "A") if r[0] == 2 else ("A", "B")), r[2]) for r in FAKE])
+    goals = {"H": (2, 0), "D": (1, 1), "A": (0, 1)}
+    c.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result)"
+                  " values (?, 'football-data', ?, ?, ?)", [(r[0], *goals[r[3]], r[3]) for r in FAKE])
+    ins = ("insert into odds (match_id, source, bookmaker, market, timing, line, home, draw, away, over, under)"
+           " values (?, 'football-data', ?, '1x2', ?, null, ?, ?, ?, null, null)")
+    c.executemany(ins, [
+        (1, "平博 Pinnacle", "pre", 2.0, 3.5, 4.0), (1, "多家最高", "pre", 2.2, 3.8, 4.4),
+        (1, "多家平均", "pre", 1.9, 3.4, 3.9), (1, "平博 Pinnacle", "close", 1.9, 3.6, 4.3),
+        (2, "多家最高", "pre", 9.0, 9.0, 9.0),          # 倒数之和 0.33：录错，不下
+        (2, "多家平均", "pre", 2.5, 3.2, 2.9),          # 没有平博 → 融合用多家平均
+        (3, "平博 Pinnacle", "pre", 3.0, 3.4, 2.4), (3, "多家最高", "pre", 3.2, 3.6, 2.6),
+        (3, "平博 Pinnacle", "close", 3.1, 3.4, 2.35),
+        (4, "平博 Pinnacle", "pre", 2.0, 3.5, 4.0)])
+    c.commit()
+    return FeatureStore(c, "开发", settings)
+
+
+def _fake_run(tmp_path, fs, rows=FAKE):
+    """假的回测结果：predictions.csv（gb_l7 T-24 + 别的模型）和 matrices_gb_l7.npz。"""
+    out, ids, mats = [], [], []
+    for k, (mid, season, date, res) in enumerate(rows):
+        m = _matrix(1.2 + 0.3 * k, 1.1)
+        p = [np.tril(m, -1).sum(), np.trace(m), np.triu(m, 1).sum()]
+        cut = fs.cutoff_before(mid, 24) if season <= 2023 else f"{int(date[:4])}-08-16 00:00:00"
+        for model in ["gb_l7", "dc"]:
+            out.append({"match_id": mid, "competition": "E0", "season": season, "match_date": date,
+                        "horizon": "T-24", "cutoff_utc": cut, "model": model,
+                        "p_home": p[0], "p_draw": p[1], "p_away": p[2]})
+        ids.append(mid)
+        mats.append(m.astype(np.float32))
+    d = tmp_path / "w9_fake"
+    d.mkdir()
+    pd.DataFrame(out).to_csv(d / "predictions.csv", index=False, encoding="utf-8-sig")
+    np.savez_compressed(d / "matrices_gb_l7.npz", match_id=np.array(ids, dtype=np.int64), matrix=np.stack(mats))
+    return d
+
+
+def test_load_bot_predictions_drops_exam_seasons(settings, tmp_path):
+    fs = _fake_db(settings)
+    pred, info = bd.load_bot_predictions("w9_fake", settings, run_dir=_fake_run(tmp_path, fs))
+    assert list(pred["match_id"]) == [1, 2, 3]                  # 考试赛季第一步就筛掉
+    assert info["赛季"] == [2015, 2016]
+    assert np.allclose(pred[bd.P3].sum(axis=1), 1)
+    bad = copy.deepcopy(settings)
+    bad["bots"]["last_season"] = 2024                           # 设置里写到考试赛季 → 报错
+    with pytest.raises(ValueError):
+        bd.load_bot_predictions("w9_fake", bad, run_dir=tmp_path / "w9_fake")
+
+
+def test_load_bot_odds_and_settlement(settings, tmp_path):
+    fs = _fake_db(settings)
+    pred, _ = bd.load_bot_predictions("w9_fake", settings, run_dir=_fake_run(tmp_path, fs))
+    m, odds, fus = bd.load_bot_odds(fs, pred, settings)
+    pin, best = odds["平博"].set_index("match_id"), odds["最高"].set_index("match_id")
+    assert list(pin["ok"]) == [True, False, True]               # 第 2 场没有平博
+    assert list(best["ok"]) == [True, False, True]              # 第 2 场多家最高录错
+    assert (odds["平博"]["known_at_utc"].dropna() <= m.loc[m["match_id"] != 2, "cutoff_utc"].to_numpy()).all()
+    f = fus.set_index("match_id")
+    assert f.loc[1, "fusion_book"] == "平博 Pinnacle" and f.loc[2, "fusion_book"] == "多家平均"
+    assert f.loc[1, "p_home"] == pytest.approx(0.5 / (0.5 + 1 / 3.5 + 0.25))
+    s = bd.load_settlement(fs, m, settings).set_index("match_id")
+    assert list(s["result"]) == ["H", "D", "A"]
+    assert s.loc[1, "close_home"] == 1.9 and np.isnan(s.loc[2, "close_home"])
