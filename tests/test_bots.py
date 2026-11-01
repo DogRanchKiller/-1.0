@@ -245,3 +245,47 @@ def test_load_bot_odds_and_settlement(settings, tmp_path):
     s = bd.load_settlement(fs, m, settings).set_index("match_id")
     assert list(s["result"]) == ["H", "D", "A"]
     assert s.loc[1, "close_home"] == 1.9 and np.isnan(s.loc[2, "close_home"])
+
+
+# ======================= 成绩统计（src/bots/stats.py） =======================
+from src.bots import stats as bs                            # noqa: E402
+
+
+def test_max_drawdown_and_losing_streak():
+    # 累计 +1, 0, -2, -1 → 最高点 1、最低 -2，最大回撤 3
+    assert bs.max_drawdown([1, -1, -2, 1]) == pytest.approx(3)
+    # 输、走、输、赢、输 → “走”不打断连输，最长连输 2
+    assert bs.longest_losing_streak(["loss", "push", "loss", "win", "loss"]) == 2
+
+
+def test_random_theory():
+    # 赔率 2/2/2 的水钱：1/2 × 3 = 1.5 → 理论 ROI = 1/1.5 − 1
+    t = pd.DataFrame({"home": [2.0], "draw": [2.0], "away": [2.0], "ok": [True]})
+    th = bs.random_theory({"平博": t}, {})
+    assert th["平博"] == pytest.approx(1 / 1.5 - 1)
+
+
+# ======================= 入口：跑全部机器人（src/evaluate/bot_backtest.py） =======================
+from src.evaluate import bot_backtest as bb                 # noqa: E402
+
+
+def test_run_all(settings, tmp_path):
+    fs = _fake_db(settings)
+    out = tmp_path / "out"
+    res = bb.run_all(settings, fs, run_dir=_fake_run(tmp_path, fs), out_dir=out)
+    for f in ("bets.csv", "summary.csv", "by_period.csv", "by_season.csv", "bankroll.csv", "check.json",
+              "report.html"):
+        assert (out / f).exists(), f
+    names = [b["name"] for b in settings["bots"]["list"]]
+    assert sorted(res["summary"]["机器人"]) == sorted(names)        # 19 个机器人都在排行榜里
+    assert len(res["bankroll"]) == len(names)
+    bets = res["bets"]
+    assert set(bets["season"]) <= {2015, 2016}                    # 2024 是考试赛季，一注都没有
+    assert res["check"]["赛季检查"] == "都是开发赛季"
+    # 只下了价格像样的场次：第 2 场没有平博，用平博价格的机器人不该下第 2 场
+    pin = [b["name"] for b in settings["bots"]["list"] if b["book"] == "平博"]
+    assert not ((bets["bot"].isin(pin)) & (bets["match_id"] == 2)).any()
+    # 注数远不够 min_clv_bets，全部不排名
+    assert (res["summary"]["名次"] == bs.TOO_FEW).all()
+    html = (out / "report.html").read_text(encoding="utf-8")
+    assert "推荐下注" not in html
