@@ -530,3 +530,21 @@ standings_check:                 # 用维基百科赛季最终积分榜核对（
 # 定时任务的心跳文件（src/jobs/heartbeat.py，需求文档第 9 节“完整链路的分工和接口”）
 jobs:
   state_dir: data/jobs           # 每个定时任务一个 <任务名>.json：上次开始、结束、成功没有、摘要（data/ 不进 Git）
+
+# 正式网站的静态页面（src/web/site/ + src/jobs/build_site.py，需求文档第 8 节“正式网站（静态页面）实际做法”，工作树 K3）
+# 只读数据库、预测存档（predictions 表）、data/review/（K2 生成），不出预测、不跑模型、不联网
+site:
+  output_dir: data/site          # 生成到这里（data/ 不进 Git）；每次整站重新生成，先写到旁边的临时文件夹再替换
+  review_dir: data/review        # 赛后对账、复盘结果（需求文档第 9 节接口 3，K2 写）
+  leagues: top                   # 首页列哪一组联赛（leagues 段里的 top 五大联赛）
+  days_ahead: 7                  # 首页列未来几天开球的比赛
+  days_back: 3                   # 首页另列最近几天已经开球的比赛（看比分、看复盘）
+  team_days_back: 60             # 球队页列最近多少天的赛程（联赛 + 杯赛、欧战）
+  team_days_ahead: 14            # 球队页列未来多少天的联赛赛程
+  versions: [T-24, T-6, T-1, preview]   # 单场页对比哪几个版本（predictions 表的 kind），按这个顺序排
+  heatmap_goals: 5               # 比分热力图显示 0–5 球（第 3 节：0-0 到 5-5）；更多的并进“6+”
+  top_scores: 5                  # 列最可能的几个比分
+  ou_lines: [1.5, 2.5, 3.5]      # 大小球除了主盘口，另外列这几条线
+  ah_extra: [-0.5, -0.25, 0.25, 0.5]   # 亚盘除了主盘口，另外列主盘口加减这几个数的线
+  matrix_sum_tol: 0.001          # 存档里的矩阵是 6 位小数，加起来和 1 差这么多以内按比例补成 1；差更多就当矩阵坏了，不用
+  refresh_minutes: 15            # 页面开着时多少分钟自己重新加载一次（和定时任务“足球预测_生成网站”的间隔一样）

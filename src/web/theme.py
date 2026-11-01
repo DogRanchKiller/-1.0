@@ -95,3 +95,40 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
   .stat { flex: 1 1 calc(50% - 12px); min-width: 0; }
 }
 """
+
+# ---------- 正式网站（src/web/site/，工作树 K3 加）：只加新样式，上面 BASE_CSS 原样不动 ----------
+# 几页共用：顶部导航、可以展开的“详细”块（<details>，不用脚本也能点开收起）、热力图和折线图的外框、单场页的版本对比
+SITE_CSS = """
+nav.top { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin-bottom: 18px; font-size: 14px; }
+nav.top a { text-decoration: none; color: var(--sub); padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); }
+nav.top a:hover { color: var(--green); border-color: rgba(52, 211, 153, .45); }
+nav.top .brand { color: var(--green); font-weight: 650; border: none; padding-left: 0; }
+details.more { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin: 14px 0;
+               padding: 0 18px; }
+details.more > summary { cursor: pointer; padding: 13px 0; color: var(--green); font-weight: 600; list-style: none; }
+details.more > summary::-webkit-details-marker { display: none; }
+details.more > summary::before { content: "▸ "; color: var(--sub); }
+details.more[open] > summary::before { content: "▾ "; }
+details.more[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+details.more > .inner { padding-bottom: 16px; }
+.points { margin: 8px 0 0; padding-left: 20px; }
+.points li { margin: 4px 0; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.pad { padding: 16px 18px; }
+.chart { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--sub); font-size: 12px; font-family: inherit; }
+.chart .cell-text { fill: var(--text); font-size: 11.5px; }
+.chart .cell-text.dark { fill: #062016; font-weight: 600; }
+.chart .axis { stroke: var(--line); stroke-width: 1; }
+.placeholder { color: var(--faint); border: 1px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; }
+.num { text-align: right; white-space: nowrap; }
+.score { font-weight: 650; color: var(--lime); white-space: nowrap; }
+.hit { color: var(--green); } .miss { color: var(--red); }
+td.match a, td a.match { color: var(--text); text-decoration: none; font-weight: 600; }
+td.match a:hover, td a.match:hover { color: var(--green); }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 6px 0; font-size: 14px; }
+dl.kv dt { color: var(--sub); } dl.kv dd { margin: 0; }
+@media (max-width: 760px) { dl.kv { grid-template-columns: 1fr; } dl.kv dd { margin-bottom: 6px; } }
+.legend { display: inline-flex; gap: 14px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+"""
