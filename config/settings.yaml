@@ -699,3 +699,22 @@ notify:
   running_stale_minutes: 60           # “结束”为空（正在跑）超过几分钟，算“卡住或中途被关掉”
   # 推送程序自己（notify）出故障时推不出去，只在数据状态页显示；故障推送只看下面这几个任务
   push_jobs: [scheduled_predict, review, site]
+
+# 第 8 阶段：欧洲杯赛的跨联赛实力对比（需求文档第 4 节“第 8 阶段怎么做”“第 8 阶段事先定的比较”）。数字都是跑回测之前定的，不选、不调
+euro:
+  competitions: [UCL, UEL, UECL]   # 只用这三项欧战（国内杯赛、超级杯不用）
+  rating_leagues: [E0, SP1, D1, I1, F1]   # 有联赛内评分的联赛（= leagues.top）；其余球队一律算“联赛外”
+  first_season: 2005               # 联赛内评分、欧战实力表从哪个赛季开始处理（前面的赛季只做热身，和 dyn 的回测一样）
+  eval_first: 2014                 # 评分的欧战比赛从 2014/15 起，到 seasons.dev_last
+  horizon_hours: 24                # 预测时点 T-24
+  dev_end_month_day: "06-30"       # 取“开发赛季全部欧战”的截止时间 = seasons.dev_last 的下一年这一天（那时 2023/24 的欧战都踢完了，2024/25 的还没开始）
+  refit_days: 7                    # 欧战实力表每隔几天重新估一次（和 backtest.refit_days 一样）
+  delta_prior_sd: 0.5              # 联赛偏移 δ 的先验标准差（岭惩罚；事先定的，不选）
+  neutral:                         # 库里没有中立场标记，按规则推断（需求文档“规则”第 2 条）
+    final_round: F                 # 决赛（leg = 0）当中立场
+    single_leg_season: 2019        # 2019/20 疫情后八月补赛的单场淘汰赛（leg = 0）当中立场
+    single_leg_rounds: [R16, QF, SF]
+    single_leg_competitions: [UCL, UEL]
+  residual_days: 90                # 残差研究：看过去几天内的欧战；另外各看一遍 45、180 天
+  residual_days_extra: [45, 180]
+  dyn_model: dyn_q1e5_b01         # 欧战实力表用哪一组 dyn 的联赛评分（步骤 5 选出的）
