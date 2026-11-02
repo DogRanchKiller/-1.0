@@ -162,17 +162,20 @@ class FeatureStore:
                 groups.append((d, cols))
         return groups
 
-    def _stats_joins(self, groups: list[tuple[str, list[str]]]) -> tuple[str, str]:
+    def _stats_joins(self, groups: list[tuple[str, list[str]]], source: str | None = None) -> tuple[str, str, list]:
         """每一类数据各挑一个来源（match_stats 的主键是 match_id + source，直接 join 的话一场会变成几行）。
 
         挑法：这类数据的列填得最全的来源先；一样全的，按 settings.yaml 的 stats_source_priority 的顺序。
         例子：2025/26 的比赛 football-data 有比分、射门，没有 xG；懂球帝详情页有比分、射门、xG →
         比分用 football-data（一样全，按顺序），射门和 xG 用懂球帝（它更全）。
-        返回（要加进 select 的列, join 语句）。第一类的来源叫 stats_source，后面每类的来源叫 stats_source_<类名>。
+        source 给了：先把候选限制到这个来源，再挑完整度，不能先挑其他来源再在外面过滤。
+        找不到这个来源时统计列为空，不回退到别的来源；比赛行仍保留，运行模式和赛季检查照常执行。
+        返回（要加进 select 的列, join 语句, join 的参数）。第一类的来源叫 stats_source，后面每类的来源叫 stats_source_<类名>。
         """
         if not groups:   # 什么列都不要时，也照“比分”挑一个来源，好给出 stats_source
             groups = [("比分", [])]
-        select, joins = [], []
+        select, joins, params = [], [], []
+        source_filter = " and s2.source = ?" if source is not None else ""
         for i, (name, cols) in enumerate(groups):
             a = f"s{i}"
             filled = " + ".join(f"(s2.{c} is not null)" for c in cols) or "null"   # 不能写 0：order by 0 会被当成“按第 0 列排”而报错
@@ -181,15 +184,18 @@ class FeatureStore:
               on {a}.match_id = m.match_id
              and {a}.source = (select s2.source from match_stats s2
                                left join temp.{self._prio} p on p.source = s2.source
-                               where s2.match_id = m.match_id
+                               where s2.match_id = m.match_id{source_filter}
                                order by {filled} desc, coalesce(p.rank, 999), s2.source limit 1)""")
+            if source is not None:
+                params.append(source)
             alias = "stats_source" if i == 0 else f"stats_source_{name}"
             select.append(f'{a}.source as "{alias}"')   # 类名是中文、带顿号，要加引号
             select += [f"{a}.{c}" for c in cols]
-        return ", " + ", ".join(select), "".join(joins)
+        return ", " + ", ".join(select), "".join(joins), params
 
     def _query_past(self, cutoff: str, groups: list[tuple[str, list[str]]], league: bool, competition=None,
-                    team: str | None = None, since=None, newest_first_limit: int | None = None) -> pd.DataFrame:
+                    team: str | None = None, since=None, newest_first_limit: int | None = None,
+                    source: str | None = None) -> pd.DataFrame:
         """“以前的比赛”：已经踢完（finished），而且比分在截止时间之前已经能知道（result_known_utc ≤ 截止时间）。
 
         同一场比赛有几个来源的统计时，每类数据各挑一个来源（见 _stats_joins）。
@@ -203,7 +209,7 @@ class FeatureStore:
         if since is not None:
             where.append("k.kickoff_earliest_utc >= ?")
             params.append(to_utc_text(since))
-        stat_sql, join_sql = self._stats_joins(groups)
+        stat_sql, join_sql, join_params = self._stats_joins(groups, source)
         order = "desc" if newest_first_limit else "asc"
         sql = f"""
             select m.*, k.season_role, k.kickoff_earliest_utc{stat_sql},
@@ -215,7 +221,7 @@ class FeatureStore:
         if newest_first_limit:
             sql += " limit ?"
             params.append(int(newest_first_limit))
-        df = pd.read_sql(sql, self.conn, params=params)
+        df = pd.read_sql(sql, self.conn, params=[*join_params, *params])
         if newest_first_limit:
             df = df.iloc[::-1].reset_index(drop=True)  # 取最近 n 场后，再按时间从早到晚排好
         return df
@@ -240,12 +246,15 @@ class FeatureStore:
         self.usage.check_mode(self.mode, role, usage, f"比赛 {match_id}（{season_label(season)} 赛季）")
         return to_utc_text(pd.Timestamp(kickoff) - pd.Timedelta(hours=float(hours)))
 
-    def historical_matches(self, cutoff, usage: str, competition=None, data=("比分",), since=None) -> pd.DataFrame:
+    def historical_matches(self, cutoff, usage: str, competition=None, data=("比分",), since=None,
+                           source: str | None = None) -> pd.DataFrame:
         """截止时间之前已经踢完、结果已经能知道的联赛比赛，每场一行。
 
         competition：联赛代码，例如 'E0' 或 ['E0', 'E1']；不给 = settings.yaml 里的全部联赛（不含杯赛）。
         data：要哪几类数据，名字按 data_usage.yaml，例如 ('比分', '射门、xG')。每一类都按用途检查。
         since：只要这个时间以后开球的（省时间用，不影响防偷看）。
+        source：只从这个 match_stats 来源取统计，每类都在比较完整度前限制候选；None 保持原来的选来源规则。
+        指定来源没有记录时保留比赛、统计列为空，不回退其他来源；不影响文件数据、截止时间和赛季限制。
         返回 matches 表的全部列 + 要的统计列 + stats_source（第一类数据来自哪个来源）+ known_at_utc（比分能知道的时间）。
         要了几类数据时，每类各挑一个来源，第二类起的来源在 stats_source_<类名> 列，例如 stats_source_射门、xG。
         """
@@ -255,7 +264,7 @@ class FeatureStore:
             self.usage.check(d, PAST, usage)
         files = [d for d in data if "文件" in self.usage.item(d)]
         df = self._query_past(cutoff, self._stats_groups([d for d in data if d not in files]), league=True,
-                              competition=competition, since=since)
+                              competition=competition, since=since, source=source)
         for d in files:
             df = self._join_file(df, d, cutoff)
         return self._check_rows_mode(df, usage)
@@ -481,13 +490,13 @@ class FeatureStore:
         """本场的比分（答案）。只能用于评估、机器人结算、复盘；截止时间之前比分还不能知道时，返回空表。"""
         cutoff = to_utc_text(cutoff)
         self._target(match_id, cutoff, usage, ["比分"])
-        stat_sql, join_sql = self._stats_joins(self._stats_groups(["比分"]))
+        stat_sql, join_sql, join_params = self._stats_joins(self._stats_groups(["比分"]))
         sql = f"""
             select m.match_id{stat_sql}, k.result_known_utc as known_at_utc
             from matches m
             join temp.{self._kt} k using (match_id){join_sql}
             where m.match_id = ? and m.status = 'finished' and k.result_known_utc <= ? and s0.source is not null"""
-        return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff])
+        return pd.read_sql(sql, self.conn, params=[*join_params, int(match_id), cutoff])
     def prediction_targets(self, start, end, usage: str, competition=None) -> pd.DataFrame:
         """开球时间在 [start, end) 之间的联赛比赛，当作要预测的目标（回测时一场一场拿出来预测）。
 

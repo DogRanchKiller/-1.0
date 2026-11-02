@@ -233,6 +233,33 @@ def test_usage_and_source_rules(settings):
     assert src.loc[ONLY_DQD] == 'dongqiudi'                     # 只有懂球帝的，研究程序要排除它
 
 
+def test_missing_fouls_do_not_drop_valid_counts_when_dqd_has_zero_placeholders(settings):
+    '''football-data 只缺犯规时，角球、黄牌训练和答案都仍用它，不能被更完整的懂球帝 0 挤掉。'''
+    baseline = make_fs(settings)
+    missing_fouls = make_fs(settings)
+    missing_fouls.conn.execute(
+        "update match_stats set home_fouls = NULL where match_id in (2023000, 2023001, 2023002) "
+        "and source = 'football-data'")
+    missing_fouls.conn.commit()
+    cfg = settings['corners_cards']
+    targets = cc.season_targets(baseline, ['E0'], 2023, 2023, cfg['usage'])
+    ridges = {tg: [20.0] for tg in cc.TARGETS}
+    before = cc.walk(baseline, cfg, targets, ridges, True, True)
+    after = cc.walk(missing_fouls, cfg, targets, ridges, True, True)
+    pd.testing.assert_frame_equal(before.preds, after.preds)
+    outcomes = cc.fetch_outcomes(missing_fouls, cfg, targets, with_ref=True)
+    row = outcomes.set_index('match_id').loc[2023000]
+    assert row['stats_source'] == 'football-data' and row['home_corners'] > 0
+    assert pd.isna(outcomes.set_index('match_id').loc[ONLY_DQD, 'stats_source'])
+    score_before, excluded_before = cc.score(
+        cc.add_ref_predictions(before, cc.fetch_outcomes(baseline, cfg, targets, with_ref=True)),
+        cc.fetch_outcomes(baseline, cfg, targets, with_ref=True))
+    score_after, excluded_after = cc.score(cc.add_ref_predictions(after, outcomes), outcomes)
+    pd.testing.assert_frame_equal(score_before, score_after)
+    assert excluded_before == excluded_after
+    assert excluded_after['corners']['没有答案被排除的场数'] == 1
+
+
 # ---------- 不偷看未来 ----------
 def test_own_answer_never_leaks(settings):
     '''把 2023 第 6 轮某一场的答案改得很夸张：它自己和更早的比赛预测必须一模一样；后面的比赛（已经能知道它了）才会变。'''

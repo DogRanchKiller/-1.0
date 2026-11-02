@@ -226,7 +226,7 @@ def walk(fs: FeatureStore, cfg: dict, targets: pd.DataFrame, ridges: dict, with_
         # 这一块里最早的一场开球前 horizon_hours 小时 = 整块的截止时间
         cutoff = fs.cutoff_before(int(blk.iloc[0]['match_id']), cfg['horizon_hours'], usage)
         since = None if prev_cutoff is None else pd.Timestamp(prev_cutoff) - pd.Timedelta(days=9)   # 增量取，往回多取 9 天
-        new = fs.historical_matches(cutoff, usage, competition=leagues, data=data, since=since)
+        new = fs.historical_matches(cutoff, usage, competition=leagues, data=data, since=since, source=SOURCE_OK)
         if (new['known_at_utc'] > cutoff).any():
             raise LookAheadError(f'取到了截止时间 {cutoff} 之后才能知道的比赛，不允许')
         hist = new if hist is None else pd.concat([hist, new], ignore_index=True)
@@ -283,7 +283,7 @@ def fetch_outcomes(fs: FeatureStore, cfg: dict, targets: pd.DataFrame, with_ref:
     since = kick.min() - pd.Timedelta(days=2)
     data = [CORNERS_DATA] + ([REFEREE_DATA] if with_ref else [])
     leagues = sorted(targets['competition'].unique())
-    return fs.historical_matches(cutoff, '复盘', competition=leagues, data=data, since=since)
+    return fs.historical_matches(cutoff, '复盘', competition=leagues, data=data, since=since, source=SOURCE_OK)
 
 
 def add_ref_predictions(w: WalkResult, outcomes: pd.DataFrame) -> pd.DataFrame:
