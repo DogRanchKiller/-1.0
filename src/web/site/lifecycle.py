@@ -1,14 +1,26 @@
 """逐场周期证据页。只展示只读验收报告，不补预测、不重算成绩、不推断首发通过。"""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from src.web.site.common import bj_text, details, e, match_href, page, placeholder, table
 from src.web.site.data import SiteData
+from src.web.site.lifecycle_contract import KINDS, KNOWN_STATES, LINEUP_LABEL, report_problem
 
 
-KINDS = ("T-24", "T-6", "T-1")
 MARKETS = {"1x2": "胜平负", "ah": "亚盘", "ou": "大小球"}
 ATTENTION = {"late", "overdue", "missed_window", "invalid_archive", "invalid", "error"}
-PENDING = {"not_due", "awaiting_scheduler", "awaiting_result", "pending", "partial", "missing"}
+PENDING = {"not_due", "awaiting_scheduler", "awaiting_result", "pending", "partial", "missing", "unverified",
+           "before_activation", "not_applicable", "no_valid_archives", "unknown", "not_flagged"}
+
+
+def page_time(report) -> datetime:
+    """页脚是本次报告生成时间，不把用于回放的证据截止时间再次命名为生成时间。"""
+    try:
+        value = datetime.fromisoformat(report.get("generated_at_utc"))
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return datetime.now(timezone.utc)
 
 
 def stamp(value) -> str:
@@ -23,8 +35,10 @@ def stamp(value) -> str:
 
 
 def state_html(item: dict | None) -> str:
-    item = item or {}
+    item = item if isinstance(item, dict) else {}
     state = item.get("state")
+    if not isinstance(state, str) or state not in KNOWN_STATES:
+        return "<span class='tag temp'>证据未知</span>"
     cls = " warn" if state in ATTENTION else (" temp" if state in PENDING else "")
     return f"<span class='tag{cls}'>{e(item.get('label') or '证据未知')}</span>"
 
@@ -42,6 +56,8 @@ def minutes(value) -> str:
 
 
 def match_report(data: SiteData, mid: int) -> dict | None:
+    if report_problem(data.lifecycle):
+        return None
     return next((row for row in data.lifecycle.get("matches", []) if row.get("match_id") == mid), None)
 
 
@@ -54,7 +70,7 @@ def match_reference(data: SiteData, mid: int) -> str:
     states = " · ".join(f"{e(kind)} {state_html(slots.get(kind))}" for kind in KINDS)
     return (f"<div class='note'><a href='../lifecycle.html#match-{int(mid)}'>本场逐场验收记录</a>"
             f"<p>{states}</p><p class='small'>{state_html(row.get('review'))} · "
-            f"{state_html(row.get('closing'))} · {e((row.get('lineup') or {}).get('label') or '首发链路尚未验收')}</p></div>")
+            f"{state_html(row.get('closing'))} · {LINEUP_LABEL}</p></div>")
 
 
 def fixture_name(data: SiteData, row: dict) -> str:
@@ -119,16 +135,18 @@ def match_evidence(data: SiteData, row: dict) -> str:
     heading = f"{e(data.comp(row.get('competition') or '未知赛事'))} · {e(name)} · 比赛编号 {mid}"
     if mid in data.page_ids:
         heading += f" · <a href='{match_href(mid, '')}'>单场预测与复盘</a>"
+    source_state = row.get("source_state") or {"state": "unknown", "label": "来源状态未知"}
+    source = f"<p>当前来源：{state_html(source_state)}</p>"
     missing = "<p class='tag warn'>当前来源缺失；只展示现有证据</p>" if row.get("source_missing") else ""
     result, review, closing = (row.get(key) or {} for key in ("result", "review", "closing"))
     scores = f"{number(result.get('home_goals'))}–{number(result.get('away_goals'))}"
     scored_ids = "、".join(str(pid) for pid in review.get("scored_prediction_ids", [])) or "暂无"
-    content = (f"<p>{heading}</p>{missing}{slot_rows(row)}"
+    content = (f"<p>{heading}</p>{source}{missing}{slot_rows(row)}"
                f"<h3>赛果与评分</h3><p>{state_html(result)} · 比分 {scores} · "
                f"赛果已知时间 {stamp(result.get('known_at_utc'))} · 来源 {e(result.get('source') or '未知')}</p>"
                f"<p>{state_html(review)} · 已评分存档编号：{e(scored_ids)}</p>{issues_html(review.get('issues'))}"
                f"<h3>收盘证据</h3><p>{state_html(closing)}</p>{closing_rows(closing)}"
-               f"<p class='small'>{e((row.get('lineup') or {}).get('label') or '首发链路尚未验收')}</p>"
+               f"<p class='small'>{LINEUP_LABEL}</p>"
                f"{archive_rows(row)}")
     return f"<section id='match-{mid}'>" + details(f"{name} · 比赛 {mid} 的完整证据", content) + "</section>"
 
@@ -136,9 +154,12 @@ def match_evidence(data: SiteData, row: dict) -> str:
 def render(data: SiteData) -> str:
     report = data.lifecycle
     heading = "<h1>足球预测 <span class='accent'>逐场验收</span></h1>"
-    if not report or not isinstance(report.get("matches"), list):
-        body = heading + placeholder("验收报告暂不可用；未据此判断任何比赛完成。")
-        return page("逐场验收 - 足球预测", body, "", data.now, data.settings["site"]["refresh_minutes"])
+    problem = report_problem(report)
+    generated = page_time(report)
+    if problem:
+        body = (heading + placeholder(f"验收报告暂不可用；未据此判断任何比赛完成。原因：{problem}。")
+                + "<p class='small'><a href='lifecycle.json'>下载本次原始报告（JSON，待核验）</a></p>")
+        return page("逐场验收 - 足球预测", body, "", generated, data.settings["site"]["refresh_minutes"])
     scope, summary = report.get("scope") or {}, report.get("summary") or {}
     competitions = "、".join(data.comp(code) for code in scope.get("leagues", [])) or "未知"
     cutoff = (f"证据截止 {stamp(report['evaluation_cutoff_utc'])}" if report.get("evaluation_cutoff_utc")
@@ -156,13 +177,17 @@ def render(data: SiteData) -> str:
               ("overdue_slot_count", "到点超宽限未存档"), ("missed_slot_count", "已错过窗口"),
               ("invalid_slot_count", "存档无效"), ("source_missing_count", "来源缺失比赛")]
     count_text = " · ".join(f"{label} {number(summary.get(key))}" for key, label in counts)
+    denominator = (f"<p class='small'>比赛分母为本次范围内 {number(summary.get('match_count'))} 场；"
+                   f"范围内的未来比赛也保留在分母中。时点总数 {len(report['matches']) * len(KINDS)}，"
+                   f"已到期纳入跟踪 {number(summary.get('due_slot_count'))}。上方齐备指标按场计数，"
+                   "下方存档、迟到和等待指标按时点计数；同一时点可同时保留有效存档与无效历史证据。</p>")
     note = (f"<div class='note'>到点后 {number(scope.get('grace_minutes'))} 分钟的宽限只用于等待调度和判漏，"
             "实际迟到仍单独显示。未来时点保留等待状态；预览版、旧开球时间和其他模型版本不补正式时点。"
             "三时点存档齐备、评分齐备和收盘证据齐备分别统计；首发链路尚未验收。</div>")
     matches = report["matches"]
-    body = (heading + scope_html + stats + f"<p class='small'>{count_text}</p>" + note
+    body = (heading + scope_html + stats + denominator + f"<p class='small'>{count_text}</p>" + note
             + "<p class='small'><a href='lifecycle.json'>下载本次逐场证据快照（JSON）</a></p>"
             + issues_html(report.get("warnings"))
             + (overview(data, matches) + "".join(match_evidence(data, row) for row in matches) if matches
                else placeholder("本次范围内没有可验收比赛；尚无匹配证据。")))
-    return page("逐场验收 - 足球预测", body, "", data.now, data.settings["site"]["refresh_minutes"])
+    return page("逐场验收 - 足球预测", body, "", generated, data.settings["site"]["refresh_minutes"])

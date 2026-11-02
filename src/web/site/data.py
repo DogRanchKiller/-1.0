@@ -24,6 +24,7 @@ from src.features import FeatureStore
 from src.features.errors import FeatureAccessError
 from src.features.known_time import to_utc_text
 from src.review.reconcile import SCORE_COLUMNS, archive_metadata
+from src.web.site.lifecycle_contract import report_problem
 
 # 老 scores.csv 仍能读；后来新增的身份、证据列缺失时保持未知。
 LEGACY_SCORE_COLUMNS = ["prediction_id", "match_id", "competition", "season", "kickoff_utc", "kind", "source", "home_goals",
@@ -333,7 +334,11 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     # 4.1 只给人看的：中文队名、比赛状态（和预览页 add_display_info 一样直接读，不进模型）
     ids = list(data.matches)
     teams = {m[k] for m in data.matches.values() for k in ("home_team", "away_team")}
-    teams.update(m.get(k) for m in data.lifecycle.get("matches", []) for k in ("home_team", "away_team"))
+    lifecycle_problem = report_problem(data.lifecycle)
+    if lifecycle_problem is None:
+        teams.update(m[k] for m in data.lifecycle["matches"] for k in ("home_team", "away_team"))
+    else:
+        data.notes.append(f"逐场验收报告暂不可用：{lifecycle_problem}。未据此判断完成。")
     data.team_zh = {t: n for t, n in con.execute("select team_id, name_zh from teams") if n and t in teams}
     status = {}
     for k in range(0, len(ids), 500):
