@@ -6,7 +6,12 @@
 #     Unregister-ScheduledTask -TaskName 足球预测_懂球帝赔率 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_数据状态 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_定时预测 -Confirm:$false
+#     Unregister-ScheduledTask -TaskName 足球预测_赛后复盘 -Confirm:$false
+#     Unregister-ScheduledTask -TaskName 足球预测_生成网站 -Confirm:$false
 
+param([switch]$SkipNotify)
+
+$ErrorActionPreference = 'Stop'
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path   # 项目文件夹
 $python = Join-Path $root ".venv\Scripts\python.exe"
 $pythonw = Join-Path $root ".venv\Scripts\pythonw.exe"   # 不弹黑窗口，适合每小时跑的任务
@@ -18,13 +23,14 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit
 Register-ScheduledTask -TaskName "足球预测_每日备份" -Action $action -Trigger $trigger -Settings $settings `
     -Description "备份数据库和原始页面" -Force | Out-Null
 
-# 懂球帝赛前赔率快照：每小时一次（每小时第 17 分），离开球越近抓得越勤，规则在 settings.yaml 的 dongqiudi 里
+# 懂球帝数据更新：每小时一次（每小时第 17 分），采集成功后立即导入已有原始数据，预测、复盘能读到新数据。
+# 离开球越近抓得越勤，规则在 settings.yaml 的 dongqiudi 里；采集或导入失败会写失败心跳并停止。
 # 电脑关着或睡眠时不补跑，错过的那几次就没有了（需求文档 6.2）
-$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.collect.dongqiudi upcoming" -WorkingDirectory $root
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.refresh_data" -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(17)) -RepetitionInterval (New-TimeSpan -Hours 1)
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 50) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "足球预测_懂球帝赔率" -Action $action -Trigger $trigger -Settings $settings `
-    -Description "每小时抓一次懂球帝赛程和赛前赔率快照（只存原始层）" -Force | Out-Null
+    -Description "每小时采集懂球帝赛程、赔率和完赛数据，采集成功后导入数据库" -Force | Out-Null
 
 # 数据状态页：每小时一次（第 47 分，错开懂球帝任务的第 17 分），重新生成 data/reports/status.html 和当天日报，
 # 有新问题时弹窗提醒（需求文档 6.2、8 节）
@@ -42,13 +48,33 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minu
 Register-ScheduledTask -TaskName "足球预测_定时预测" -Action $action -Trigger $trigger -Settings $settings `
     -Description "每 15 分钟出到点的 T-24 / T-6 / T-1 预测，存进预测存档" -Force | Out-Null
 
+# 赛后复盘（K2）：每天北京时间 09:10、21:10 各一次，读取已导入的比分、收盘赔率重新对账。
+# 错过时开机后补跑；每天重新生成即可补上晚到的数据，不改模型或任何概率参数。
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.review" -WorkingDirectory $root
+$triggers = @(
+    (New-ScheduledTaskTrigger -Daily -At 09:10),
+    (New-ScheduledTaskTrigger -Daily -At 21:10)
+)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "足球预测_赛后复盘" -Action $action -Trigger $triggers -Settings $settings `
+    -Description "每天 09:10、21:10 重新对账完赛预测，生成单场复盘和周报月报" -Force | Out-Null
+
+# 网站（K3）：每 15 分钟一次（第 12、27、42、57 分），显示最新预测和复盘，只读数据库、不联网。
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.build_site" -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(12)) -RepetitionInterval (New-TimeSpan -Minutes 15)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "足球预测_生成网站" -Action $action -Trigger $trigger -Settings $settings `
+    -Description "每 15 分钟把最新预测、赛后复盘重新生成本地静态网站" -Force | Out-Null
+
 # 推送（K5）：每 15 分钟一次（第 7、22、37、52 分，在定时预测之后几分钟），把新出的 T-24 / T-6 / T-1 预测合并成一条、
 # 定时任务的故障和恢复写进 data/notify/outbox/，设置了 pushplus 口令就推到微信（需求文档第 9 节“推送：已定的做法”）。
 # 电脑关着或睡眠时不补跑，下一次运行会接着发。取消登记：Unregister-ScheduledTask -TaskName 足球预测_推送 -Confirm:$false
-$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.notify" -WorkingDirectory $root
-$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(7)) -RepetitionInterval (New-TimeSpan -Minutes 15)
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName "足球预测_推送" -Action $action -Trigger $trigger -Settings $settings `
-    -Description "每 15 分钟把新出的预测和定时任务故障写进发件箱，设置了口令就推到微信" -Force | Out-Null
+if (-not $SkipNotify) {
+    $action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.notify" -WorkingDirectory $root
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(7)) -RepetitionInterval (New-TimeSpan -Minutes 15)
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName "足球预测_推送" -Action $action -Trigger $trigger -Settings $settings `
+        -Description "每 15 分钟把新出的预测和定时任务故障写进发件箱，设置了口令就推到微信" -Force | Out-Null
+}
 
 Get-ScheduledTask -TaskName "足球预测_*" | Select-Object TaskName, State

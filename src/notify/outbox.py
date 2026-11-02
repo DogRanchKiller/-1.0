@@ -60,7 +60,8 @@ class Outbox:
         """三个文件夹里有没有这个指纹的消息（文件名以 _指纹.json 结尾）。"""
         return any(d.exists() and any(d.glob(f"*_{fp}.json")) for d in (self.folder, self.sent, self.failed))
 
-    def add(self, kind: str, title: str, content: str, key: str, now: datetime | None = None) -> dict | None:
+    def add(self, kind: str, title: str, content: str, key: str, now: datetime | None = None,
+            *, expires_at: datetime | None = None) -> dict | None:
         """写一条新消息。同样的（种类 + 关键字）已经有了就不写，返回 None；写了返回这条消息。"""
         if kind not in KINDS:
             raise ValueError(f"消息种类只能是 {KINDS}，收到 {kind!r}")
@@ -71,6 +72,9 @@ class Outbox:
         msg = {"id": f"{created.replace('-', '').replace(':', '').replace(' ', 'T')}Z_{kind}_{fp}",
                "种类": kind, "标题": title, "正文": content, "创建时间": created,
                "关键字": key, "指纹": fp, "尝试次数": 0, "上次错误": None}
+        if expires_at is not None:
+            # 预测按这条消息里最早的开球时间失效；重试发送时也必须检查，不能只看生成后 24 小时。
+            msg["过期时间"] = now_text(expires_at)
         self._write(self.folder / f"{msg['id']}.json", msg)
         return msg
 

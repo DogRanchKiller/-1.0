@@ -329,12 +329,15 @@ def code_version() -> str | None:
     root = Path(__file__).resolve().parents[2]
     try:
         head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True,
-                              timeout=10).stdout.strip()
+                              encoding="utf-8", errors="replace", timeout=10, check=True).stdout
         dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
-                               capture_output=True, text=True, timeout=10).stdout.strip()
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=10, check=True).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return (head + ("+改动" if dirty else "")) or None
+    if head is None or dirty is None or not head.strip():
+        return None
+    return head.strip() + ("+改动" if dirty.strip() else "")
 
 
 # ---------- 预测存档 ----------

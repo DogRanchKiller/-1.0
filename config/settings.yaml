@@ -687,18 +687,19 @@ notify:
   max_retries: 3                      # 一条消息发失败后最多再试几次（加上第一次一共 4 次），还不行挪到 failed/
   max_title_chars: 100                # pushplus 标题上限 100 字
   max_content_chars: 18000            # pushplus 正文上限 2 万字，留余地；超过就拆成几条
-  expire_hours: 24                    # 消息生成超过几小时还没发出去就不发了（挪到 failed/，写明“过期”）：开球后再收到预测没用
+  expire_hours: 24                    # 通用消息最长保留；预测还受消息内最早开球时间限制，重试也不发过期预测
   pushed_keep_days: 7                 # 推过的预测编号，开球几天后从状态文件里删掉（防止文件越来越大）
   kinds: [T-24, T-6, T-1]             # 推哪几种预测（接口 1 的 kind；preview 是双击预览页出的，不推）
   # 定时任务监控（数据状态页“定时任务”和故障推送共用）。任务名见接口 2
   jobs:
+    refresh_data: {name: 数据采集与导入, stale_hours: 2}   # 每小时采集成功后立即导入；失败时保留失败心跳
     scheduled_predict: {name: 定时预测, stale_hours: 2}     # 每 15 分钟跑一次；超过 2 小时没成功算故障
-    review: {name: 赛后对账、复盘, stale_hours: 30}        # 【待核实】K2 的运行频率还没定，先按每天一次留余地
-    site: {name: 网站重新生成, stale_hours: 30}             # 【待核实】K3 的运行频率还没定，先按每天一次留余地
+    review: {name: 赛后对账、复盘, stale_hours: 18}        # 每天 09:10、21:10；留 6 小时余地
+    site: {name: 网站重新生成, stale_hours: 2}             # 每 15 分钟重新生成一次
     notify: {name: 推送, stale_hours: 2}                    # 每 15 分钟跑一次
   running_stale_minutes: 60           # “结束”为空（正在跑）超过几分钟，算“卡住或中途被关掉”
   # 推送程序自己（notify）出故障时推不出去，只在数据状态页显示；故障推送只看下面这几个任务
-  push_jobs: [scheduled_predict, review, site]
+  push_jobs: [refresh_data, scheduled_predict, review, site]
 
 # 第 8 阶段：欧洲杯赛的跨联赛实力对比（需求文档第 4 节“第 8 阶段怎么做”“第 8 阶段事先定的比较”）。数字都是跑回测之前定的，不选、不调
 euro:

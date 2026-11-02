@@ -253,6 +253,44 @@ def test_expired_not_sent(env):
     assert post.calls == [] and out["过期"] == 1 and "过期" in messages(s, "failed")[0]["失败原因"]
 
 
+@pytest.mark.parametrize("delay", [timedelta(hours=1), timedelta(hours=2)])
+def test_prediction_retry_stops_at_kickoff(env, delay):
+    """T-1 推送断网后，到开球或开球后恢复，不再发赛前预测，即使生成还不到 24 小时。"""
+    s, con, tmp = env
+    add_pred(con, 1, "T-1", NOW + timedelta(hours=1))
+    cp.compose(s, NOW)
+    offline = FakePost(requests.ConnectionError("测试断网"))
+    assert sd.send_outbox(s, SECRETS, NOW, offline)["失败待重试"] == 1
+    online = FakePost()
+    out = sd.send_outbox(s, SECRETS, NOW + delay, online)
+    assert online.calls == []
+    assert out["过期"] == 1 and messages(s) == []
+    assert "开球" in messages(s, "failed")[0]["失败原因"]
+
+
+def test_split_prediction_messages_have_separate_deadlines(env):
+    """拆开的消息分别按自己的最早开球时间过期，晚场不会被另一条里的早场一起丢掉。"""
+    s, con, tmp = env
+    s["notify"]["max_content_chars"] = 200
+    add_pred(con, 1, "T-1", NOW + timedelta(hours=1))
+    add_pred(con, 2, "T-6", NOW + timedelta(hours=6))
+    assert cp.compose(s, NOW)["预测消息"] == 2
+    post = FakePost()
+    out = sd.send_outbox(s, SECRETS, NOW + timedelta(hours=2), post)
+    assert out["过期"] == 1 and out["已发"] == 1 and len(post.calls) == 1
+    assert "T-6" in post.calls[0]["content"]
+
+
+def test_legacy_prediction_without_deadline_is_not_sent(env):
+    """旧发件箱没有开球期限时无法证明仍是赛前消息，留失败原因，不盲发。"""
+    s, con, tmp = env
+    Outbox.from_settings(s).add("预测", "旧格式", "未知开球时间", key="旧格式", now=NOW)
+    post = FakePost()
+    out = sd.send_outbox(s, SECRETS, NOW, post)
+    assert post.calls == [] and out["过期"] == 1
+    assert "开球期限" in messages(s, "failed")[0]["失败原因"]
+
+
 def test_network_error_stops_and_masks(env):
     """网络出错：这次停下（不白白用掉后面消息的重试次数）；异常说明里的口令换成 ***。"""
     s, con, tmp = env
@@ -264,6 +302,70 @@ def test_network_error_stops_and_masks(env):
     assert TOKEN not in json.dumps(messages(s), ensure_ascii=False)
 
 
+@pytest.mark.parametrize("reply", [{"code": 500, "msg": "对方暂时出错"}, requests.ConnectionError("测试断网")])
+def test_job_send_failure_has_failed_heartbeat_and_can_retry(env, monkeypatch, reply):
+    """真实发送尝试失败必须让入口失败；摘要和队列保留，恢复后的下一次运行仍能成功发出。"""
+    s, con, tmp = env
+    add_pred(con, 1, "T-1", NOW + timedelta(hours=1))
+    monkeypatch.setattr(notify_job, "load_settings", lambda: s)
+    monkeypatch.setattr(notify_job, "load_secrets", lambda: SECRETS)
+    monkeypatch.setattr(notify_job, "job_run", partial(heartbeat.job_run, folder=tmp / "jobs"))
+    heartbeat_file(tmp, "notify", 上次成功="2026-11-01 09:00:00")
+    with pytest.raises(RuntimeError, match="发送失败"):
+        notify_job.main(NOW, FakePost(reply))
+    hb = heartbeat.read_state("notify", tmp / "jobs")
+    assert hb["成功"] is False and hb["上次成功"] == "2026-11-01 09:00:00"
+    assert hb["摘要"]["失败待重试"] == 1 and hb["摘要"]["已发"] == 0
+    assert len(messages(s)) == 1 and messages(s)[0]["尝试次数"] == 1
+    checks = sp.check_jobs(tmp / "jobs", s, NOW)
+    assert next(c for c in checks if c.key.startswith("job_notify_")).level == "error"
+    recovered = FakePost()
+    out = notify_job.main(NOW + timedelta(minutes=15), recovered)
+    assert out["已发"] == 1 and len(recovered.calls) == 1 and not messages(s)
+    assert heartbeat.read_state("notify", tmp / "jobs")["成功"] is True
+
+
+def test_job_final_send_failure_is_failed_not_a_successful_empty_queue(env, monkeypatch):
+    """最后一次重试也失败时，消息移到 failed，任务仍必须记失败，不能因待发队列清空变成功。"""
+    s, con, tmp = env
+    s["notify"]["max_retries"] = 0
+    add_pred(con, 1, "T-1", NOW + timedelta(hours=1))
+    monkeypatch.setattr(notify_job, "load_settings", lambda: s)
+    monkeypatch.setattr(notify_job, "load_secrets", lambda: SECRETS)
+    monkeypatch.setattr(notify_job, "job_run", partial(heartbeat.job_run, folder=tmp / "jobs"))
+    with pytest.raises(RuntimeError, match="发送失败"):
+        notify_job.main(NOW, FakePost({"code": 500, "msg": "暂时出错"}))
+    hb = heartbeat.read_state("notify", tmp / "jobs")
+    assert hb["成功"] is False and hb["摘要"]["最终失败"] == 1
+    assert not messages(s) and len(messages(s, "failed")) == 1
+
+
+@pytest.mark.parametrize("mode", ["quota", "expired"])
+def test_job_quota_or_normal_expiration_is_success(env, monkeypatch, mode):
+    """没有实际发送失败时，正常限流或清理过期预测都算成功，不误报系统坏了。"""
+    s, con, tmp = env
+    add_pred(con, 1, "T-1", NOW + timedelta(hours=1))
+    cp.compose(s, NOW)
+    run_at = NOW
+    if mode == "quota":
+        path = sd.resolve_path(s["notify"]["state_file"])
+        state = cp.load_state(path)
+        state["发送记录"] = [NOW.strftime("%Y-%m-%d %H:%M:%S")] * s["notify"]["max_per_minute"]
+        cp.save_state(path, state)
+    else:
+        run_at += timedelta(hours=1)
+    monkeypatch.setattr(notify_job, "load_settings", lambda: s)
+    monkeypatch.setattr(notify_job, "load_secrets", lambda: SECRETS)
+    monkeypatch.setattr(notify_job, "job_run", partial(heartbeat.job_run, folder=tmp / "jobs"))
+    post = FakePost()
+    out = notify_job.main(run_at, post)
+    assert not post.calls and heartbeat.read_state("notify", tmp / "jobs")["成功"] is True
+    if mode == "expired":
+        assert out["过期"] == 1
+    else:
+        assert len(messages(s)) == 1 and "下次运行" in out["停下原因"]
+
+
 def test_token_never_leaks(env, monkeypatch, capsys):
     """整个定时任务跑一遍（对方回的说明、网络异常里都带着口令）：屏幕、心跳文件、发件箱、状态文件里都没有口令。"""
     s, con, tmp = env
@@ -273,8 +375,10 @@ def test_token_never_leaks(env, monkeypatch, capsys):
     monkeypatch.setattr(notify_job, "load_secrets", lambda: SECRETS)
     monkeypatch.setattr(notify_job, "job_run", partial(heartbeat.job_run, folder=tmp / "jobs"))
     post = FakePost({"code": 999, "msg": f"口令 {TOKEN} 不对"}, requests.Timeout(f"timeout {TOKEN}"))
-    notify_job.main(NOW, post)
-    notify_job.main(NOW + timedelta(minutes=15), post)
+    for now in (NOW, NOW + timedelta(minutes=15)):
+        with pytest.raises(RuntimeError, match="发送失败") as exc:
+            notify_job.main(now, post)
+        assert TOKEN not in str(exc.value)
     assert len(post.calls) >= 2
     assert TOKEN not in capsys.readouterr().out
     for p in tmp.rglob("*"):
@@ -282,7 +386,7 @@ def test_token_never_leaks(env, monkeypatch, capsys):
         if p.is_file() and p.suffix != ".db" and p.name != "scheduled_predict.json":
             assert TOKEN not in p.read_text(encoding="utf-8", errors="ignore"), p
     hb = heartbeat.read_state("notify", tmp / "jobs")
-    assert hb["成功"] is True and hb["摘要"]["推送"] == "已设置微信推送"
+    assert hb["成功"] is False and hb["摘要"]["推送"] == "已设置微信推送"
 
 
 def test_job_without_token(env, monkeypatch, capsys):
@@ -340,7 +444,7 @@ def test_stuck_stale_and_never(env):
     out = cp.compose(s, NOW)                                                   # site 没有心跳文件
     assert out["新故障"] == 2
     body = messages(s)[0]["正文"]
-    assert "还没结束" in body and "超过 30 小时没成功过" in body and "网站" not in body
+    assert "还没结束" in body and "超过 18 小时没成功过" in body and "网站" not in body
 
 
 def test_no_betting_words(env):
@@ -385,7 +489,7 @@ def test_setup_new_file_and_bad_input(tmp_path, capsys):
 
 # ======================= 数据状态页“定时任务” =======================
 def test_status_page_jobs(env, monkeypatch):
-    """四个任务各一行：成功的正常、失败出错、太久没成功注意、没有心跳文件写“还没运行过”；新问题进弹窗。"""
+    """各任务一行：成功正常、失败出错、太久没成功注意、无心跳写“还没运行过”；新问题进弹窗。"""
     s, con, tmp = env
     heartbeat_file(tmp, "scheduled_predict", 摘要={"新存": 3, "新存的编号": [1, 2]})
     heartbeat_file(tmp, "notify", 成功=False, 错误=f"Traceback\nRuntimeError: token {TOKEN}")
@@ -403,13 +507,13 @@ def test_status_page_jobs(env, monkeypatch):
     c = {x.name: x for x in checks}
     old = ["懂球帝 每小时赔率任务", "每日备份", "数据库", "待确认的队名", "懂球帝没对上的比赛"]
     assert all(n in c for n in old)                                          # 原有的检查都还在
-    assert [x.name for x in checks][-4:] == ["定时任务：定时预测", "定时任务：赛后对账、复盘",
+    assert [x.name for x in checks][-5:] == ["定时任务：数据采集与导入", "定时任务：定时预测", "定时任务：赛后对账、复盘",
                                               "定时任务：网站重新生成", "定时任务：推送"]
     assert c["定时任务：定时预测"].level == "ok" and "新存 3" in c["定时任务：定时预测"].text
     assert "新存的编号" not in c["定时任务：定时预测"].text
     assert c["定时任务：推送"].level == "error" and "RuntimeError" in c["定时任务：推送"].text
     assert TOKEN not in c["定时任务：推送"].text and "***" in c["定时任务：推送"].text
-    assert c["定时任务：赛后对账、复盘"].level == "warn" and "超过 30 小时没成功过" in c["定时任务：赛后对账、复盘"].text
+    assert c["定时任务：赛后对账、复盘"].level == "warn" and "超过 18 小时没成功过" in c["定时任务：赛后对账、复盘"].text
     assert c["定时任务：网站重新生成"].level == "ok" and "还没运行过" in c["定时任务：网站重新生成"].text
     fresh = sp.new_alerts(checks, tmp / "alerts.json")
     assert {x.name for x in fresh} >= {"定时任务：推送", "定时任务：赛后对账、复盘"}
@@ -419,7 +523,7 @@ def test_status_page_jobs(env, monkeypatch):
 
 
 def test_status_page_no_heartbeat_folder(env):
-    """心跳文件夹整个不在（一个定时任务都没跑过）：四行都是“还没运行过”，不算问题。"""
+    """心跳文件夹整个不在：设置里每个任务都显示“还没运行过”，不算问题。"""
     s, con, tmp = env
     checks = sp.check_jobs(tmp / "no_such_dir", s, NOW)
-    assert len(checks) == 4 and all(x.level == "ok" and "还没运行过" in x.text for x in checks)
+    assert len(checks) == len(s["notify"]["jobs"]) and all(x.level == "ok" and "还没运行过" in x.text for x in checks)

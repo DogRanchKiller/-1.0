@@ -143,6 +143,17 @@ def send_outbox(settings: dict, secrets: dict | None, now: datetime | None = Non
                 box.mark_failed(path, msg, f"过期：生成超过 {cfg['expire_hours']} 小时还没发出去", now_text(now))
                 summary["过期"] += 1
                 continue
+            if msg.get("种类") == "预测":
+                try:
+                    deadline = parse_time(msg["过期时间"])
+                except (KeyError, TypeError, ValueError):
+                    box.mark_failed(path, msg, "过期：缺少有效开球期限，无法确认还是赛前预测", now_text(now))
+                    summary["过期"] += 1
+                    continue
+                if now >= deadline:
+                    box.mark_failed(path, msg, "过期：这条消息包含的比赛已到开球时间", now_text(now))
+                    summary["过期"] += 1
+                    continue
             stop = quota(state, now, cfg)
             if stop:
                 break

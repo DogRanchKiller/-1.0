@@ -170,17 +170,17 @@ def match_block(r: dict, leagues: dict) -> str:
     return "  \n".join(lines)
 
 
-def prediction_messages(rows: list[dict], settings: dict) -> list[tuple[str, str]]:
-    """把这次找到的预测合并成消息：[(标题, 正文)]。正文超过 max_content_chars 时拆成几条。"""
+def prediction_messages(rows: list[dict], settings: dict) -> list[tuple[str, str, datetime]]:
+    """合并成 [(标题, 正文, 最早开球时间)]；每条消息分别到期，重试也不能在开球后发送。"""
     if not rows:
         return []
     cfg = settings["notify"]
     leagues = {k: v for group in settings["leagues"].values() for k, v in group.items()}
-    blocks = [match_block(r, leagues) for r in rows]
+    blocks = [(match_block(r, leagues), r["kickoff"]) for r in rows]
     limit = int(cfg["max_content_chars"]) - len(FOOTER) - 10
     chunks, cur = [], []
     for b in blocks:
-        if cur and len("\n\n".join(cur + [b])) > limit:
+        if cur and len("\n\n".join(text for text, _ in cur + [b])) > limit:
             chunks.append(cur)
             cur = []
         cur.append(b)
@@ -192,7 +192,9 @@ def prediction_messages(rows: list[dict], settings: dict) -> list[tuple[str, str
     out = []
     for i, c in enumerate(chunks):
         title = base + (f"（{i + 1}/{len(chunks)}）" if len(chunks) > 1 else "")
-        out.append((title[:int(cfg["max_title_chars"])], "\n\n".join(c) + "\n\n" + FOOTER))
+        out.append((title[:int(cfg["max_title_chars"])],
+                    "\n\n".join(text for text, _ in c) + "\n\n" + FOOTER,
+                    min(kickoff for _, kickoff in c)))
     return out
 
 
@@ -210,9 +212,9 @@ def compose_predictions(con, outbox: Outbox, state: dict, settings: dict, now: d
     n = 0
     msgs = prediction_messages(rows, settings)
     ids = sorted(r["prediction_id"] for r in rows)
-    for i, (title, content) in enumerate(msgs):
+    for i, (title, content, expires_at) in enumerate(msgs):
         # 关键字 = 这条里的预测编号；同样的编号不会再生成第二条
-        if outbox.add("预测", title, content, key=f"预测 {ids} 第 {i + 1} 条", now=now):
+        if outbox.add("预测", title, content, key=f"预测 {ids} 第 {i + 1} 条", now=now, expires_at=expires_at):
             n += 1
     for r in rows:
         pushed[str(r["prediction_id"])] = r["kickoff_utc"]
