@@ -27,6 +27,14 @@ time:
   storage_timezone: UTC          # 内部统一用标准时间
   display_timezone: Asia/Shanghai # 网页显示北京时间
 
+# 逐场模型解释。仅控制附件和展示，不属于模型参数、不改变预测版本或概率。
+explanation:
+  enabled: true
+  integration_points: 64          # 路径积分还以两倍点数核验，不能把残差分给某个因素
+  derivative_step: 0.00001        # 同时以半步长核验数值导数
+  atol: 0.000001                  # 解释内部重构及逐项收敛的绝对误差上限
+  top_factors: 3
+
 # 赛季用途（需求文档第 5、17 节）。赛季写成开始年份：2023 表示 2023/24
 seasons:
   dev_last: 2023             # 开发赛季：2023/24 及以前

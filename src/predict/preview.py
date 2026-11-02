@@ -246,6 +246,36 @@ def build_preview(fs: FeatureStore, settings: dict, now: datetime, model=None) -
     return compute_predictions(fs, settings, now, model)[0]
 
 
+def explanation_attachment(payload, result: dict, row: dict) -> dict:
+    """给当次解释附上预测身份；非法附件只降级解释，不影响原预测或存档。
+
+    计算层保证数学一致性，页面还会独立核对贡献和概率。这里先保证附件是严格JSON，
+    并防止带了其他比赛/版本身份的对象被重新贴标签。旧记录不在此处回填。
+    """
+    identity = {**{key: row[key] for key in
+                  ("match_id", "competition", "season", "home_team", "away_team")},
+                **{key: result[key] for key in ("model", "model_version", "cutoff_utc")}}
+    invalid = {"schema": "gbdt-tree-shap-v1", "status": "unavailable",
+               "reason": "validation_failed", "identity": identity}
+    try:
+        value = json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+    except (TypeError, ValueError, OverflowError):
+        return invalid
+    if (not isinstance(value, dict) or value.get("schema") != "gbdt-tree-shap-v1"
+            or value.get("status") not in ("available", "unavailable")
+            or ("identity" in value and value["identity"] != identity)):
+        return invalid
+    if value["status"] == "unavailable":
+        if value.get("reason") not in {"disabled", "unsupported_model", "unsupported_target",
+                                      "no_prediction", "explanation_failed", "validation_failed"}:
+            return invalid
+    elif not {"method", "conversion", "model_fingerprint", "library_version", "context", "base",
+              "prediction", "raw_base", "raw_prediction", "feature_names", "terms", "checks"} <= value.keys():
+        return invalid
+    value["identity"] = identity
+    return value
+
+
 def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=None) -> tuple[dict, dict]:
     """预览页和定时预测共用的计算（2026-11-01 从 build_preview 抽出来，内容没改）。
 
@@ -266,14 +296,27 @@ def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=N
     hist, targets = model_inputs(fs, settings, model, cutoff, end, list(leagues))
     # 拟合模型，给每场出概率
     model.fit(hist, cutoff)
-    probs = model.predict(targets, cutoff) if len(targets) else []
+    options = settings.get("explanation", {})
+    explain = getattr(model, "predict_with_explanations", None)
+    unavailable_reason = "disabled" if not options.get("enabled", True) else "unsupported_model"
+    explanations = []
+    if len(targets) and options.get("enabled", True) and callable(explain):
+        # 模型在同一份X上计算预测与解释；不能再次提取会更新Elo状态的特征。
+        # 接口内部隔离解释失败，不能在失败后再跑一次predict改变状态。
+        probs, explanations = explain(targets, cutoff, options=options)
+        unavailable_reason = "explanation_failed"
+    else:
+        probs = model.predict(targets, cutoff) if len(targets) else []
+    if not isinstance(explanations, (list, tuple)):
+        explanations = []
+    identity_context = {"model": name, "model_version": model_version(name, mcfg), "cutoff_utc": cutoff}
 
     gap_th = settings["confidence_study"]["gap"]           # “差距大”和信心等级的“分歧大”同一个数
     before = to_utc_text(now - timedelta(hours=cfg["odds_move"]["hours"]))
     season = season_flags(hist, targets, settings)
     rows = []
     preds = {}
-    for t, p in zip(targets.to_dict("records"), probs):
+    for index, (t, p) in enumerate(zip(targets.to_dict("records"), probs)):
         mid = int(t["match_id"])
         preds[mid] = p
         mp = to_1x2(p)
@@ -283,7 +326,7 @@ def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=N
         odds_now = fs.latest_odds(mid, cutoff, "融合")
         fo = fusion_odds(odds_now, settings)
         move = move_pair(odds_now, fs.latest_odds(mid, before, "融合"), settings)
-        rows.append({
+        row = {
             "match_id": int(t["match_id"]), "competition": t["competition"], "league": leagues[t["competition"]],
             "season": int(t["season"]), "home_team": t["home_team"], "away_team": t["away_team"],
             "kickoff_utc": text_or_none(t["kickoff_utc"]), "match_date": t["match_date"],
@@ -291,7 +334,13 @@ def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=N
             "model_p": mp, "model_lines": model_lines(p, market),
             # “差距”和信心等级的“分歧大”一样，和融合用的胜平负比
             "market": market, "gap": gap(mp, fo["p_1x2"], gap_th),
-            "fusion_odds": fo, "conclusion": conclude(p, mp, fo, move, season.get(mid, {}), settings)})
+            "fusion_odds": fo, "conclusion": conclude(p, mp, fo, move, season.get(mid, {}), settings)}
+        attachment = explanations[index] if index < len(explanations) else {
+            "schema": "gbdt-tree-shap-v1", "status": "unavailable", "reason": unavailable_reason}
+        if p is None:
+            attachment = {"schema": "gbdt-tree-shap-v1", "status": "unavailable", "reason": "no_prediction"}
+        row["explanation"] = explanation_attachment(attachment, identity_context, row)
+        rows.append(row)
     result = {"cutoff_utc": cutoff, "end_utc": end, "rows": rows, "model": name, "model_cfg": mcfg,
               "model_version": model_version(name, mcfg), "hist_n": int(len(hist)),
               "hist_last_date": hist["match_date"].max() if len(hist) else None,
@@ -396,7 +445,7 @@ def prediction_detail(result: dict, r: dict, code: str | None) -> dict:
     m = r["market"]
     lines = r.get("model_lines") or {}
     fo = r.get("fusion_odds") or {}
-    return {"模型设置": result["model_cfg"], "代码版本": code, "拟合用的比赛场数": result["hist_n"],
+    detail = {"模型设置": result["model_cfg"], "代码版本": code, "拟合用的比赛场数": result["hist_n"],
             "比分截至": result["hist_last_date"], "赔率概率": m["p_1x2"], "赔率公司数": m["n_books_1x2"],
             "赔率最后变动": m["last_change_utc"],
             # 模型在赔率主盘口上的胜算（只记下来，不参与判断“和上次一样”）
@@ -409,6 +458,9 @@ def prediction_detail(result: dict, r: dict, code: str | None) -> dict:
                      "大2.5球": c.get("over25"), "双方进球": c.get("btts"), "市场矩阵还原误差": c.get("fit_error"),
                      "倾向": c.get("leans"), "信心等级": c.get("level"), "降级候选因素": c.get("flags"),
                      "不确定因素": c.get("uncertain"), "赔率变动": c.get("odds_move")}}
+    if "explanation" in r:
+        detail["模型解释"] = explanation_attachment(r["explanation"], result, r)
+    return detail
 
 
 def insert_prediction(con, result: dict, r: dict, kind: str, created: str, p: list, detail: dict) -> None:
