@@ -1,8 +1,8 @@
-"""复盘自动标签（第 1 阶段，需求文档第 12、15 节）：德比战、争冠战、保级战。
+"""复盘自动标签（需求文档第 12、15 节“标签和备注”）：德比战、争冠战、保级战、欧战后的联赛。
 
-“欧战后的联赛”标签要等杯赛、欧战赛程进了数据库再做（待定问题 5），这里还没有。
+“欧战后的联赛”是 2026-11-01（工作树 Q1）加的，杯赛、欧战赛程进库以后才能做（待定问题 5 已定）。定义见下面第 3 条。
 
-三个标签的定义（参数在 settings.yaml 的 labels 段）：
+四个标签的定义（德比、争冠、保级的参数在 settings.yaml 的 labels 段，欧战后的参数在 rest_days 段）：
 
 1. 德比战：两队是 config/derbies.yaml 名单里的一对（固定名单，同城德比、同地区德比、传统宿敌）。
    名单只看对阵，不看比赛重不重要；同一对球队踢的所有联赛比赛都算。
@@ -22,12 +22,23 @@
    简化的地方：只看分差和剩余场次，不看两队之间还剩没剩直接交手，所以“数学上已经没机会”可能晚一两轮才认出来。
    次级联赛也算“争冠”（争第 1 名）；争升级名额（第 2、3 名、附加赛）先不做。
 
+3. 欧战后的联赛：主队、客队分开标（home_after_euro、away_after_euro，True / False）。
+   一个队“欧战后”= 这场开球前，它的上一场正式比赛（联赛、杯赛、欧战都算）是欧战（rest_days.euro_competitions），
+   而且两场日期相差不超过 rest_days.euro_within_days 天（现在 4 天，例如周四欧联 → 周日联赛是 3 天）。
+   判断不在这里另写，直接用梯度提升树特征的同一段程序 src/features/rest_days.py 的 RestDays（设置也是同一份），
+   这样标签和模型里的“欧战后”那一列口径一样：以后按这个标签分组看模型准不准，看到的就是模型那一列对应的比赛。
+   赛程经过取数层 FeatureStore.schedule 取，用途「休息天数和欧战后标签」（数据用途字典里杯赛欧战赛程只能这么用和显示）；
+   只用日期和是哪个赛事，不用杯赛、欧战的对手和比分。
+
 不偷看未来：
    积分榜的截止时间 = 本场“最晚可能的开球时间” − labels.cutoff_hours_before_kickoff 小时。
    有开球时间的比赛，就是开球那一刻；只有日期的比赛（2019/20 以前），是当天 24:00 英国时间，
    但同一天其他比赛的比分要到当天 24:00 + 3 小时才算知道（取数层的规则），所以同一天的比赛互相看不到，
    前一天以前的比分都能看到——和“赛前看积分榜”的意思一样。
    比分全部经过取数层 FeatureStore 取，用途“复盘”；一个联赛赛季只取一次，再在内存里按时间切。
+   欧战后标签用同一个截止时间：赛程里只有“最晚可能的开球时间”不晚于截止时间的比赛才算进来
+   （只知道轮次开始日的杯赛，最晚开球按这一轮第 7 天算，所以可能还不算）。赛程也是一个联赛赛季只取一次，
+   再按截止时间从早到晚，一批一批交给 RestDays——每场比赛只看得到它自己截止时间之前已经开球的比赛。
 
 运行（在项目文件夹里，约几分钟）：
     .venv\\Scripts\\python -m src.review.labels          全部联赛全部赛季，结果写到 data/labels/
@@ -43,6 +54,7 @@ import yaml
 from src.common.config import load_settings, resolve_path, season_role
 from src.features import FeatureStore, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
+from src.features.rest_days import RestDays
 from src.features.standings import LeagueRules, SeasonTable, load_deductions, load_rules, season_schedule, season_table
 from src.features.usage import season_label
 
@@ -125,6 +137,38 @@ def race_status(table: pd.DataFrame, rules: LeagueRules, last_rounds: int, gap_p
     return pd.DataFrame({"team": t["team"], "title_race": title, "relegation_race": releg})
 
 
+# ================= 欧战后的联赛 =================
+EURO_USAGE = "休息天数和欧战后标签"   # 数据用途字典里，杯赛欧战赛程对“以前的比赛”只允许这个用途和“显示”
+
+
+def after_euro_flags(fs: FeatureStore, sched: pd.DataFrame, settings: dict) -> dict[int, tuple[bool, bool]]:
+    """每场联赛比赛：(主队欧战后, 客队欧战后)。定义见文件开头第 3 条。
+
+    sched：season_schedule 的结果，已经加上 cutoff_utc（每场的截止时间）。
+    做法：这个联赛赛季的赛程（联赛 + 杯赛、欧战）经过取数层只取一次，截止时间取这季最大的那个；
+    再按截止时间从早到晚一批一批交给 RestDays：处理某个截止时间的比赛时，
+    交给 RestDays 的只有“最晚可能的开球时间”不晚于这个截止时间的比赛，所以每场只看得到自己截止时间之前的赛程。
+    取赛程的起点 = 这季最早开球往前 cap_days 天：再早的比赛隔得比 cap_days 还久，
+    在 RestDays 里和“找不到上一场”结果一样（都不算欧战后），不影响结果，也省得把几十年的赛程全取出来。
+    """
+    rest = RestDays.from_settings(settings)
+    since = pd.to_datetime(sched["kickoff_earliest_utc"]).min() - pd.Timedelta(days=rest.cap)
+    games = fs.schedule(sched["cutoff_utc"].max(), EURO_USAGE, since=since)
+    games = games.assign(_known=pd.to_datetime(games["known_at_utc"])).sort_values("_known", kind="stable")
+    games = games.reset_index(drop=True)
+    known = games["_known"].to_numpy()
+    out: dict[int, tuple[bool, bool]] = {}
+    done = 0
+    for cutoff, part in sched.groupby("cutoff_utc", sort=True):
+        n = int(known.searchsorted(pd.Timestamp(cutoff).to_datetime64(), side="right"))
+        rest.add(games.iloc[done:n])
+        done = n
+        for m in part.itertuples(index=False):
+            out[int(m.match_id)] = (bool(rest.team(m.home_team, m.match_date)[1]),
+                                    bool(rest.team(m.away_team, m.match_date)[1]))
+    return out
+
+
 # ================= 一个联赛赛季 =================
 def label_season(fs: FeatureStore, competition: str, season: int, derbies: dict, settings: dict,
                  deductions: pd.DataFrame) -> pd.DataFrame:
@@ -142,6 +186,7 @@ def label_season(fs: FeatureStore, competition: str, season: int, derbies: dict,
     st = season_table(fs, competition, season, sched["cutoff_utc"].max(), USAGE, settings, schedule=sched,
                       deductions=deductions)
     rules = st.rules
+    euro = after_euro_flags(fs, sched, settings)
     rows = []
     race_cache: dict[str, pd.DataFrame] = {}
     for m in sched.itertuples(index=False):
@@ -166,6 +211,7 @@ def label_season(fs: FeatureStore, competition: str, season: int, derbies: dict,
             "home_remaining": int(h["remaining"]), "away_remaining": int(a["remaining"]),
             "teams_in_league": len(tb), "relegation_spots": rules.danger_spots,
             "tie_unresolved": bool(h["tie_unresolved"] or a["tie_unresolved"]),
+            "home_after_euro": euro[int(m.match_id)][0], "away_after_euro": euro[int(m.match_id)][1],
         })
     return pd.DataFrame(rows)
 
@@ -254,7 +300,7 @@ def load_labels(mode: str, usage: str = USAGE, settings: dict | None = None, com
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="复盘自动标签：德比、争冠、保级")
+    p = argparse.ArgumentParser(description="复盘自动标签：德比、争冠、保级、欧战后的联赛")
     p.add_argument("--comps", default=None, help="联赛代码，逗号分隔；不写 = 全部")
     p.add_argument("--seasons", default=None, help="赛季范围，例如 2022-2023；不写 = 全部")
     a = p.parse_args()
