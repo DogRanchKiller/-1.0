@@ -305,6 +305,10 @@ def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=N
         # 接口内部隔离解释失败，不能在失败后再跑一次predict改变状态。
         probs, explanations = explain(targets, cutoff, options=options)
         unavailable_reason = "explanation_failed"
+        if not isinstance(explanations, (list, tuple)) or len(explanations) != len(targets):
+            # 少一项或多一项时不知道从哪里错位，整批附件隔离，绝不能给别场贡献贴本场身份。
+            explanations = []
+            unavailable_reason = "validation_failed"
     else:
         probs = model.predict(targets, cutoff) if len(targets) else []
     if not isinstance(explanations, (list, tuple)):

@@ -104,3 +104,23 @@ def test_invalid_attachment_cannot_break_archive_or_emit_nonfinite_json(env, bad
     detail = prediction_detail(result, result["rows"][0], "test")
     assert detail["模型解释"]["status"] == "unavailable"
     json.dumps(detail["模型解释"], allow_nan=False)
+
+
+@pytest.mark.parametrize("delta", [-1, 1])
+def test_explanation_length_mismatch_never_relabels_another_match(env, delta):
+    con, settings = env
+
+    class WrongLengthModel(ExplainModel):
+        def predict_with_explanations(self, targets, cutoff, *, options=None):
+            probs, attachments = super().predict_with_explanations(targets, cutoff, options=options)
+            # 同概率比赛仍须防止错绑；少/多首项时不能按位置强贴本场身份。
+            for item in attachments:
+                item["reason"] = "unsupported_target"
+            return probs, attachments[1:] if delta < 0 else [attachments[0], *attachments]
+
+    model = WrongLengthModel()
+    result = build_preview(FeatureStore(con, "实时", settings), settings, NOW, model)
+    assert len(result["rows"]) == 3
+    assert model.fit_calls == model.explain_calls == 1 and model.predict_calls == 0
+    assert all(row["model_p"] == [0.5, 0.3, 0.2] for row in result["rows"])
+    assert all(row["explanation"]["reason"] == "validation_failed" for row in result["rows"])
