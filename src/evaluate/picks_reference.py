@@ -28,7 +28,8 @@ from src.common.config import load_settings, resolve_path
 from src.common.markets import asian_handicap, dc_matrices, fit_market_dc
 from src.evaluate import fusion_study as fu
 from src.evaluate.compare import load_predictions
-from src.web.site.picks import MARKET_NAMES, MARKETS, OU_LINE, RULE, best_scores, reference_path, settle, tally
+from src.web.site.picks import (MARKET_NAMES, MARKETS, OU_LINE, RULE, SCORE_TOP, best_scores, reference_path, settle,
+                                 tally)
 
 
 def fused_matrices(t: pd.DataFrame, ids: np.ndarray, mats: np.ndarray, w: float) -> np.ndarray:
@@ -98,7 +99,7 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
         "score_side_differs": differs,
         "top_score_picks": [[s.replace("-", "–"), int(n)] for s, n in
                             Counter(per["score_pick"].str.split("/").explode()).most_common(5)],   # 4 个里出现最多的比分
-        "score_top": len(per["score_pick"].iloc[0].split("/")),
+        "score_top": SCORE_TOP,
         "score_p_mean": float(per["score_p"].mean()),       # 4 个比分合起来的可能性，平均多少
         "ah_no_pick": int(per["ah_pick"].isna().sum()),
         "data_check": {k: check[k] for k in ("有预测的比赛", "没有模型矩阵", "融合", "亚盘线不是主盘口、不用的场数", "没有亚盘线的场数")},
