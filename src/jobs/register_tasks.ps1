@@ -42,4 +42,13 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minu
 Register-ScheduledTask -TaskName "足球预测_定时预测" -Action $action -Trigger $trigger -Settings $settings `
     -Description "每 15 分钟出到点的 T-24 / T-6 / T-1 预测，存进预测存档" -Force | Out-Null
 
+# 推送（K5）：每 15 分钟一次（第 7、22、37、52 分，在定时预测之后几分钟），把新出的 T-24 / T-6 / T-1 预测合并成一条、
+# 定时任务的故障和恢复写进 data/notify/outbox/，设置了 pushplus 口令就推到微信（需求文档第 9 节“推送：已定的做法”）。
+# 电脑关着或睡眠时不补跑，下一次运行会接着发。取消登记：Unregister-ScheduledTask -TaskName 足球预测_推送 -Confirm:$false
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.notify" -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(7)) -RepetitionInterval (New-TimeSpan -Minutes 15)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "足球预测_推送" -Action $action -Trigger $trigger -Settings $settings `
+    -Description "每 15 分钟把新出的预测和定时任务故障写进发件箱，设置了口令就推到微信" -Force | Out-Null
+
 Get-ScheduledTask -TaskName "足球预测_*" | Select-Object TaskName, State

@@ -651,3 +651,33 @@ bots:
     - {name: 融合价值8_最高, rule: value, prob: fusion, book: 最高, edge: 0.08, stake: flat}
     - {name: 模型凯利_最高, rule: value, prob: model, book: 最高, edge: 0.03, stake: kelly}
     - {name: 融合价值凯利_最高, rule: value, prob: fusion, book: 最高, edge: 0.03, stake: kelly}
+
+# 推送出口和定时任务监控（K5：src/notify/、src/jobs/notify.py，需求文档第 9 节“推送：已定的做法”）
+# 推送渠道 2026-11-01 定为 pushplus（推送加）微信公众号渠道。口令（token）放 config/secrets.yaml 的 pushplus.token，不进 Git
+notify:
+  outbox_dir: data/notify/outbox      # 要推的消息，一条一个文件（接口 5）。发完挪到同级的 sent/，最终失败挪到 failed/
+  state_file: data/notify/state.json  # 记“哪些预测推过了、哪些故障正在提醒、最近发了几条”（data/ 不进 Git）
+  api_url: https://www.pushplus.plus/send   # pushplus 的发送接口
+  channel: wechat                     # 发到微信公众号
+  template: markdown                  # 正文按 Markdown 排版
+  request_timeout_seconds: 20         # 一次发送最多等几秒，超过算“网络不通”
+  # 频率：pushplus 写的是“1 分钟 5 次、实名用户微信渠道每天 200 次、超额会被限制账号”。都取保守值：
+  # 每分钟 4 条（留 1 条余地，电脑时间和对方计时不完全一样）；每天 150 条（给手动发测试、对方计数口径不同留 50 条余地）。
+  # 每次运行合并成一条，正常一天几条到几十条，碰不到上限。到了上限的消息留在 outbox，下次运行（或第二天）再发
+  max_per_minute: 4
+  max_per_day: 150                    # “每天”按北京时间 0 点算
+  max_retries: 3                      # 一条消息发失败后最多再试几次（加上第一次一共 4 次），还不行挪到 failed/
+  max_title_chars: 100                # pushplus 标题上限 100 字
+  max_content_chars: 18000            # pushplus 正文上限 2 万字，留余地；超过就拆成几条
+  expire_hours: 24                    # 消息生成超过几小时还没发出去就不发了（挪到 failed/，写明“过期”）：开球后再收到预测没用
+  pushed_keep_days: 7                 # 推过的预测编号，开球几天后从状态文件里删掉（防止文件越来越大）
+  kinds: [T-24, T-6, T-1]             # 推哪几种预测（接口 1 的 kind；preview 是双击预览页出的，不推）
+  # 定时任务监控（数据状态页“定时任务”和故障推送共用）。任务名见接口 2
+  jobs:
+    scheduled_predict: {name: 定时预测, stale_hours: 2}     # 每 15 分钟跑一次；超过 2 小时没成功算故障
+    review: {name: 赛后对账、复盘, stale_hours: 30}        # 【待核实】K2 的运行频率还没定，先按每天一次留余地
+    site: {name: 网站重新生成, stale_hours: 30}             # 【待核实】K3 的运行频率还没定，先按每天一次留余地
+    notify: {name: 推送, stale_hours: 2}                    # 每 15 分钟跑一次
+  running_stale_minutes: 60           # “结束”为空（正在跑）超过几分钟，算“卡住或中途被关掉”
+  # 推送程序自己（notify）出故障时推不出去，只在数据状态页显示；故障推送只看下面这几个任务
+  push_jobs: [scheduled_predict, review, site]

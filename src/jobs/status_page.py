@@ -27,9 +27,12 @@ from pathlib import Path
 import yaml
 
 from src.clean.dongqiudi_reader import BEIJING
-from src.common.config import load_settings, resolve_path
+from src.common.config import load_secrets, load_settings, resolve_path
 from src.common.db import connect
 from src.jobs.dongqiudi_progress import run_state, season_rows
+from src.jobs.heartbeat import read_state
+from src.notify.send import get_token
+from src.notify.watch import job_status
 from src.web.theme import BASE_CSS, VIEWPORT
 
 LEVEL_NAMES = {"ok": "正常", "warn": "注意", "error": "出错"}
@@ -171,6 +174,27 @@ def check_football_data(con, now: datetime) -> Check:
                        " and status in ('saved', 'unchanged')")
     text = f"上次下载 {bj(t)}（{ago(t, now)}）" if t else "还没下载过"
     return Check("football_data", "football-data 联赛文件", "ok", text + "。这个不定时自动下载，需要新数据时让 Claude 运行")
+
+
+def check_jobs(jobs_dir: Path, settings: dict, now: datetime, secret: str | None = None) -> list[Check]:
+    """定时任务（K5 加，需求文档第 9 节接口 2）：每个任务一行，读 data/jobs/<任务名>.json 心跳文件。
+
+    显示最近一次运行、成功没有、错误、上次成功。失败算“出错”；卡住、太久没成功算“注意”；都会进弹窗提醒。
+    没有心跳文件 = 还没运行过（还没登记定时任务），只写“还没运行过”，不算问题。
+    判断规则在 src/notify/watch.py（故障推送用同一套），界限在 settings.yaml 的 notify.jobs。
+    """
+    out = []
+    for job in settings["notify"]["jobs"]:
+        st = job_status(job, read_state(job, jobs_dir), now, settings, secret)
+        name = f"定时任务：{st.name}"
+        if not st.faults:
+            out.append(Check(f"job_{job}", name, "ok", st.text))
+            continue
+        types = sorted(f.type for f in st.faults)
+        level = "error" if "failed" in types else "warn"
+        text = "；".join(f.text for f in st.faults) + "。" + st.text
+        out.append(Check(f"job_{job}_" + "_".join(types), name, level, text))
+    return out
 
 
 # ---------- 懂球帝导入留下的问题（待确认队名、没对上的比赛） ----------
@@ -492,6 +516,9 @@ def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, 
     checks = [check_dongqiudi_hourly(con, now, cfg), check_blocked(con, now), check_failures(con, now, cfg),
               backfill, check_backup(resolve_path(settings["paths"]["backup"]), now, cfg),
               check_database(con), check_football_data(con, now), names, unmatched]
+    # 定时任务（K5 加在最后，原有检查不变）
+    checks += check_jobs(resolve_path(settings["jobs"]["state_dir"]), settings, now,
+                         get_token(load_secrets()))
     today = count_table(con, today_start(now))
     day = count_table(con, now - timedelta(hours=24))
     return checks, today, day, recent_problems(con, now), rows, [names_list, unmatched_list]
