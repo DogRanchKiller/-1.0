@@ -1,17 +1,19 @@
-"""四个玩法的预测和命中率（规则 picks_v1，需求文档第 3 节“四个玩法的预测和命中率”）。
+"""四个玩法的预测和命中率（规则 picks_v2，需求文档第 3 节“四个玩法的预测和命中率”）。
 
 每场比赛用开球前最新的那一版存档（和单场页、战绩页同一版），四个玩法各给一个预测：
   胜平负：最后的胜平负概率里最大的那项（一样大时按 主胜 > 平 > 客胜）；
   让球（亚盘）：存档里写的亚盘倾向那一边（主盘口上胜算较大的一边）；接融合以前的旧存档没有倾向，就用“模型亚盘主队胜算”；
     新存档没写亚盘倾向（没有主盘口，或两边赔率不在 1.5–2.7）就不预测；
   大小球：固定看 2.5 球，大 2.5 球的概率 ≥ 50% 预测“大”，否则“小”（旧存档只在大小球主盘口正好是 2.5 时用模型的胜算）；
-  比分：存下来的比分矩阵里最大的那一格（先用融合后的，没有用模型自己的）。
-这些都是从“只加不改”的预测存档算出来的，不另外存表；规则改了就另起 picks_v2，旧的照留。
+  比分：存下来的比分矩阵里最大的 4 格（先用融合后的，没有用模型自己的），实际比分是其中任意一个就算中。
+这些都是从“只加不改”的预测存档算出来的，不另外存表；规则改了就另起一版，旧的照留。
+picks_v1 和 picks_v2 只差比分：picks_v1 只给最大的 1 格（历史参考在 reference_dir/summary.json，照留），
+picks_v2 给最大的 4 格（历史参考在 reference_dir/picks_v2/summary.json）。
 
 注意：
 - 不管有没有到“写倾向”的门槛，四个玩法都给预测（这样每场都能算命中率）；没到门槛的，页面上标“接近五五开”。
 - “预测”只是“哪个更可能”，不是“值得买”：赔率已经把可能性算进去了。页面上不写任何下注建议。
-- 比分预测和胜平负预测可能对不上（例如胜平负预测主胜，最可能的一个比分却是 1–1）：
+- 比分预测和胜平负预测可能对不上（例如胜平负预测主胜，最可能的比分里却有 1–1、0–0）：
   平局的概率集中在 0–0、1–1 几个格子，主胜的概率分散在 1–0、2–0、2–1……很多格子，所以单个最大的格子常常是平局。
 """
 from __future__ import annotations
@@ -27,10 +29,11 @@ from src.common.settlement import settle_asian_handicap, settle_over_under
 from src.web.site.common import pct0
 from src.web.site.data import matrix
 
-RULE = "picks_v1"
+RULE = "picks_v2"
+SCORE_TOP = 4                      # 比分给最可能的几个（规则的一部分：picks_v1 是 1 个，picks_v2 是 4 个）
 OU_LINE = 2.5                      # 大小球固定看这条线（picks_v1 定下的，存档里融合后只存了“大2.5球”）
 MARKETS = ("1x2", "ah", "ou", "score")
-MARKET_NAMES = {"1x2": "胜平负", "ah": "让球（亚盘）", "ou": "大小球 2.5", "score": "比分"}
+MARKET_NAMES = {"1x2": "胜平负", "ah": "让球（亚盘）", "ou": "大小球 2.5", "score": f"比分 {SCORE_TOP} 个"}
 # 结算结果 → 算命中率用的分值（和期末考试算亚盘命中率的写法一样）：赢 1、赢半 0.5、走 0、输半 −0.5、输 −1
 VALUE = {"win": 1.0, "half_win": 0.5, "push": 0.0, "half_loss": -0.5, "loss": -1.0}
 OUTCOME_TEXT = {"win": "中", "half_win": "赢半", "push": "走盘", "half_loss": "输半", "loss": "没中"}
@@ -130,15 +133,23 @@ def pick_ou(row: dict) -> dict | None:
     return {"side": side, "line": OU_LINE, "p": over if side == "over" else 1 - over, "source": src, "lean": enough}
 
 
+def best_scores(m: np.ndarray) -> dict:
+    """矩阵里概率最大的 SCORE_TOP 格：{"scores": [(主, 客), ...]（从大到小）, "p": 这几格加起来的概率}。
+    网站和历史参考（src/evaluate/picks_reference.py）都用这一个，保证同一套规则。
+    一样大时按矩阵里的先后取（主队进球少的在前，再按客队进球少的）：用稳定排序，每次排出来都一样。"""
+    m = np.asarray(m, dtype=float)
+    order = np.argsort(-m, axis=None, kind="stable")[:SCORE_TOP]
+    hs, as_ = np.unravel_index(order, m.shape)
+    return {"scores": [(int(h), int(a)) for h, a in zip(hs, as_)], "p": float(m[hs, as_].sum())}
+
+
 def pick_score(row: dict, tol: float) -> dict | None:
-    """比分：存下来的比分矩阵里概率最大的那一格（先用融合后的矩阵，没有用模型自己的）。没存矩阵的版本不预测。"""
+    """比分：存下来的比分矩阵里概率最大的 SCORE_TOP 格（先用融合后的矩阵，没有用模型自己的）。没存矩阵的版本不预测。"""
     d = row.get("detail") or {}
     for key, src in (("融合比分矩阵", "融合"), ("模型比分矩阵", "模型")):
         m = matrix(d, key, tol)
         if m is not None:
-            h, a = np.unravel_index(int(np.argmax(m)), m.shape)
-            return {"score": (int(h), int(a)), "p": float(m[h, a]), "source": src if used_odds(row) else "模型",
-                    "lean": None}
+            return {**best_scores(m), "source": src if used_odds(row) else "模型", "lean": None}
     return None
 
 
@@ -162,7 +173,7 @@ def settle(market: str, pick: dict | None, score) -> str | None:
     if market == "ou":
         return settle_over_under(h, a, pick["line"], pick["side"])["outcome"]
     if market == "score":
-        return "win" if tuple(pick["score"]) == (h, a) else "loss"
+        return "win" if (h, a) in {tuple(s) for s in pick["scores"]} else "loss"   # 实际比分是其中任意一个就算中
     raise ValueError(f"不认识的玩法：{market}")
 
 
@@ -234,9 +245,14 @@ def summarize(items: list[dict]) -> dict:
 
 
 # ---------- 历史参考（src/evaluate/picks_reference.py 存的 summary.json） ----------
+def reference_path(settings: dict) -> Path:
+    """这一版规则的历史参考文件：reference_dir/<规则名>/summary.json（picks_v1 的在 reference_dir/summary.json，照留不读）。"""
+    return resolve_path(settings["picks"]["reference_dir"]) / RULE / "summary.json"
+
+
 def load_reference(settings: dict) -> tuple[dict | None, str | None]:
     """读历史参考。返回 (内容, 读不了的原因)；还没算过是 (None, "还没算")。格式不对就不用，写原因。"""
-    path = resolve_path(settings["picks"]["reference_dir"]) / "summary.json"
+    path = reference_path(settings)
     if not path.exists():
         return None, "还没算历史参考"
     try:
@@ -268,7 +284,7 @@ def pick_text(market: str, pick: dict | None, home: str, away: str) -> str:
         return f"{team} {'平手' if line == 0 else f'{line:+g}'}"
     if market == "ou":
         return f"{'大' if pick['side'] == 'over' else '小'} {pick['line']:g} 球"
-    return f"{pick['score'][0]}–{pick['score'][1]}"
+    return "、".join(f"{h}–{a}" for h, a in pick["scores"])
 
 
 def outcome_html(outcome: str | None) -> str:
@@ -279,10 +295,11 @@ def outcome_html(outcome: str | None) -> str:
 
 
 def prob_html(market: str, pick: dict | None) -> str:
-    """预测那一边的可能性；存档里写着“没到倾向门槛”的，后面淡字提醒（胜平负写“和第二名差得不多”，让球、大小球写“接近五五开”）。"""
+    """预测那一边的可能性；存档里写着“没到倾向门槛”的，后面淡字提醒（胜平负写“和第二名差得不多”，让球、大小球写“接近五五开”）。
+    比分写这几个比分加起来的可能性。"""
     if pick is None:
         return "—"
-    note = ""
+    note = f" <span class='small muted'>{SCORE_TOP} 个合起来</span>" if market == "score" else ""
     if pick.get("lean") is False:
         note = " <span class='small muted'>和第二名差得不多</span>" if market == "1x2" else " <span class='small muted'>接近五五开</span>"
     return f"{pct0(pick['p'])}{note}"

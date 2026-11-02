@@ -658,10 +658,10 @@ site:
   story_move_min: 0.01           # 单场页“盘口与水位解读”：胜平负概率变得最多的那项不到 1 个百分点就写“基本没动”（只是措辞，不影响预测）
   record_matches: 60             # 战绩页“每场四个预测”列最近多少场（命中率汇总照样算全部）
 
-# 四个玩法的预测和命中率 picks_v1（src/web/site/picks.py、src/evaluate/picks_reference.py，需求文档第 3 节“四个玩法的预测和命中率”，
-# 算命中率之前写下）。想改规则另起 picks_v2，旧的照留
-picks:                           # 规则名 picks_v1 写在 src/web/site/picks.py 的 RULE（历史参考文件里也记着，对不上不用）
-  reference_dir: data/backtest/picks_reference   # 历史参考（期末考试存下的结果按同一规则算，只是描述统计）的结果放这里
+# 四个玩法的预测和命中率 picks_v2（src/web/site/picks.py、src/evaluate/picks_reference.py，需求文档第 3 节“四个玩法的预测和命中率”，
+# 算命中率之前写下）。想改规则另起一版，旧的照留（picks_v1 比分只给 1 个，picks_v2 给 4 个，别的一样）
+picks:                           # 规则名写在 src/web/site/picks.py 的 RULE、比分几个写在 SCORE_TOP（历史参考文件里也记着规则名，对不上不用）
+  reference_dir: data/backtest/picks_reference   # 历史参考（期末考试存下的结果按同一规则算，只是描述统计）放这里的 <规则名>/ 下面；picks_v1 的在这个文件夹本身
   reference_run: final_exam      # 用哪一次回测存下的结果（data/backtest/<这个>/）
 
 # 虚拟投注机器人的历史回测 bots_v1（src/bots/、src/evaluate/bot_backtest.py，需求文档第 14 节“历史回测第一版规则 bots_v1”，跑之前写下）

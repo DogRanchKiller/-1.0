@@ -1,9 +1,10 @@
-"""四个玩法预测的历史参考（规则 picks_v1，需求文档第 3 节“四个玩法的预测和命中率”）。
+"""四个玩法预测的历史参考（规则 picks_v2，需求文档第 3 节“四个玩法的预测和命中率”）。
 
 用期末考试已经存下的结果（data/backtest/final_exam/：2024/25–2025/26 赛季、开球前 24 小时的 gb_l7 比分矩阵和赛前赔率），
-按网站上同一套规则（src/web/site/picks.py）给每场比赛做四个预测，对比分算命中率，存到 settings.yaml picks.reference_dir：
+按网站上同一套规则（src/web/site/picks.py）给每场比赛做四个预测，对比分算命中率，
+存到 settings.yaml picks.reference_dir 下面以规则名命名的文件夹（picks_v2/；picks_v1 的结果在 reference_dir 本身，照留）：
   summary.json：四个玩法的汇总和“一直猜主胜”的对照（战绩页“历史参考”那一列读它）；
-  picks.csv：每场一行，四个预测和结果（想自己翻着看时用）。
+  picks.csv：每场一行，四个预测和结果（想自己翻着看时用；比分写最可能的几个，用 / 隔开，最可能的在前）。
 
 注意：
 - 这只是描述统计，不是第二次期末考试（考试只考一次，已经考过）；看了这里的数也不改任何规则和门槛。
@@ -27,7 +28,7 @@ from src.common.config import load_settings, resolve_path
 from src.common.markets import asian_handicap, dc_matrices, fit_market_dc
 from src.evaluate import fusion_study as fu
 from src.evaluate.compare import load_predictions
-from src.web.site.picks import MARKET_NAMES, MARKETS, OU_LINE, RULE, settle, tally
+from src.web.site.picks import MARKET_NAMES, MARKETS, OU_LINE, RULE, best_scores, reference_path, settle, tally
 
 
 def fused_matrices(t: pd.DataFrame, ids: np.ndarray, mats: np.ndarray, w: float) -> np.ndarray:
@@ -54,8 +55,7 @@ def picks_for(m: np.ndarray, ah_line: float) -> dict:
         if not np.isnan(share):
             home = share >= 0.5
             out["ah"] = {"side": "home" if home else "away", "line": float(ah_line), "p": share if home else 1 - share}
-    h, a = np.unravel_index(int(np.argmax(m)), m.shape)
-    out["score"] = {"score": (int(h), int(a)), "p": float(m[h, a])}
+    out["score"] = best_scores(m)
     return out
 
 
@@ -79,14 +79,14 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
         for mk in MARKETS:
             pk = p[mk]
             row[f"{mk}_pick"] = (None if pk is None else
-                                 f"{pk['score'][0]}-{pk['score'][1]}" if mk == "score" else
+                                 "/".join(f"{h}-{a}" for h, a in pk["scores"]) if mk == "score" else
                                  f"{pk['side']} {pk['line']:g}" if mk in ("ah", "ou") else str(pk["side"]))
             row[f"{mk}_p"] = None if pk is None else round(pk["p"], 6)
             row[f"{mk}_outcome"] = settle(mk, pk, score)
         rows.append(row)
     per = pd.DataFrame(rows)
-    # 比分预测的胜负方向（0 主胜 / 1 平 / 2 客胜）和胜平负预测对不上的场数
-    side = per["score_pick"].str.split("-", expand=True).astype(int)
+    # 最可能的那一个比分的胜负方向（0 主胜 / 1 平 / 2 客胜）和胜平负预测对不上的场数
+    side = per["score_pick"].str.split("/").str[0].str.split("-", expand=True).astype(int)
     score_side = np.where(side[0] > side[1], 0, np.where(side[0] == side[1], 1, 2))
     differs = int((score_side != per["1x2_pick"].astype(int)).sum())
 
@@ -96,7 +96,10 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
         "markets": {mk: tally(per[f"{mk}_outcome"].dropna().tolist()) for mk in MARKETS},
         "always_home": tally(np.where(per["home_goals"] > per["away_goals"], "win", "loss").tolist()),
         "score_side_differs": differs,
-        "top_score_picks": [[s.replace("-", "–"), int(n)] for s, n in Counter(per["score_pick"]).most_common(5)],
+        "top_score_picks": [[s.replace("-", "–"), int(n)] for s, n in
+                            Counter(per["score_pick"].str.split("/").explode()).most_common(5)],   # 4 个里出现最多的比分
+        "score_top": len(per["score_pick"].iloc[0].split("/")),
+        "score_p_mean": float(per["score_p"].mean()),       # 4 个比分合起来的可能性，平均多少
         "ah_no_pick": int(per["ah_pick"].isna().sum()),
         "data_check": {k: check[k] for k in ("有预测的比赛", "没有模型矩阵", "融合", "亚盘线不是主盘口、不用的场数", "没有亚盘线的场数")},
         "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
@@ -108,7 +111,7 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
 def main() -> None:
     settings = load_settings()
     summary, per = run(settings)
-    out = resolve_path(settings["picks"]["reference_dir"])
+    out = reference_path(settings).parent
     out.mkdir(parents=True, exist_ok=True)
     per.to_csv(out / "picks.csv", index=False, encoding="utf-8-sig")
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -118,7 +121,9 @@ def main() -> None:
         print(f"  {MARKET_NAMES[mk]}：{t['n']} 场，命中率 {t['rate']:.1%}（中 {t['win']}、赢半 {t['half_win']}、走 {t['push']}、"
               f"输半 {t['half_loss']}、没中 {t['loss']}）")
     print(f"  对照 一直猜主胜：{summary['always_home']['rate']:.1%}")
-    print(f"  比分预测和胜平负预测方向不一样的场数：{summary['score_side_differs']}；最常预测的比分：{summary['top_score_picks']}")
+    print(f"  比分 {summary['score_top']} 个合起来的可能性平均 {summary['score_p_mean']:.1%}")
+    print(f"  最可能的那个比分和胜平负预测方向不一样的场数：{summary['score_side_differs']}；"
+          f"4 个里出现最多的比分：{summary['top_score_picks']}")
     print(f"结果放在 {out}")
 
 

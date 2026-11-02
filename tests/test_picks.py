@@ -1,4 +1,4 @@
-"""四个玩法的预测和命中率 picks_v1（src/web/site/picks.py、战绩页、单场页）的自动检查。全是造的数据。"""
+"""四个玩法的预测和命中率 picks_v2（src/web/site/picks.py、战绩页、单场页）的自动检查。全是造的数据。"""
 import json
 
 import numpy as np
@@ -23,7 +23,10 @@ def test_new_row_uses_stored_leans_and_fused_matrix():
     assert p["1x2"] == {"side": 2, "p": 0.5, "source": "融合", "lean": False}      # 用融合概率，不用模型的
     assert p["ah"] == {"side": "away", "line": 0.25, "p": 0.56, "source": "融合", "lean": True}
     assert p["ou"]["side"] == "under" and p["ou"]["p"] == pytest.approx(0.6) and p["ou"]["line"] == 2.5
-    assert p["score"]["score"] == (1, 1) and p["score"]["source"] == "融合"         # 先用融合后的矩阵
+    assert p["score"]["source"] == "融合" and p["score"]["scores"][:2] == [(1, 1), (2, 0)]   # 先用融合后的矩阵，大的在前
+    assert len(p["score"]["scores"]) == pk.SCORE_TOP and p["score"]["p"] == pytest.approx(1.0)  # 4 格合起来
+    assert pk.pick_text("score", p["score"], "利物浦", "阿森纳").startswith("1–1、2–0、")
+    assert "4 个合起来" in pk.prob_html("score", p["score"])
     assert "和第二名差得不多" in pk.prob_html("1x2", p["1x2"])                      # 没到倾向门槛，淡字提醒
     assert pk.pick_text("ah", p["ah"], "利物浦", "阿森纳") == "阿森纳 -0.25"          # 换成客队自己的盘口
 
@@ -50,7 +53,9 @@ def test_settle_quarter_and_integer_lines_and_hit_rate():
     assert pk.settle("ah", {"side": "away", "line": -0.75}, (2, 1)) == "half_loss"
     assert pk.settle("ah", {"side": "home", "line": -1.0}, (2, 1)) == "push"
     assert pk.settle("ou", {"side": "over", "line": 2.5}, (2, 1)) == "win"
-    assert pk.settle("score", {"score": (1, 1)}, (1, 1)) == "win"
+    four = {"scores": [(1, 1), (1, 0), (2, 1), (0, 0)]}
+    assert pk.settle("score", four, (2, 1)) == "win" and pk.settle("score", four, (0, 0)) == "win"   # 任意一个对上就中
+    assert pk.settle("score", four, (0, 1)) == "loss" and pk.settle("score", four, (1, 2)) == "loss"
     assert pk.settle("1x2", {"side": 1}, (0, 0)) == "win" and pk.settle("1x2", None, (0, 0)) is None
     # 赢 1 + 赢半 0.5 = 1.5；没中 1 + 输半 0.5 = 1.5；走盘不算 → 50%
     assert pk.hit_rate(["win", "half_win", "push", "loss", "half_loss"]) == pytest.approx(0.5)
@@ -62,11 +67,17 @@ def test_settle_quarter_and_integer_lines_and_hit_rate():
 
 def test_reference_missing_bad_and_good(tmp_path):
     s = {"picks": {"reference_dir": str(tmp_path)}}
-    assert pk.load_reference(s) == (None, "还没算历史参考")
-    (tmp_path / "summary.json").write_text(json.dumps({"rule": "picks_v0"}), encoding="utf-8")
-    assert pk.load_reference(s) == (None, "历史参考文件格式不对，没有用")
     good = {"rule": pk.RULE, "markets": {k: {"n": 10, "rate": 0.5} for k in pk.MARKETS}, "always_home": {"rate": 0.43},
             "seasons": [2024, 2025], "n_matches": 10}
+    # picks_v1 的历史参考放在文件夹本身：新规则不读它（比分那一项的意思不一样了）
+    (tmp_path / "summary.json").write_text(json.dumps({**good, "rule": "picks_v1"}), encoding="utf-8")
+    assert pk.load_reference(s) == (None, "还没算历史参考")
+    tmp_path = tmp_path / pk.RULE
+    tmp_path.mkdir()
+    (tmp_path / "summary.json").write_text(json.dumps({"rule": "picks_v0"}), encoding="utf-8")
+    assert pk.load_reference(s) == (None, "历史参考文件格式不对，没有用")
+    (tmp_path / "summary.json").write_text(json.dumps({**good, "rule": "picks_v1"}), encoding="utf-8")
+    assert pk.load_reference(s) == (None, "历史参考文件格式不对，没有用")     # 规则名对不上不用
     (tmp_path / "summary.json").write_text(json.dumps({**good, "seasons": "2024"}), encoding="utf-8")
     assert pk.load_reference(s)[0] is None                                       # 赛季写错也不用（页面标题要用）
     (tmp_path / "summary.json").write_text(json.dumps(good), encoding="utf-8")
@@ -78,8 +89,8 @@ def test_record_and_match_page_show_four_picks_without_scores_csv(env):
     record = read(out, "record.html")
     assert "四个玩法的命中率" in record and "每场的四个预测（最近 1 场）" in record
     assert "历史参考：还没算历史参考。" in record
-    # 比赛 1：最新一版 T-1，主胜（中）、利物浦 -0.5（2–1 中）、大 2.5 球（中）、比分 1–1（没中）
-    assert "主胜（利物浦）" in record and "利物浦 -0.5" in record and "1–1" in record
+    # 比赛 1：最新一版 T-1，主胜（中）、利物浦 -0.5（2–1 中）、大 2.5 球（中）、比分 4 个（以 1–1 打头）
+    assert "主胜（利物浦）" in record and "利物浦 -0.5" in record and "1–1、" in record and "比分 4 个" in record
     pages = [p.read_text(encoding="utf-8") for p in (out / "match").glob("*.html")]
     assert any("四个玩法的预测" in p and "还没踢" in p for p in pages)          # 比赛 10 还没踢
     assert all("推荐" not in p for p in pages + [record])
@@ -153,7 +164,18 @@ def test_reference_rule_matches_site_rule():
         site, ref = pk.match_picks(row, s), picks_for(m, -0.25)
         for k in pk.MARKETS:
             for key in ref[k]:
-                assert site[k][key] == pytest.approx(ref[k][key]), (xg, k, key)
+                if key == "scores":                          # 比分是一串 (主, 客)，要一模一样（顺序也一样）
+                    assert site[k][key] == ref[k][key] and len(ref[k][key]) == pk.SCORE_TOP, (xg, k)
+                else:
+                    assert site[k][key] == pytest.approx(ref[k][key]), (xg, k, key)
+
+
+def test_best_scores_order_and_ties():
+    m = np.zeros((11, 11))
+    m[0, 0], m[1, 0], m[0, 1], m[1, 1], m[2, 1], m[3, 3] = 0.1, 0.2, 0.2, 0.3, 0.15, 0.05
+    b = pk.best_scores(m)
+    assert b["scores"] == [(1, 1), (0, 1), (1, 0), (2, 1)]          # 0–1 和 1–0 一样大：主队进球少的在前
+    assert b["p"] == pytest.approx(0.85) and (3, 3) not in b["scores"] and (0, 0) not in b["scores"]
 
 
 def test_why_points_say_where_the_probability_comes_from():

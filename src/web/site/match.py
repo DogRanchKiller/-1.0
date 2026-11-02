@@ -2,7 +2,7 @@
 
 一页从上到下（2026-11-03 起精简：一眼要看的放上面，细节默认收起）：
 - 结论：一句大字（谁赢的可能更大）+ 一根大号三色概率条 + 信心等级。
-- 四个玩法的预测：胜平负、让球、大小球 2.5、比分各一个，踢完写中没中（规则 picks_v1，src/web/site/picks.py）。
+- 四个玩法的预测：胜平负、让球、大小球 2.5 各一个，比分 4 个，踢完写中没中（规则 picks_v2，src/web/site/picks.py）。
 - 为什么这样看（src/web/site/story.py）：最多 3 句话；下面收起的是结论链 6 步、四块分析、影响最大的几类因素。
 - 更多数据（点标题展开，<details>，不用脚本）：比分概率热力图和各玩法、各版本对比（简表 + 完整记录）、
   赔率变动图、首发名单、赛后复盘；最后一块“流程记录和技术细节”里是各家公司价格、竞彩、逐场贡献解释完整版、流程记录。
@@ -543,7 +543,7 @@ def tags_html(row: dict) -> str:
 
 
 def picks_html(data: SiteData, mid: int, row: dict) -> str:
-    """结论卡片里的“四个预测”表：胜平负、让球、大小球 2.5、比分各一个（规则 picks_v1，src/web/site/picks.py）。
+    """结论卡片里的“四个预测”表：胜平负、让球、大小球 2.5 各一个，比分 4 个（规则 picks_v2，src/web/site/picks.py）。
     踢完了写中没中；“预测”只是哪个更可能，不是值得买。"""
     from src.web.site import picks as pk
 
@@ -565,7 +565,7 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
                      pk.outcome_html(pk.settle(k, ps[k], score)) if score else "<span class='muted'>还没踢</span>"])
     note = ("<p class='small muted'>每个玩法写最可能的那一边，踢完记中没中，汇总在<a href='../record.html'>战绩页</a>。"
             "让球：-0.5 = 要赢 1 球以上才算中，+0.5 = 不输就算中；四分之一球会有赢半、输半，整数球打平会走盘。"
-            "比分只是 121 个比分里可能性最大的一个，一般只有一成左右，常常和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。</p>")
+            "比分写 121 个比分里可能性最大的 4 个，实际比分是其中一个就算中；4 个合起来一般也只有四成左右，里面常常有平局的比分，和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。</p>")
     if late:
         note = f"<p class='note'>{late}</p>" + note
     return table(["玩法", "预测", "可能性", "结果"], rows, "picks") + note
