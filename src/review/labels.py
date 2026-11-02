@@ -55,7 +55,7 @@ from src.common.config import load_settings, resolve_path, season_role
 from src.features import FeatureStore, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
 from src.features.rest_days import RestDays
-from src.features.standings import LeagueRules, SeasonTable, load_deductions, load_rules, season_schedule, season_table
+from src.features.standings import LeagueRules, SeasonTable, load_deductions, load_rules, season_schedule, season_table, standings_leagues
 from src.features.usage import season_label
 
 USAGE = "复盘"
@@ -232,7 +232,7 @@ def label_all(settings: dict | None = None, comps: list[str] | None = None, seas
     """
     settings = settings or load_settings()
     conn = conn or open_readonly(resolve_path(settings["paths"]["database"]))
-    comps = comps or [c for g in settings["leagues"].values() for c in g]
+    comps = comps or standings_leagues(settings)   # 只算有积分规则的联赛（standings.league_groups）
     derbies = load_derbies(settings)
     deductions = load_deductions(settings)
     stores: dict[str, FeatureStore] = {}

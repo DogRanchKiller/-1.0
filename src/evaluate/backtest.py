@@ -98,6 +98,26 @@ class BacktestResult:
 
 
 # ======================= 第 1 步：要预测哪些比赛 =======================
+def calendar_year_codes(settings: dict) -> set[str]:
+    """一年一个赛季的联赛代码（settings 的 backtest.calendar_year_groups，日职、中超）。"""
+    groups = settings["backtest"].get("calendar_year_groups") or []
+    return {c for g in groups for c in settings["leagues"].get(g, {})}
+
+
+def other_season_system(settings: dict, competitions) -> list[str]:
+    """和这次回测的联赛不是同一种赛季制度的联赛代码（取休息天数的赛程时排除）。
+
+    跨年赛季（五大联赛等）的回测排除日职、中超；日职、中超的回测排除跨年赛季的联赛。杯赛、欧战不排除。
+    两边的球队不会互相比赛，排除了休息天数也不变；不排除的话，五大联赛 2023/24 赛季的截止时间到 2024 年 5 月，
+    会取到 2 月就开赛的日职、中超 2024 赛季（考试赛季）的赛程，开发模式直接报错。
+    """
+    cal = calendar_year_codes(settings)
+    leagues = {c for g in settings["leagues"].values() for c in g}
+    if any(c in cal for c in competitions):
+        return sorted(leagues - cal)
+    return sorted(cal)
+
+
 def season_targets(fs: FeatureStore, competitions: list[str], first: int, last: int) -> pd.DataFrame:
     """first–last 赛季（含两头）这些联赛的全部比赛，当作预测目标。
 
@@ -113,7 +133,7 @@ def season_targets(fs: FeatureStore, competitions: list[str], first: int, last: 
     start_md, end_md = b["window_start_md"], b["window_end_md"]
     # 一年一个赛季的联赛（日职、中超）用另一个窗口：第一个赛季那年 1 月 1 日到最后一个赛季下一年 2 月 1 日。
     # 跨年赛季的窗口（6 月 15 日起）会漏掉这些联赛 2–6 月的比赛，最后一季的窗口还会伸进下一年的考试赛季
-    cal_codes = {c for g in b.get("calendar_year_groups") or [] for c in fs.settings["leagues"].get(g, {})}
+    cal_codes = calendar_year_codes(fs.settings)
     cal = [c for c in competitions if c in cal_codes]
     if cal:
         if len(cal) != len(competitions):
@@ -182,6 +202,7 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         rest = RestDays.from_settings(settings)
         # 只有“哪一轮”日期的杯赛，最早、最晚开球差 round_date_window_days 天；往回多取这么多再加 2 天，免得漏
         sched_margin = pd.Timedelta(days=float(settings["features"]["round_date_window_days"]) + 2)
+        other_system = other_season_system(settings, comps)   # 另一种赛季制度的联赛不取（见 other_season_system）
         last_sched: str | None = None
         timing["取赛程次数"] = 0
 
@@ -209,7 +230,7 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         # ---- 取新赛程（只有要休息天数时） ----
         if rest is not None:
             since = None if last_sched is None else to_utc_text(pd.Timestamp(last_sched) - sched_margin)
-            sched = fs.schedule(cutoff, "休息天数和欧战后标签", since=since)
+            sched = fs.schedule(cutoff, "休息天数和欧战后标签", since=since, exclude_competitions=other_system)
             if (sched["known_at_utc"] > cutoff).any():
                 raise LookAheadError(f"取数层返回了截止时间 {cutoff} 之后才开球的赛程，回测停止")
             rest.add(sched)

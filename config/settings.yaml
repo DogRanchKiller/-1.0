@@ -388,7 +388,20 @@ final_exam:                   # 期末考试（预测部分）src/evaluate/final
       btts: 0.123263
       ah: 0.066950
 
-models:                      # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
+asia_study:                   # 日职、中超开发回测和平博收盘比 src/evaluate/asia_study.py（需求文档第 4 节“第 11 阶段”，跑之前写下）
+  runs:                       # 每个联赛读哪几次回测（data/backtest/<名字>/，先用 src.evaluate.backtest 跑好）
+    JPN: [j1_jpn_score, j1_jpn_gb]
+    CHN: [j1_chn_score, j1_chn_gb]
+  horizon: T-24               # 模型用哪个时点的预测
+  benchmark: pinnacle_close   # 和哪个标杆比（平博收盘去水，时点“收盘”）
+  metrics: [log_loss, brier, hit]   # 表里列哪几个分数（hit 越大越好，另外两个越小越好）
+  min_season_n: 100           # 一季可比的场数少于这个，结论写“样本少”
+  output: data/reports/日职中超_开发回测对比.md   # 报告放这里（data/ 不进 Git）
+  five_league_reference:      # 五大联赛 2014/15–2023/24、T-24 的数（第 4 节步骤 5、步骤 6 结果），只用来并排看
+    dyn_q1e5_b01: {model: 0.98187, pinnacle: 0.9643, n: 18085}
+    gb_l7: {model: 0.97884, pinnacle: 0.96429, n: 18085}
+
+models:                    # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
   frequency:                 # 历史频率基线：按联赛的主胜 / 平 / 客胜比例
     window_days: 1095        # 只看截止前最近 3 年（约 3 个赛季）的比赛。主场优势在变（2020/21 空场降到 40.8%），太久远的不用
@@ -609,6 +622,9 @@ crosscheck:
 standings:
   rules: config/league_rules.yaml           # 各联赛积分规则、同分排名规则、降级 / 争冠名额（每条写了来源）
   deductions: config/points_deductions.yaml # 扣分记录（football-data 没有扣分，手工录入，每条写来源）
+  # 哪些联赛组有积分规则、能算积分榜和复盘标签。日职、中超（asia）没写规则：赛季是自然年（season_window 按 7 月切），
+  # 降级名额每年变、还有附加赛，没核对过来源前不算，免得给出错的“保级战”标签
+  league_groups: [top, second]
 
 labels:
   derbies: config/derbies.yaml   # 德比对阵名单

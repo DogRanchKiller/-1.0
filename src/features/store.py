@@ -617,12 +617,16 @@ class FeatureStore:
         """
         return self._schedule(cutoff, usage, team=team, include_cups=include_cups, since=since)
 
-    def schedule(self, cutoff, usage: str, since=None) -> pd.DataFrame:
+    def schedule(self, cutoff, usage: str, since=None, exclude_competitions=None) -> pd.DataFrame:
         """所有队截止时间之前已经开球的比赛日程（全部联赛 + 杯赛、欧战），规则和 team_schedule 一样，只是不按队筛。
-        回测给每场比赛算休息天数用（src/features/rest_days.py）：一次取一批，比一队一队取快得多。"""
-        return self._schedule(cutoff, usage, team=None, include_cups=True, since=since)
+        回测给每场比赛算休息天数用（src/features/rest_days.py）：一次取一批，比一队一队取快得多。
+        exclude_competitions：不要这些赛事（例如回测五大联赛时不要日职、中超：两边的球队不会互相比赛，
+        而日职、中超 2024 赛季 2 月就开赛，五大联赛 2023/24 赛季的截止时间到 5 月，不排除会取到考试赛季的赛程）。"""
+        return self._schedule(cutoff, usage, team=None, include_cups=True, since=since,
+                              exclude=_as_list(exclude_competitions))
 
-    def _schedule(self, cutoff, usage: str, team: str | None, include_cups: bool, since) -> pd.DataFrame:
+    def _schedule(self, cutoff, usage: str, team: str | None, include_cups: bool, since,
+                  exclude: list | None = None) -> pd.DataFrame:
         cutoff = to_utc_text(cutoff)
         self.usage.check("比赛信息", PAST, usage)
         if include_cups:
@@ -639,6 +643,9 @@ class FeatureStore:
         if since is not None:
             where.append("k.kickoff_earliest_utc >= ?")
             params.append(to_utc_text(since))
+        if exclude:
+            where.append(f"m.competition not in ({','.join('?' * len(exclude))})")
+            params += list(exclude)
         ph = ",".join("?" * len(self.leagues))
         sql = f"""
             select m.*, k.season_role, k.kickoff_earliest_utc, k.kickoff_latest_utc,

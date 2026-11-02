@@ -72,6 +72,17 @@ def _rules_file(path: str) -> dict:
     return _load_yaml(Path(path))
 
 
+def standings_leagues(settings: dict | None = None) -> list[str]:
+    """能算积分榜的联赛代码：settings 里 standings.league_groups 列的联赛组（不写 = 全部组）。
+
+    日职、中超（leagues.asia）没有写在这里：league_rules.yaml 里还没有它们的规则，
+    而且它们的赛季是自然年，下面 season_window 按“7 月到第二年 7 月”切赛季，对它们不对。
+    """
+    settings = settings or load_settings()
+    groups = settings["standings"].get("league_groups") or list(settings["leagues"])
+    return [c for g in groups for c in settings["leagues"][g]]
+
+
 def load_rules(competition: str, season: int, settings: dict | None = None, path: Path | None = None) -> LeagueRules:
     """查 league_rules.yaml：这个联赛这个赛季用哪一段规则。赛季不在任何一段里就报错（不猜）。"""
     settings = settings or load_settings()
