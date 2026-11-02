@@ -286,9 +286,22 @@ class GBDTModel(Model):
 
     # ---------------- 预测 ----------------
     def predict(self, targets: pd.DataFrame, cutoff: str) -> list:
+        """原预测接口；默认不提取SHAP、不算积分，也不生成模型指纹。"""
+        return self._predict(targets, cutoff)[0]
+
+    def predict_with_explanations(self, targets: pd.DataFrame, cutoff: str, *, options=None) -> tuple[list, list]:
+        """当前预测附带解释；共享同一次特征提取和树，不重新拟合或回填旧预测。"""
+        return self._predict(targets, cutoff, with_explanations=True, options=options)
+
+    def _predict(self, targets: pd.DataFrame, cutoff: str, *, with_explanations=False, options=None):
         out: list = [None] * len(targets)
-        if self.booster is None:
-            return out
+        # 延迟导入/初始化让旧回测及普通预测不承担解释的额外工作。
+        explanations = None
+        if with_explanations:
+            from src.models.explain import explain_batch, unavailable
+            explanations = [unavailable("no_prediction") for _ in range(len(targets))]
+        if self.booster is None or targets.empty:
+            return out, explanations
         base = self.dyn.predict(targets, cutoff)                # 只在 dyn 能出预测的比赛上出
         cols = lambda names: np.column_stack([pd.to_numeric(targets[c], errors="coerce").to_numpy(float)
                                               if c in targets else np.full(len(targets), np.nan) for c in names])
@@ -303,12 +316,14 @@ class GBDTModel(Model):
             if f is not None:
                 items.append((r, comp, f))
         if not items:
-            return out
+            return out, explanations
         if self.target == "result":
             p = self.booster.predict(np.vstack([f[0] for _, _, f in items])[:, self.use])
             for (r, _, _), q in zip(items, p):
                 out[r] = q / q.sum()
-            return out
+                if with_explanations:
+                    explanations[r] = unavailable("unsupported_target")
+            return out, explanations
         X = np.vstack([row for _, _, f in items for row in f])[:, self.use]
         lam = self.booster.predict(X).reshape(-1, 2)
         by_comp: dict[str, list] = {}
@@ -319,7 +334,20 @@ class GBDTModel(Model):
             mats = score_matrices(np.array(lh), np.array(la), self.dyn.leagues[comp].rho, 0.0, self.max_goals)
             for r, m in zip(rr, mats):
                 out[r] = m
-        return out
+        if with_explanations:
+            # 预测矩阵先完全算好。解释仅复用这份X、lambda、rho，不能再次_features（Elo换季有状态）。
+            try:
+                extra = explain_batch(self.booster, X, lam, [out[r] for r, _, _ in items],
+                    [{"rho": self.dyn.leagues[comp].rho, "max_goals": self.max_goals} for _, comp, _ in items],
+                    [self.names[i] for i in self.use], self.last_train, options=options)
+                if len(extra) != len(items):
+                    raise ValueError("解释条数和本次预测不一致")
+                for (r, _, _), explanation in zip(items, extra):
+                    explanations[r] = explanation
+            except Exception:
+                for r, _, _ in items:
+                    explanations[r] = unavailable("explanation_failed")
+        return out, explanations
 
     # ---------------- 给人看 ----------------
     def importance(self) -> pd.DataFrame:
