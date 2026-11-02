@@ -294,6 +294,24 @@ confidence:                   # 信心等级规则（confidence_study 选出来�
   downgrade_factors: []          # 每碰上一个降一级。候选 gap / early / promoted / no_pinnacle，开发赛季回测一个都不算数
   no_odds_downgrade: 1           # 一家赔率都没有（只出模型概率）再降几级（第 5 节“融合用哪家赔率”第 3 条）
 
+odds_move_study:              # 赔率走向研究 src/evaluate/odds_move_study.py（需求文档第 14 节“赔率走向研究怎么做”，跑之前写下，不临时加）
+  output_dir: data/backtest/odds_move   # 结果放这里（data/ 不进 Git）
+  usage: 机器人下注               # 取数用途（数据字典里赔率走向模型属于这一栏）
+  leagues: [E0, SP1, D1, I1, F1]  # 五大联赛
+  first_season: 2019              # 从 2019/20 起（懂球帝 2018/19 没有开球时间，T-24 算不准）
+  horizons: [24, 6, 1]            # 时点：开球前几小时
+  main_horizon: 24                # 三个主要结论看哪个时点
+  last_minutes: 1                 # “最后价格”：开球前 1 分钟的最后一个价格（不是真收盘）
+  bookmaker_file: config/bookmakers_dongqiudi.yaml   # 公司名对照表
+  trusted_basis: 核对过           # 只用对照表里“依据”写这个的公司（名字不确定的不用）
+  min_books: 3                    # 一场比赛这个时点至少几家公司同时有价格才算
+  moved_threshold: 0.005          # 热门概率变了 0.5 个百分点以上算“动了”
+  min_season_matches: 200         # 一个赛季至少几场才算“够样本”
+  min_seasons: 3                  # 至少几个够样本的赛季才下结论
+  min_total_matches: 3000         # T-24 能用的比赛合计至少几场才下结论
+  min_abs_mean: 0.005             # 结论 A：平均 ΔF 的绝对值至少这么大
+  same_odds_tol: 0.01             # 和 football-data 收盘比：三个赔率都差不超过这个算一样
+
 final_exam:                   # 期末考试（预测部分）src/evaluate/final_exam.py（需求文档第 5 节“期末考试怎么考”，跑之前写下）
   done: true                     # 考过一次后改成 true 提交，程序就不能再考（只考一次）
   run_name: final_exam           # 结果放 data/backtest/<这个名字>/（data/ 不进 Git），里面的 exam_done.json 也算“考过了”
