@@ -13,6 +13,7 @@ from datetime import datetime
 import pandas as pd
 
 from src.clean.dongqiudi_reader import BEIJING
+from src.web.explanation import EXPLANATION_CSS, render_explanation
 from src.web.theme import BASE_CSS, VIEWPORT
 
 WEEKDAYS = "一二三四五六日"
@@ -23,7 +24,7 @@ AH_NAMES = ["平手", "平半", "半球", "半一", "一球", "一球球半", "�
             "两球半三球", "三球"]
 
 # 这一页特有的样子；共用的颜色、字体、表格、卡片在 src/web/theme.py
-CSS = BASE_CSS + """
+CSS = BASE_CSS + EXPLANATION_CSS + """
 .bar { display: flex; width: 100%; max-width: 180px; height: 6px; margin-top: 6px; border-radius: 3px;
        overflow: hidden; background: var(--line); gap: 2px; }
 .bar span { transition: width .6s ease; }
@@ -266,10 +267,25 @@ def render(result: dict, settings: dict, now: datetime) -> str:
             "<th>结论（融合后）<br>主胜 / 平 / 客胜</th>"
             f"<th>模型 {e(label)}<span class='tag temp'>临时模型</span><br>主胜 / 平 / 客胜</th>"
             "<th>赔率概率<br>主胜 / 平 / 客胜</th><th>差距</th><th>亚盘主盘口</th><th>大小球主盘口</th></tr></thead>")
-    # 每一天一张卡片；卡片里是一张表，手机上每一行变成一张小卡片
+    def explanations(grp: list[dict]) -> str:
+        """解释放在当天表格后逐场展开，长表不会挤进狭窄的概率单元格。"""
+        cfg = settings.get("explanation") or {}
+        parts = []
+        for index, row in enumerate(grp):
+            # 外层身份取自本次结果，不能反过来相信解释自己声明的模型/版本/截止。
+            outer = {**row, "model": result["model"], "model_version": result["model_version"],
+                     "cutoff_utc": result["cutoff_utc"], "p_home": row["model_p"][0] if row["model_p"] else None}
+            body = render_explanation(row.get("explanation"), outer, uid=f"preview-{row['match_id']}-{index}",
+                                      fusion=row.get("conclusion"), top_factors=cfg.get("top_factors", 3),
+                                      atol=cfg.get("atol", 1e-6), missing_text="本次没有提供模型解释")
+            title = f"{row['home_zh']} 对 {row['away_zh']} · 本次模型依据"
+            parts.append(f"<details class='ex-preview'><summary>{e(title)}</summary>{body}</details>")
+        return "".join(parts)
+
+    # 每一天一张卡片；解释单独折叠，不与融合后的结论混在一起。
     body = "".join(f"<h2>{e(title)}<span class='small'>{len(grp)} 场</span></h2>"
                    f"<div class='card'><table class='matches'>{head}"
-                   f"<tbody>{''.join(row_html(r, th, label) for r in grp)}</tbody></table></div>"
+                   f"<tbody>{''.join(row_html(r, th, label) for r in grp)}</tbody></table></div>{explanations(grp)}"
                    for (_k, title), grp in sorted(groups.items()))
     if not rows:
         body = "<div class='note'>未来几天没有比赛（或者赛程还没导入）。</div>"

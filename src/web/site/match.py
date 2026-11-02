@@ -17,6 +17,7 @@ import pandas as pd
 from src.common import markets
 from src.common.odds import devig
 from src.features.usage import season_label
+from src.web.explanation import EXPLANATION_CSS, render_explanation
 from src.web.preview_page import ah_text, lean_texts
 from src.web.site.common import (NOT_ADVICE, OUTCOMES, STATUS_TAGS, TeamFiles, bj_text, details, e, heatmap_svg,
                                  kickoff_text, level_name, line_chart_svg, page, pct0, pct1, placeholder, table)
@@ -181,6 +182,25 @@ def versions_html(data: SiteData, mid: int) -> str:
     note = ("<p class='small muted'>截止时间和存档时间分别列出，均为北京时间。模型名称、模型版本、预测时点与归档状态分别保留。各版本只用当时已经知道的数据，"
             "所以越晚的版本赔率越新；“首发”还没有接进来时写“未含首发”。猜中 = 胜平负里概率最大的那项和赛果一样。</p>")
     return table(["模型", "模型版本", "预测时点", "归档状态", "数据截止时间", "存档时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"], out) + note
+
+
+def explanations_html(data: SiteData, mid: int) -> str:
+    """每版只解释自己保存的对象；最新一版没存解释时，不借旧版或其他模型来填。"""
+    rows = data.preds.get(mid) or {}
+    if not rows:
+        return placeholder("这场还没有预测")
+    cfg = data.settings.get("explanation") or {}
+    latest_pid = data.latest(mid)[1]["prediction_id"]
+    order = sorted(rows.values(), key=lambda row: (str(row["cutoff_utc"] or ""), row["prediction_id"]), reverse=True)
+    parts = []
+    for row in order:
+        saved = row.get("detail") or {}
+        title = (f"{identity_text(row)} · {version_name(row['kind'])} · {archive_name(row.get('archive_status'))}"
+                 f" · {bj_text(row['cutoff_utc'])} 截止")
+        body = render_explanation(saved.get("模型解释"), row, uid=f"archive-{mid}-{row['prediction_id']}",
+                                  fusion=fusion(row), top_factors=cfg.get("top_factors", 3), atol=cfg.get("atol", 1e-6))
+        parts.append(details(title, body, open_=row["prediction_id"] == latest_pid))
+    return f"<style>{EXPLANATION_CSS}</style>" + "".join(parts)
 
 
 # ---------- 比分概率、各玩法（只从存的矩阵算） ----------
@@ -465,6 +485,7 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))
     body = "".join([
         head, summary, f"<div class='note'>{NOT_ADVICE}</div>",
+        details("模型依据（逐场贡献解释）", explanations_html(data, mid), open_=True),
         details("各版本对比（开球前 24 / 6 / 1 小时、预览版）", versions_html(data, mid)),
         details("比分概率和各玩法（亚盘、大小球、双方进球）", scores_html(data, mid)),
         details("赔率变动", odds_html(data, mid)),
