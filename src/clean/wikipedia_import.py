@@ -28,6 +28,7 @@ import argparse
 import collections
 import datetime as dt
 import gzip
+import hashlib
 import json
 import logging
 import re
@@ -1010,7 +1011,8 @@ def skip_page(stem: str, main_titles: list[str], skip_rules: list[str]) -> bool:
 
 
 def load_season(raw_root: Path, code: str, comp: dict, year: int, main_titles: list[str],
-                problems: list[str], skip_rules: list[str] = ()) -> list[RawMatch]:
+                problems: list[str], skip_rules: list[str] = (),
+                pages: list[tuple[str, Path]] | None = None) -> list[RawMatch]:
     """读一个赛事一个赛季的所有网页，返回比赛列表（同一场比赛在几个页面出现时，这里还没去重）。
 
     main_titles：这个赛季主页面可能的标题（settings 里的模板生成的），用来判断子页面名字里的轮次。
@@ -1018,7 +1020,7 @@ def load_season(raw_root: Path, code: str, comp: dict, year: int, main_titles: l
     """
     folder = raw_root / "wikipedia" / code / str(year)
     stems = {t.replace(" ", "_"): t for t in main_titles}
-    pages = season_pages(folder)
+    pages = season_pages(folder) if pages is None else pages
     texts: dict[str, tuple[str, Path, str]] = {}   # 标准标题 → (页面名, 文件, html)
     main_title = None
     for stem, path in pages:
@@ -1040,7 +1042,8 @@ def load_season(raw_root: Path, code: str, comp: dict, year: int, main_titles: l
     results = []
     single = bool(comp.get("单场"))
     for canon, (stem, path, html) in texts.items():
-        rel = path.relative_to(raw_root.parent).as_posix() if raw_root.parent in path.parents else path.as_posix()
+        from src.collect.wikipedia import raw_path
+        rel = raw_path(path)
         res = parse_page(html, code, year, canon.replace(" ", "_"), rel, main_title, single_match=single)
         results.append(res)
         for k, v in res.calendar.items():
@@ -1521,12 +1524,222 @@ def load_teams_for_db(team_map: TeamMap) -> tuple[list[tuple], None]:
     return [(t["英文"], t.get("中文") or None, t["国家"]) for t in team_map.teams.values()], None
 
 
+def resolve_raw_file(raw_file: str, raw_root: Path) -> Path:
+    """识别项目根路径及旧版少 data/ 的路径，但文件必须留在配置的原始层内。"""
+    from src.collect.wikipedia import PROJECT_ROOT
+    supplied = Path(raw_file)
+    candidates = [supplied] if supplied.is_absolute() else [PROJECT_ROOT / supplied, raw_root.parent / supplied]
+    root = raw_root.resolve()
+    for candidate in candidates:
+        path = candidate.resolve()
+        if path.is_relative_to(root) and path.is_file():
+            return path
+    raise ValueError(f"原始文件不存在或不在配置的原始层：{raw_file}")
+
+
+def verified_fetch_times(con: sqlite3.Connection, raw_files: list[str], raw_root: Path,
+                         base_url: str = "https://en.wikipedia.org/wiki/") -> dict[str, str]:
+    """以现有文件解压内容的 SHA 对应真实抓取日志，不按 mtime/今天/最大时间追认。
+
+    同一内容重复检查时保留最早有证据的时间。路径存在但哈希不符、没有日志或时间无效，
+    都返回未知；调用者不能把这样的页面用于自动导入。
+    """
+    from src.collect.wikipedia import file_stem, page_url, raw_path
+    wanted = {}
+    for raw in set(raw_files):
+        try:
+            path = resolve_raw_file(raw, raw_root)
+            wanted[raw] = (raw_path(path), hashlib.sha256(gzip.decompress(path.read_bytes())).hexdigest())
+        except (OSError, ValueError, EOFError):
+            continue
+    by_identity = {}
+    wanted_identity = set(wanted.values())
+    for path, digest, when, url, note in con.execute(
+            "select file_path,sha256,fetched_at_utc,url,note from fetch_log where source=? and data_type='wiki_page'"
+            " and status in ('saved','unchanged') and file_path is not null and sha256 is not null", (SOURCE,)):
+        try:
+            file = resolve_raw_file(path, raw_root)
+            canonical = raw_path(file)
+            if (canonical, digest) not in wanted_identity or not isinstance(note, str) or not note.startswith("title="):
+                continue
+            title = note[len("title="):]
+            stem = file.name[:-len(".html.gz")] if file.parent.name.isdigit() else file.parent.name
+            if not title or file_stem(title) != stem or page_url(base_url, title) != url:
+                continue
+            stamp = dt.datetime.fromisoformat(when.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=dt.timezone.utc)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        key = (canonical, digest)
+        if key not in by_identity or stamp < by_identity[key][0]:
+            by_identity[key] = (stamp, when)
+    return {raw: by_identity[key][1] for raw, key in wanted.items() if key in by_identity}
+
+
+def repair_source_provenance(settings: dict, con: sqlite3.Connection) -> dict:
+    """一次性修旧路径/空抓取时间；只动 match_sources 两列，不重导历史比赛。
+
+    调用者在独立维护/启用流程持有 data_write_lock 后调用，不接进每日任务。每个修复
+    必须有原始文件、内容哈希、页面 URL/标题、类型和真实 fetch_log 时间；验证不了就不动。
+    """
+    from src.collect.wikipedia import raw_path
+    raw_root = resolve_path(settings["paths"]["raw"])
+    candidates = con.execute("select s.source_key,s.raw_file,s.fetched_at_utc,m.competition,m.season,"
+                             "m.round,m.leg,m.home_team,m.away_team from match_sources s join matches m using(match_id)"
+                             " where s.source=? and (s.fetched_at_utc is null or s.raw_file like 'raw/%')", (SOURCE,)).fetchall()
+    files = [record[1] for record in candidates if record[1]]
+    verified = verified_fetch_times(con, files, raw_root, settings["wikipedia"]["base_url"])
+    updated = timestamps = paths = unverified = 0
+    with con:
+        for key, raw, when, code, season, rnd, leg, home, away in candidates:
+            if raw not in verified:
+                unverified += 1
+                continue
+            file = resolve_raw_file(raw, raw_root)
+            expected = "|".join((code, str(season), rnd, str(leg), home, away))
+            if key != expected or not file.is_relative_to((raw_root / SOURCE / code / str(season)).resolve()):
+                unverified += 1
+                continue
+            canonical = raw_path(file)
+            # 旧路径对应的非空值也可能是早期推算时间；只有日志能证明本次来源时间。
+            known = verified[raw]
+            if raw == canonical and known == when:
+                continue
+            con.execute("update match_sources set raw_file=?,fetched_at_utc=? where source=? and source_key=?",
+                        (canonical, known, SOURCE, key))
+            updated += 1
+            timestamps += when != known
+            paths += raw != canonical
+    return {"updated": updated, "timestamps_repaired": timestamps, "paths_repaired": paths,
+            "unverified": unverified, "checked": len(candidates)}
+
+
+def write_scoped_database(con: sqlite3.Connection, rows: list[Row], team_map: TeamMap, comps: dict,
+                          fetched: dict[str, str], scopes: list[tuple[str, int]]) -> dict:
+    """日更只增改明确范围内实际解析到的比赛；缺页、缺行、缺比分都不是删除证据。
+
+    不调用全库来源生命周期清理，不清空赛事全部来源，也不重建预测/解释。保留未再次
+    识别的旧行并计数；比赛改名、轮次改变等身份问题留给后续质量核查，不猜旧 ID。
+    """
+    scope = set(scopes)
+    if not scope or any(c not in comps or not isinstance(y, int) for c, y in scope):
+        raise ValueError("导入范围必须是明确且非空的赛事和赛季")
+    keys = [(r.competition, r.season, r.home_team, r.away_team, r.round, r.leg) for r in rows]
+    if len(keys) != len(set(keys)) or any((r.competition, r.season) not in scope for r in rows):
+        raise ValueError("导入存在重复身份或范围外比赛")
+    if any(not fetched.get(r.raw_file) for r in rows):
+        raise ValueError("原始文件没有可核验的抓取时间，不能自动导入")
+    create_tables(con)
+    clause = " or ".join("(competition=? and season=?)" for _ in scope)
+    params = [item for pair in sorted(scope) for item in pair]
+    previous = {tuple(r[:6]): (r[6], r[7]) for r in con.execute(
+        f"select competition,season,home_team,away_team,round,leg,match_id,status from matches where {clause}", params)}
+    preserved = len(set(previous) - set(keys))
+    written = 0
+    with con:
+        new_ids = new_match_ids(con)
+        for r, key in zip(rows, keys):
+            # 一个已知赛果不能因页面暂时不显示比分而退回未赛。
+            if key in previous and previous[key][1] in ("finished", "awarded") and r.status == "scheduled":
+                preserved += 1
+                continue
+            for tid, title, flag in ((r.home_team, r.home_title, r.home_country),
+                                     (r.away_team, r.away_title, r.away_country)):
+                if team_map.is_ours(tid):
+                    t = team_map.teams[tid]
+                    country, name = t["国家"], t.get("中文")
+                else:
+                    local = comps[r.competition].get("国家", "")
+                    country, name = FLAG_TO_ZH.get(flag, flag) or (local if local != "欧洲" else "未知"), None
+                con.execute("insert into teams(team_id,name_zh,country) values(?,?,?) on conflict(team_id) do nothing",
+                            (tid, name, country))
+                con.execute("insert into team_names(source,name,team_id) values(?,?,?)"
+                            " on conflict(source,name) do update set team_id=excluded.team_id", (SOURCE, title, tid))
+            con.execute("insert into matches(match_id,competition,season,home_team,away_team,round,leg,match_date,"
+                        "kickoff_utc,status,date_precision) values(?,?,?,?,?,?,?,?,?,?,?)"
+                        " on conflict(competition,season,home_team,away_team,round,leg) do update set"
+                        " match_date=excluded.match_date,kickoff_utc=excluded.kickoff_utc,"
+                        "status=excluded.status,date_precision=excluded.date_precision",
+                        (next(new_ids), *key, r.match_date, r.kickoff_utc, r.status, r.date_precision))
+            mid = con.execute("select match_id from matches where competition=? and season=? and home_team=?"
+                              " and away_team=? and round=? and leg=?", key).fetchone()[0]
+            con.execute("insert into match_sources values(?,?,?,?,?) on conflict(source,source_key) do update set"
+                        " match_id=excluded.match_id,raw_file=excluded.raw_file,fetched_at_utc=excluded.fetched_at_utc",
+                        (mid, SOURCE, r.source_key, r.raw_file, fetched[r.raw_file]))
+            if r.status != "scheduled":
+                con.execute("insert into match_stats(match_id,source,home_goals,away_goals,result) values(?,?,?,?,?)"
+                            " on conflict(match_id,source) do update set home_goals=excluded.home_goals,"
+                            "away_goals=excluded.away_goals,result=excluded.result",
+                            (mid, SOURCE, r.home_goals, r.away_goals, r.result))
+                con.execute("insert into cup_details values(?,?,?,?,?,?,?,?) on conflict(match_id,source) do update set"
+                            " extra_time=excluded.extra_time,aet_home=excluded.aet_home,aet_away=excluded.aet_away,"
+                            "pen_home=excluded.pen_home,pen_away=excluded.pen_away,note=excluded.note",
+                            (mid, SOURCE, r.extra_time, r.aet_home, r.aet_away, r.pen_home, r.pen_away, r.note or None))
+            con.execute("update match_source_state set source_missing=0,missing_reason=null,restored_at_utc=?"
+                        " where match_id=? and source_missing=1",
+                        (dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), mid))
+            written += 1
+    return {"matches": written, "preserved_rows": preserved, "calendar_complete": None}
+
+
+def import_collected_scope(settings: dict, con: sqlite3.Connection, collected: dict,
+                           today: dt.date) -> dict:
+    """只解析本轮完整采集清单里的页面，不混用目录中的旧子页。"""
+    from src.collect.wikipedia import current_season, file_stem, raw_path, titles_for
+    code, season = collected["competition"], collected["season"]
+    comps = settings["wikipedia"]["competitions"]
+    if not collected.get("complete") or collected.get("status") != "complete":
+        raise ValueError("页面采集不完整，保留旧数据，不开始导入")
+    if code not in comps or season != current_season(today):
+        raise ValueError("自动导入只能使用已配置赛事的当前赛季")
+    pages = [p for p in collected["pages"] if p.get("status") in ("saved", "unchanged")]
+    if not pages:
+        raise ValueError("没有本轮已核验页面，不能把空结果当作完整赛程")
+    raw_root = resolve_path(settings["paths"]["raw"])
+    files = [p["raw_file"] for p in pages]
+    fetched = verified_fetch_times(con, files, raw_root, settings["wikipedia"]["base_url"])
+    for p in pages:
+        if p["raw_file"] not in fetched:
+            raise ValueError("原始页的路径、内容哈希和抓取日志没有对应，停止导入")
+        path = resolve_raw_file(p["raw_file"], raw_root)
+        expected_folder = (raw_root / SOURCE / code / str(season)).resolve()
+        if not path.is_relative_to(expected_folder) or hashlib.sha256(gzip.decompress(path.read_bytes())).hexdigest() != p["sha256"]:
+            raise ValueError("采集清单的页面范围或哈希不一致，停止导入")
+    selected = [(file_stem(p["title"]), resolve_raw_file(p["raw_file"], raw_root)) for p in pages]
+    problems = []
+    comp = comps[code]
+    skip = (list(settings["wikipedia"]["skip_subpages"]) + list(comp.get("skip_subpages_extra", []))
+            + list(settings["wikipedia"].get("import_skip_pages", [])))
+    raws = load_season(raw_root, code, comp, season, titles_for(comp, season), problems, skip, pages=selected)
+    if not raws:
+        raise ValueError("有效页面没有解析到比赛；可能尚未公布或页面结构变化，保留旧数据")
+    team_map = load_team_map(settings)
+    stats = collections.Counter()
+    rows = build_rows(raws, team_map, comps, today, problems, stats)
+    # 超级杯按比赛日归季；若网页内容实际属于另一季，禁止日更越界修改。
+    if any(r.season != season for r in rows):
+        raise ValueError("页面含有当前导入赛季以外的比赛，需独立核验")
+    canonical_fetched = {raw_path(resolve_raw_file(p, raw_root)): when for p, when in fetched.items()}
+    written = write_scoped_database(con, rows, team_map, comps, canonical_fetched, [(code, season)])
+    source_times = []
+    for when in fetched.values():
+        stamp = dt.datetime.fromisoformat(when.replace("Z", "+00:00"))
+        source_times.append(stamp.replace(tzinfo=dt.timezone.utc) if stamp.tzinfo is None
+                            else stamp.astimezone(dt.timezone.utc))
+    return {**written, "parsed": len(raws), "problems": len(problems),
+            "source_changed_at_utc": max(source_times).strftime("%Y-%m-%d %H:%M:%S"),
+            "skipped_no_score": sum(n for (_c, _s, kind), n in stats.items() if kind == "no_score")}
+
+
 # ---------------------------------------------------------------- 全部赛事
 
 def read_all(settings: dict, only: list[str] | None = None) -> tuple[list[RawMatch], list[str]]:
     """读原始层里所有赛事、所有赛季的网页，返回 (比赛列表, 问题清单)。"""
     from src.collect.wikipedia import titles_for   # 页面标题的规则和下载时用同一份
     w = settings["wikipedia"]
+    if only is not None and (not only or any(c not in w["competitions"] for c in only)):
+        raise ValueError("赛事范围不能为空或包含未知赛事")
     raw_root = resolve_path(settings["paths"]["raw"])
     problems: list[str] = []
     out: list[RawMatch] = []
@@ -1596,10 +1809,8 @@ def run(settings: dict | None = None, con: sqlite3.Connection | None = None,
         rows += build_rows(ms, team_map, comps, today, problems, stats)
     con = con or connect()
     create_tables(con)
-    fetched = {}
-    for path, when in con.execute("select file_path, max(fetched_at_utc) from fetch_log "
-                                  "where source = ? and status = 'saved' group by file_path", (SOURCE,)):
-        fetched[path] = when
+    fetched = verified_fetch_times(con, [r.raw_file for r in rows], resolve_path(settings["paths"]["raw"]),
+                                   settings["wikipedia"]["base_url"])
     written = write_database(con, rows, team_map, comps, fetched, codes=list(only) if only else None)
     return {"raws": raws, "rows": rows, "problems": problems, "stats": stats, "written": written,
             "candidates": unmapped_candidates(raws, team_map, comps)}

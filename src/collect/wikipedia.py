@@ -15,7 +15,7 @@ r"""下载维基百科（英文）的杯赛、欧战赛季页面（需求文档 
 
 保存规则（原始层只增不改，和 football_data.py 一样）：
   - 已经踢完的赛季：页面存一次，data/raw/wikipedia/UCL/2008/2008–09_UEFA_Champions_League.html.gz，以后不再下载。
-  - 当前赛季：每次下载存一份带日期的快照 data/raw/wikipedia/UCL/2026/2026–27_UEFA_Champions_League/2026-10-30.html.gz；
+  - 当前赛季：每次下载存一份带 UTC 时间和唯一标识的快照，同一天的重试也不覆盖旧文件；
     和上一份一样就不存，只记“没变化”。
   - 页面用 gzip 压缩保存（需求文档第 17 节“原始页面压缩保存”），解压后就是网站返回的原样 HTML。
   - 每次请求（包括网站没有这个页面）都记进 fetch_log 表，source = 'wikipedia'。
@@ -31,6 +31,7 @@ import logging
 import re
 import time
 import urllib.parse
+import uuid
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -76,6 +77,13 @@ def file_stem(title: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "_", title.replace(" ", "_"))
 
 
+def raw_path(path: Path) -> str:
+    """采集和导入共用项目根路径口径；测试或外置原始层使用绝对路径。"""
+    path = path.resolve()
+    root = PROJECT_ROOT.resolve()
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
+
+
 _LINK = re.compile(r'href="(?:https://en\.wikipedia\.org/wiki/|/wiki/|\./)([^"#?]+)(?:#[^"]*)?"')
 
 
@@ -117,6 +125,7 @@ class WikiDownloader:
         self._last = None
         self.counts: dict[str, int] = {}
         self.today = date.today()
+        self.last_fetch: dict = {}
 
     def _wait_interval(self):
         """顺序请求：离上一次请求不到 min_interval 秒就先等着。"""
@@ -152,17 +161,19 @@ class WikiDownloader:
         return error
 
     def _record(self, url, status, http_status=None, path=None, content=None, note=None):
-        rel = None
-        if path is not None:
-            rel = path.relative_to(PROJECT_ROOT).as_posix() if path.is_relative_to(PROJECT_ROOT) else str(path)
-        self.con.execute(
+        rel = raw_path(path) if path is not None else None
+        when = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        digest = hashlib.sha256(content).hexdigest() if content is not None else None
+        cur = self.con.execute(
             "insert into fetch_log (url, source, data_type, fetched_at_utc, status, http_status, file_path, bytes, sha256, note)"
             " values (?,?,?,?,?,?,?,?,?,?)",
-            (url, SOURCE, "wiki_page", datetime.now(timezone.utc).isoformat(timespec="seconds"), status, http_status, rel,
-             len(content) if content is not None else None,
-             hashlib.sha256(content).hexdigest() if content is not None else None, note))
+            (url, SOURCE, "wiki_page", when, status, http_status, rel,
+             len(content) if content is not None else None, digest, note))
         self.con.commit()
         self.counts[status] = self.counts.get(status, 0) + 1
+        self.last_fetch = {"url": url, "status": status, "http_status": http_status,
+                           "raw_file": rel, "sha256": digest, "fetched_at_utc": when,
+                           "fetch_log_id": cur.lastrowid, "note": note}
 
     def _last_status(self, url):
         row = self.con.execute("select status from fetch_log where url = ? order by id desc limit 1", (url,)).fetchone()
@@ -192,24 +203,77 @@ class WikiDownloader:
             self._record(url, "failed", http_status=r.status_code)
             return "failed", None
         content = r.content   # requests 已经把 gzip 传输解开，这里是网站返回的原样 HTML 字节
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S.%fZ") + "-" + uuid.uuid4().hex
         if b'class="mw-parser-output"' not in content and b"mw-content-text" not in content:
-            target = folder / f"{file_stem(title)}.suspicious.html.gz"   # 不像维基条目页：存下来方便查，但清洗时不用
+            target = snap_dir / f"{stamp}.suspicious.html.gz"   # 可疑响应也保留各次原件，但清洗时不用
             status = "suspicious"
         elif snapshot:
-            files = sorted(snap_dir.glob("*.html.gz")) if snap_dir.exists() else []
+            files = sorted(p for p in snap_dir.glob("*.html.gz")
+                           if not p.name.endswith(".suspicious.html.gz")) if snap_dir.exists() else []
             if files and hashlib.sha256(gzip.decompress(files[-1].read_bytes())).hexdigest() == hashlib.sha256(content).hexdigest():
-                self._record(url, "unchanged", http_status=200, content=content)
+                self._record(url, "unchanged", http_status=200, path=files[-1], content=content,
+                             note=f"title={title}")
                 return "unchanged", content.decode("utf-8")
-            target = snap_dir / f"{self.today:%Y-%m-%d}.html.gz"
+            target = snap_dir / f"{stamp}.html.gz"
             status = "saved"
         else:
             status = "saved"
         target.parent.mkdir(parents=True, exist_ok=True)
         # mtime=0：同样的内容压缩出来的文件也一样，方便比较
-        target.write_bytes(gzip.compress(content, mtime=0))
+        # x 模式保证任何重试、并发或意外重名都不能覆盖旧证据。
+        with target.open("xb") as stream:
+            stream.write(gzip.compress(content, mtime=0))
         self._record(url, status, http_status=200, path=target, content=content,
                      note=f"title={title}")
         return status, content.decode("utf-8") if status == "saved" else None
+
+    def collect_scope(self, code: str, comp: dict, year: int, today: date) -> dict:
+        """日更专用：只取当前赛季，逐页报告；complete 只表示本轮页面遍历完整。
+
+        不用本地旧子页冒充本轮成功。主页面不存在、任一所需子页失败或达到页面上限，
+        都不能授权导入；完整抓取也不保证来源列出了整季赛历。
+        """
+        if year != current_season(today):
+            raise ValueError("杯赛日更范围只能是当前赛季")
+        self.today = today
+        folder = self.raw_dir / code / str(year)
+        report = {"competition": code, "season": year, "status": "failed", "complete": False,
+                  "calendar_complete": None, "pages": [], "errors": []}
+
+        def fetch_page(title):
+            status, html = self.fetch(title, folder, snapshot=True)
+            report["pages"].append({**self.last_fetch, "title": title})
+            return status, html
+
+        main, html = None, None
+        for title in titles_for(comp, year):
+            _, html = fetch_page(title)
+            if html is not None:
+                main = canonical_title(html) or title
+                break
+        if main is None:
+            report["errors"].append("主页面没有取得有效内容")
+            return report
+        skip = list(self.w["skip_subpages"]) + list(comp.get("skip_subpages_extra", []))
+        queue, seen = find_subpages(html, main, skip), {main, title}
+        attempted_subpages = 0
+        while queue:
+            sub = queue.pop(0)
+            if sub in seen:
+                continue
+            if attempted_subpages >= int(self.w["max_subpages"]):
+                report["errors"].append("达到子页面上限，仍有页面未检查")
+                break
+            seen.add(sub)
+            attempted_subpages += 1
+            status, sub_html = fetch_page(sub)
+            if sub_html is None:
+                report["errors"].append(f"子页面未完成：{sub} ({status})")
+                continue
+            queue.extend(t for t in find_subpages(sub_html, main, skip) if t not in seen)
+        report["complete"] = not report["errors"]
+        report["status"] = "complete" if report["complete"] else "partial"
+        return report
 
     def run_competition(self, code: str, comp: dict, year: int, this_season: int) -> int:
         """下载一个赛事一个赛季：主页面 + 子页面。返回下载到（或本地已有）的页面数。"""
@@ -239,7 +303,11 @@ class WikiDownloader:
         self.today = today
         this = current_season(today)
         comps = settings["wikipedia"]["competitions"]
-        years = seasons or list(range(settings["wikipedia"]["first_season"], this + 1))
+        if only is not None and (not only or any(c not in comps for c in only)):
+            raise ValueError("赛事范围不能为空或包含未知赛事")
+        if seasons is not None and not seasons:
+            raise ValueError("赛季范围不能为空")
+        years = seasons if seasons is not None else list(range(settings["wikipedia"]["first_season"], this + 1))
         for code, comp in comps.items():
             if only and code not in only:
                 continue
