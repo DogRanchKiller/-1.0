@@ -24,6 +24,8 @@ m.dongqiudi.com 只禁 /_s/，api.dongqiudi.com 全部允许），有 20 家左�
     odds_final/<联赛>/<赛季>/<比赛编号>.json.gz    踢完以后的赔率（初盘 + 收盘，只存一次）
     odds_live/<联赛>/<比赛编号>/<抓取时间>.json.gz  赛前赔率快照（变了才存）
     match_detail/<联赛>/<赛季>/<比赛编号>.html.gz  踢完以后的比赛详情页（xG、射门等技术统计，只存一次）
+    lineup_live/<联赛>/<比赛编号>/<抓取时间>.html.gz  赛前首发页快照（开球前几小时内每小时看一次，名单变了才存）
+    lineup_final/<联赛>/<赛季>/<比赛编号>.html.gz  踢完以后的首发页（实际首发和替补，只存一次）
     *.suspicious.*                                  内容可疑的文件（例如返回了别的比赛），照存方便查，清洗时不用
 """
 import argparse
@@ -39,7 +41,8 @@ from urllib.parse import quote
 
 import requests
 
-from src.clean.dongqiudi_reader import parse_fixtures, parse_history, next_start, parse_season_page, read_json
+from src.clean.dongqiudi_reader import (lineup_fingerprint, next_start, parse_fixtures, parse_history, parse_lineup,
+                                        parse_season_page, read_json)
 from src.common.config import PROJECT_ROOT, load_settings, resolve_path
 from src.common.db import connect
 
@@ -51,6 +54,7 @@ FIXTURES_URL = "https://api.dongqiudi.com/data/tab/league/new/{league_id}?start=
 ODDS_URL = ("https://sport-data.dongqiudi.com/soccer/biz/dqd/v1/match/odds/index/{match_id}"
             "?app=dqd&lang=zh-cn&cmp_type=&platform=android")
 DETAIL_URL = "https://m.dongqiudi.com/matchDetail/{match_id}"   # 比赛详情页（公开网页，robots.txt 允许）
+LINEUP_URL = DETAIL_URL + "/lineup"                               # 首发页（同上，公开网页）
 
 log = logging.getLogger("dongqiudi")
 
@@ -216,11 +220,14 @@ class Collector:
         return self.con.execute(sql + " order by id desc limit 1", args).fetchone()
 
     # ---------- 抓一个网址 ----------
-    def fetch(self, url, data_type, target: Path, check, once: bool, retry_bad=False):
+    def fetch(self, url, data_type, target: Path, check, once: bool, retry_bad=False, judge=None):
         """抓一个网址，压缩保存到 target。返回 (状态, 内容)；内容只在“已保存”“没变化”时有。
 
         once=True：踢完的东西不会再变，target 已经有了就不再请求；以前“网站没有”“内容可疑”的也跳过（retry_bad 除外）。
         once=False：快照，和这个网址上一次的内容一样就不存，只记“没变化”。
+        judge：内容检查通过后，再由它决定存不存（首发页用）：返回 None = 照常存；
+        返回 ("unchanged", 说明) = 和上一份一样，不存；返回 ("not_found", 说明) = 页面正常但还没有我们要的东西，不存。
+        给了 judge 就不再按整页内容比“没变化”（首发页里的直播间、时间戳每次都会变）。
         """
         if once:
             if target.exists():
@@ -246,7 +253,11 @@ class Collector:
         if problem:
             target = target.with_name(target.name.split(".")[0] + ".suspicious." + target.name.split(".", 1)[1])
             status = "suspicious"
-        elif not once and (last := self._last(url, data_type, ("saved", "unchanged"))) \
+        elif judge is not None and (verdict := judge(content)) is not None:
+            status, note = verdict
+            self._record(url, data_type, status, http_status=200, content=content, note=note)
+            return status, (content if status == "unchanged" else None)
+        elif judge is None and not once and (last := self._last(url, data_type, ("saved", "unchanged"))) \
                 and last[1] == hashlib.sha256(content).hexdigest():
             self._record(url, data_type, "unchanged", http_status=200, content=content)
             return "unchanged", content
@@ -305,6 +316,40 @@ class Collector:
                                lambda c: check_odds(c, match_id), once=False)
         return status
 
+    def _lineup_judge(self, folder: Path | None):
+        """首发页存不存（给 fetch 的 judge）：还没有球员 → 不存，记“网站没有”（首发还没出）；
+        folder 给了时，和这场最近存的一份名单一样 → 不存，记“没变化”。"""
+        def judge(content: bytes):
+            try:
+                lu = parse_lineup(content.decode("utf-8", "replace"))
+                if lu is None or not lu.players:
+                    return "not_found", "页面上还没有首发"
+                files = sorted(f for f in folder.glob("*.html.gz") if ".suspicious." not in f.name) \
+                    if folder is not None and folder.exists() else []
+                if files:
+                    old = parse_lineup(gzip.decompress(files[-1].read_bytes()).decode("utf-8", "replace"))
+                    if old is not None and lineup_fingerprint(old) == lineup_fingerprint(lu):
+                        return "unchanged", None
+            except Exception as err:   # 页面结构变了等意外：记“失败”，下次再看；不让每小时任务停下
+                return "failed", f"首发页读不懂：{type(err).__name__}"
+            return None
+        return judge
+
+    def lineup_live(self, league: str, match_id: int) -> str:
+        """赛前首发页快照：名单变了才存（懂球帝先给“预计首发”，以后可能换成正式的）。"""
+        folder = self.out / "lineup_live" / league / str(match_id)
+        status, _ = self.fetch(LINEUP_URL.format(match_id=match_id), "lineup_live", folder / f"{stamp(self.now())}.html.gz",
+                               lambda c: check_detail(c, match_id), once=False, judge=self._lineup_judge(folder))
+        return status
+
+    def lineup_final(self, league: str, season: int, match_id: int, retry_bad=False) -> str:
+        """踢完以后的首发页（实际首发、替补、换人），只存一次。"""
+        target = self.out / "lineup_final" / league / str(season) / f"{match_id}.html.gz"
+        status, _ = self.fetch(LINEUP_URL.format(match_id=match_id), "lineup_final", target,
+                               lambda c: check_detail(c, match_id), once=True, retry_bad=retry_bad,
+                               judge=self._lineup_judge(None))
+        return status
+
     def fixtures(self, league: str, start: datetime, until: datetime, max_pages: int | None = None) -> list:
         """从 start 那天起翻赛程，翻到 until 之后或没有下一页为止（最多 max_pages 页，默认 max_fixture_pages）。"""
         league_id = self.cfg["league_ids"][league]
@@ -327,9 +372,9 @@ class Collector:
                 break
         return out
 
-    def _due(self, url: str, gap_hours: float) -> bool:
+    def _due(self, url: str, gap_hours: float, data_type: str = "odds_live", statuses=("saved", "unchanged")) -> bool:
         """离上次成功抓这个网址（快照）是否已经过了 gap_hours 小时。留 10 分钟余量，免得定时任务稍早几分钟就跳过。"""
-        last = self._last(url, "odds_live", ("saved", "unchanged"))
+        last = self._last(url, data_type, statuses)
         if not last:
             return True
         return self.now() - datetime.fromisoformat(last[2]) >= timedelta(hours=gap_hours) - timedelta(minutes=10)
@@ -342,6 +387,7 @@ class Collector:
             self.odds_final(league, season, f.match_id)
             if self.now() - f.kickoff_utc >= timedelta(hours=self.cfg["detail_after_hours"]):
                 self.match_detail(league, season, f.match_id)
+                self.lineup_final(league, season, f.match_id)
             return True
         return False
 
@@ -355,17 +401,28 @@ class Collector:
             games = self.fixtures(lg, now - timedelta(days=self.cfg["upcoming_lookback_days"]),
                                   now + timedelta(days=self.cfg["upcoming_ahead_days"]))
             n_live = n_final = 0
+            lineup_due = []
             for f in games:
                 if self._final_if_done(lg, season, f):
                     n_final += 1
                     continue
                 if f.status != "Fixture" or f.kickoff_utc is None or f.kickoff_utc <= now:
                     continue  # 正在踢、延期、或者刚开球还没踢完：不抓快照
-                gap = snapshot_gap((f.kickoff_utc - now).total_seconds() / 3600, rules)
+                hours = (f.kickoff_utc - now).total_seconds() / 3600
+                gap = snapshot_gap(hours, rules)
                 if gap is not None and self._due(ODDS_URL.format(match_id=f.match_id), gap):
                     self.odds_live(lg, f.match_id)
                     n_live += 1
-            log.info("%s：赛程 %d 场，赔率快照 %d 场，最终赔率检查 %d 场", lg, len(games), n_live, n_final)
+                # 首发页：开球前 lineup_hours_before 小时以内，每 lineup_every_hours 小时看一次（“还没出”也算看过）
+                if hours <= self.cfg["lineup_hours_before"] and self._due(
+                        LINEUP_URL.format(match_id=f.match_id), self.cfg["lineup_every_hours"], "lineup_live",
+                        ("saved", "unchanged", "not_found")):
+                    lineup_due.append(f.match_id)
+            # 首发放在这个联赛的赔率都抓完以后：首发页出问题也不耽误赔率
+            for mid in lineup_due:
+                self.lineup_live(lg, mid)
+            log.info("%s：赛程 %d 场，赔率快照 %d 场，首发页 %d 场，最终赔率检查 %d 场",
+                     lg, len(games), n_live, len(lineup_due), n_final)
 
     def backfill(self, leagues: list[str], first: int, last: int | None = None, retry_bad=False,
                  limit: int | None = None):

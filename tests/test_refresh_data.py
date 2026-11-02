@@ -135,6 +135,9 @@ def test_bad_fetch_cannot_look_like_a_successful_refresh(monkeypatch, tmp_path, 
 @pytest.mark.parametrize("status,data_type,content", [
     ("saved", "fixtures", b"data"), ("unchanged", "odds_live", b"data"),
     ("not_found", "odds_final", None), ("skipped", "match_detail", None),
+    # 首发页只显示用：没抓到、可疑、还没出都不能卡住赔率导入
+    ("failed", "lineup_live", None), ("suspicious", "lineup_live", None), ("not_found", "lineup_live", None),
+    ("failed", "lineup_final", None),
 ])
 def test_unchanged_or_optional_missing_data_does_not_break_refresh(monkeypatch, tmp_path, status, data_type, content):
     """赔率没变化仍是成功；历史单场赔率或详情源本来没有，也不该永远卡住每小时入库。"""

@@ -531,6 +531,22 @@ class FeatureStore:
             order by o.product, o.handicap, o.fetched_at_utc, o.rowid"""
         return pd.read_sql(sql, self.conn, params=params)
 
+    def lineups(self, match_id: int, cutoff, usage: str) -> pd.DataFrame:
+        """本场的首发名单（懂球帝），只能显示、复盘。截止时间之前看到过的每份名单都给，一位球员一行。
+
+        能知道的时间 = 我们第一次看到这份名单的时间（fetched_at_utc）；同一份名单的球员行时间一样。
+        要“当时最新的一份”：取 fetched_at_utc 最大的那些行。
+        """
+        cutoff = to_utc_text(cutoff)
+        self._target(match_id, cutoff, usage, ["懂球帝首发"])
+        sql = """
+            select l.match_id, l.source, l.fetched_at_utc, l.match_status, l.new_lineup, l.side, l.role, l.person_id,
+                   l.name, l.shirt_number, l.position, l.position_code, l.formation_place, l.captain,
+                   l.fetched_at_utc as known_at_utc
+            from lineups l where l.match_id = ? and l.fetched_at_utc <= ?
+            order by l.fetched_at_utc, l.side desc, l.role desc, l.formation_place, l.rowid"""
+        return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff])
+
     def historical_odds(self, cutoff, usage: str, timing: str = "pre", competition=None, bookmaker=None,
                         market=None, since=None) -> pd.DataFrame:
         """以前比赛的赔率（截止时间之前已经踢完、比分已经能知道的联赛比赛）。B 版训练、回测里选融合权重用。

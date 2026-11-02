@@ -204,7 +204,7 @@ def test_import_and_marker_roll_back_together(con, importer, transition):
         incoming = [("B", "C", 4, 0)]
     con.commit()
     tables = ("teams", "team_names", "matches", "match_sources", "match_stats", "cup_details",
-              "odds", "odds_changes", "lottery_odds", "predictions", "match_source_state")
+              "odds", "odds_changes", "lottery_odds", "lineups", "predictions", "match_source_state")
     before = {t: records(con, t) for t in tables}
     with pytest.raises(sqlite3.IntegrityError, match="synthetic rollback"):
         importer.write(con, incoming)

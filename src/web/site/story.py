@@ -20,9 +20,9 @@ from src.common import markets
 from src.common.odds import devig
 from src.web.explanation import validate_explanation
 from src.web.preview_page import ah_text
-from src.web.site.common import OUTCOMES, bar_html, e, level_name, pct0, pct1
+from src.web.site.common import OUTCOMES, bar_html, bj_text, e, level_name, pct0, pct1
 from src.web.site.data import SiteData
-from src.web.site.match import final_probs, fusion, version_matrices
+from src.web.site.match import final_probs, fusion, latest_lineup, lineup_schedule, version_matrices
 
 # 降级候选因素的中文名（src/predict 存的“降级候选因素”里的键）
 FACTOR_NAMES = {"gap": "模型和赔率分歧大", "early": "赛季前几轮", "promoted": "有升班马", "no_pinnacle": "没有平博赔率",
@@ -361,6 +361,15 @@ def cutoff_move(odds, cutoff) -> tuple[np.ndarray, np.ndarray, int] | None:
     return p0, p1, len(first)
 
 
+def lineup_seen(data: SiteData, mid: int) -> str:
+    """“伤停与首发”里的一句：懂球帝有没有首发、是哪一种、什么时候看到的（名单本身在下面“首发名单”里）。"""
+    got = latest_lineup(data, mid)
+    if got is None:
+        return e(f"懂球帝还没有这场的首发名单（{lineup_schedule(data)}）。")
+    last, label = got
+    return e(f"已经有{label}，{bj_text(last.iloc[0]['fetched_at_utc'])}（北京时间）看到，名单在下面“首发名单（懂球帝）”里。")
+
+
 def analysis_html(data: SiteData, mid: int, row: dict, home: str, away: str) -> str:
     """四块分析，两列卡片。哪一块没有数据就写清楚没有，不编。"""
     hn, an = data.zh(home), data.zh(away)
@@ -370,8 +379,9 @@ def analysis_html(data: SiteData, mid: int, row: dict, home: str, away: str) -> 
     blocks = [
         ("实力对比", strength_block(v, hn, an) or no_terms),
         ("近期状态与赛程", form_block(v, hn, an) or no_terms),
-        ("伤停与首发", _li(["模型现在不看伤停和首发（还没有可靠的免费数据接进来）。"
+        ("伤停与首发", _li(["模型现在不看伤停和首发。"
                             + ("这一版出的时候没有首发信息。" if lineup == "未含首发" else ""),
+                            lineup_seen(data, mid),
                             "赔率会很快反映伤停和首发消息，合并后的概率里间接包含了这部分。"])),
         ("盘口与水位解读", odds_block(data, mid, row, hn, an) or "<p class='small muted'>还没有盘口数据。</p>"),
     ]

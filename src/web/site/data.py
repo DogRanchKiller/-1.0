@@ -4,7 +4,7 @@
 1. 预测存档 predictions 表（接口 1）：同一场、同一模型、模型版本、预测时点取 prediction_id 最大的那行。
    detail 里的键：预览版（preview）的“融合概率”“融合”（倾向、信心等级、不确定因素）等；定时版本（T-24 / T-6 / T-1）另有
    “计划时点”“晚了几分钟”“模型比分矩阵”“融合比分矩阵”“首发”。矩阵只读不算：没存矩阵的版本，页面上写“这一版没有存比分矩阵”。
-2. 数据库里的赛程、变盘记录、竞彩赔率：经过取数层（src/features 的 FeatureStore，实时模式），用途「显示」（config/data_usage.yaml）。
+2. 数据库里的赛程、变盘记录、竞彩赔率、懂球帝首发：经过取数层（src/features 的 FeatureStore，实时模式），用途「显示」（config/data_usage.yaml）。
    比分（赛后才有的答案）在数据字典里没有「显示」这个用途，网站上的比分是赛后和预测对照着看的，按「复盘」取。
    中文队名、比赛状态（改期、取消）和预览页一样直接读 teams、matches 表（只给人看，不进模型）。
 3. data/review/（接口 3，K2 写）：scores.csv、matches/<match_id>.json、reports/。文件不存在时页面上写“还没有复盘数据”。
@@ -43,6 +43,7 @@ class SiteData:
     result_notes: dict[int, str] = field(default_factory=dict)     # 赛果来源缺失时保留最后已知资料的提醒
     odds: dict[int, pd.DataFrame] = field(default_factory=dict)   # 开球前的变盘记录（用途「显示」）
     lottery: dict[int, pd.DataFrame] = field(default_factory=dict)
+    lineups: dict[int, pd.DataFrame] = field(default_factory=dict)  # 懂球帝首发名单（用途「显示」；截止现在看到过的每一份）
     team_zh: dict[str, str] = field(default_factory=dict)
     schedule: pd.DataFrame | None = None                          # 最近一段时间已经开球的赛程（联赛 + 杯赛、欧战）
     scores: pd.DataFrame | None = None                            # data/review/scores.csv；没有是 None
@@ -381,4 +382,16 @@ def load(con, settings: dict, now: datetime) -> SiteData:
             data.lottery[mid] = fs.lottery_odds(mid, nowt, "显示")
         except (FeatureAccessError, ValueError) as err:
             data.notes.append(f"比赛 {mid} 的赔率取不到：{str(err).splitlines()[0]}")
+
+    # 8. 要做单场页的比赛的首发名单（懂球帝，用途「显示」）。首发表是后来加的：数据库里还没有这张表时
+    #    （导入程序还没运行过）就当没有首发，不报错。
+    if con.execute("select 1 from sqlite_master where type = 'table' and name = 'lineups'").fetchone():
+        for mid in sorted(data.page_ids):
+            try:
+                lu = fs.lineups(mid, nowt, "显示")
+            except (FeatureAccessError, ValueError) as err:
+                data.notes.append(f"比赛 {mid} 的首发取不到：{str(err).splitlines()[0]}")
+                continue
+            if not lu.empty:
+                data.lineups[mid] = lu
     return data

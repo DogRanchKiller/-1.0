@@ -22,6 +22,13 @@ r"""读懂球帝的原始文件（需求文档 6.2、第 17 节）。这里只�
    team_A 是主队、team_B 是客队。页面开头的 <div data-id="比赛编号" class="matchd"> 用来确认是不是这一场。
    JSON 里的 match.id 比网址里的编号少 50000000（例如网址 54483744，里面写 4483744），不用它对。
    xG 大约从 2025 年 12 月起才有（英超 2025-11-30 没有、12-03 起有；别的联赛没逐场查），更早的比赛统计里没有这一项。
+6. 首发页 /matchDetail/<比赛编号>/lineup（网页）：同样有 window.__INITIAL_STATE__，
+   其中 matchContentStore.matchLineupData 有两队首发（info.lineup，每行一个主队球员 team_A、一个客队球员 team_B，
+   两边各自按球员编号排，不是按位置配对）和替补（info.sub，赛后才看到；一行可能只有一边）。
+   info.base.new_lineup：2026-11-02 看到开球前约 2 小时是 1（位置只有英文大类、没有站位），赛后是 0
+   （位置是中文、有站位代码 GK / D1 / DM / AM / A 加 C / CL / CR / L / R）。
+   我们把 1 当作“懂球帝预计的首发（不是官方公布）”。官方首发出来以后这个值会不会变、什么时候变，还在核实（需求文档 6.5）。
+   球员名字里偶尔夹着看不见的字符（零宽空格），读的时候去掉。
 """
 import gzip
 import json
@@ -291,3 +298,103 @@ def detail_columns(d: MatchDetail) -> dict[str, float | int | None]:
         h, a = d.stats.get(name, (None, None))
         out[f"home_{col}"], out[f"away_{col}"] = h, a
     return out
+
+
+# ---------- 首发页 ----------
+# 位置大类统一成中文：赛前页面是英文（Goalkeeper……），赛后是中文（门将……）；per_posithion 里守门员写作“守门员”
+POSITION_ZH = {"goalkeeper": "门将", "defender": "后卫", "midfielder": "中场", "attacker": "前锋",
+               "门将": "门将", "守门员": "门将", "后卫": "后卫", "中场": "中场", "前锋": "前锋"}
+INVISIBLE = "\u200b\u200c\u200d\u2060\ufeff"   # 零宽空格之类看不见的字符
+
+
+@dataclass
+class LineupPlayer:
+    side: str                    # home 主队 / away 客队
+    role: str                    # starter 首发 / sub 替补
+    person_id: int | None        # 懂球帝的球员编号
+    name: str                    # 中文名
+    shirt_number: str            # 球衣号码（文字，可能是空的）
+    position: str                # 门将 / 后卫 / 中场 / 前锋；页面没写或不认识的是 ''
+    position_code: str           # 站位代码，例如 D1-CL（赛前常常没有，是 ''）
+    formation_place: int | None  # 阵型里的第几个位置（1 = 门将；替补是 0）
+    captain: bool
+
+
+@dataclass
+class Lineup:
+    page_id: int | None          # 页面开头 data-id 写的比赛编号（和网址里的一样）
+    status: str                  # Fixture 没踢 / Played 踢完 / ……
+    home: str                    # 中文队名（team_A 主队、team_B 客队）
+    away: str
+    new_lineup: int | None       # info.base.new_lineup：1 = 懂球帝预计的首发（见文件开头第 6 条）
+    players: list[LineupPlayer]
+
+    def count(self, side: str, role: str = "starter") -> int:
+        return sum(1 for p in self.players if p.side == side and p.role == role)
+
+
+def _clean_name(v) -> str:
+    text = str(v or "")
+    for ch in INVISIBLE:
+        text = text.replace(ch, "")
+    return text.strip()
+
+
+def _player(p: dict, side: str, role: str) -> LineupPlayer | None:
+    if not isinstance(p, dict) or not _clean_name(p.get("person")):
+        return None
+    code = "-".join(str(p[k]) for k in ("position_x", "position_y") if p.get(k))
+    return LineupPlayer(side, role, _int(p.get("person_id")), _clean_name(p.get("person")),
+                        str(p.get("shirtnumber") or "").strip(),
+                        POSITION_ZH.get(str(p.get("position") or "").strip().lower(), ""),
+                        code, _int(p.get("formation_place")), str(p.get("captain")) == "1")
+
+
+def _dict(v) -> dict:
+    """是字典就原样返回，不是（网站改了结构、写成别的东西）就当空字典，免得后面 .get 出错。"""
+    return v if isinstance(v, dict) else {}
+
+
+def parse_lineup(html: str) -> Lineup | None:
+    """首发页 → Lineup；页面里没有首发数据的结构（拦截页、错误页）返回 None。
+    结构在、但还没有球员（首发还没出）的，返回球员是空列表的 Lineup。
+    每一层都先检查是不是字典 / 列表：网站改了结构时只是读不出来，不会让每小时任务出错停下。"""
+    data = _dict(_dict(_dict(initial_state(html)).get("matchContentStore")).get("matchLineupData"))
+    match = data.get("match")
+    if not isinstance(match, dict):
+        return None
+    info = _dict(data.get("info"))
+    players = []
+    for key, role in (("lineup", "starter"), ("sub", "sub")):
+        rows = info.get(key)
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            for team, side in (("team_A", "home"), ("team_B", "away")):
+                p = _player(row.get(team), side, role)
+                if p is not None:
+                    players.append(p)
+    m = DETAIL_ID_RE.search(html)
+    a, b, base = _dict(match.get("team_A")), _dict(match.get("team_B")), _dict(info.get("base"))
+    return Lineup(int(m.group(1)) if m else None, str(match.get("status", "")),
+                  _clean_name(a.get("name")), _clean_name(b.get("name")), _int(base.get("new_lineup")), players)
+
+
+def lineup_fingerprint(lu: Lineup) -> str:
+    """名单的“指纹”：预计 / 不是预计、两队首发和替补（编号、名字、号码、位置、队长）。
+    指纹一样就算名单没变，不再存新的一份（页面里别的东西，例如直播间、时间戳，每次都会变，不能按整页比）。"""
+    rows = sorted((p.side, p.role, p.person_id or 0, p.name, p.shirt_number, p.position, p.position_code,
+                   p.formation_place or 0, p.captain) for p in lu.players)
+    return json.dumps([lu.new_lineup, rows], ensure_ascii=False)
+
+
+def lineup_kind(new_lineup: int | None, status: str) -> str:
+    """这份名单算哪一种（网页上这样写）：
+    - 赛后的页面（比赛踢完）：实际首发
+    - new_lineup = 1：懂球帝预计的首发，不是官方公布的
+    - 其他：懂球帝写的首发（是不是官方公布的还没核实，见需求文档 6.5）"""
+    if status == "Played":
+        return "实际首发"
+    if new_lineup == 1:
+        return "预计首发"
+    return "首发"

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from src.common import markets
+from src.clean.dongqiudi_reader import lineup_kind
 from src.common.odds import devig
 from src.features.usage import season_label
 from src.web.explanation import EXPLANATION_CSS, render_explanation
@@ -414,6 +415,63 @@ def lottery_html(data: SiteData, mid: int) -> str:
     return table(["玩法", "让球", "主胜 / 平 / 客胜", "抓到的时间"], rows)
 
 
+# ---------- 首发名单（懂球帝） ----------
+LINEUP_LABELS = {"预计首发": "懂球帝预计首发（网站猜的，不是官方公布）",
+                 "首发": "懂球帝首发（是不是官方公布还没核实）",
+                 "实际首发": "赛后实际首发"}
+
+
+def lineup_schedule(data: SiteData) -> str:
+    """“开球前 6 小时内每 1 小时看一次”：数字从 settings.yaml 的 dongqiudi 段读，改了设置页面跟着变。"""
+    cfg = data.settings.get("dongqiudi") or {}
+    return f"开球前 {cfg.get('lineup_hours_before', '—')} 小时内每 {cfg.get('lineup_every_hours', '—')} 小时看一次懂球帝"
+
+
+def latest_lineup(data: SiteData, mid: int) -> tuple[pd.DataFrame, str] | None:
+    """截止现在看到的最新一份首发名单和它的说法（见 LINEUP_LABELS）。没有就是 None。"""
+    lu = data.lineups.get(mid)
+    if lu is None or lu.empty:
+        return None
+    last = lu[lu["fetched_at_utc"] == lu["fetched_at_utc"].max()]
+    r = last.iloc[0]
+    new_lineup = None if pd.isna(r["new_lineup"]) else int(r["new_lineup"])
+    return last, LINEUP_LABELS[lineup_kind(new_lineup, r["match_status"])]
+
+
+def _players(df: pd.DataFrame) -> str:
+    """一队的名单：号码、名字、位置，队长标“（队长）”。名字来自网站，转义后再放进网页。"""
+    if df.empty:
+        return "—"
+    items = []
+    for r in df.itertuples(index=False):
+        num = f"{r.shirt_number} " if isinstance(r.shirt_number, str) and r.shirt_number else ""
+        pos = f"（{r.position}）" if isinstance(r.position, str) and r.position else ""
+        cap = "（队长）" if r.captain else ""
+        items.append(f"<li>{e(num + r.name + pos + cap)}</li>")
+    return "<ul class='points'>" + "".join(items) + "</ul>"
+
+
+def lineup_html(data: SiteData, mid: int, home: str, away: str) -> str:
+    """最新一份首发名单：主客队两列，首发在上、替补在下。模型不用首发，这里只给人看。"""
+    got = latest_lineup(data, mid)
+    if got is None:
+        return placeholder(f"还没有首发名单（{lineup_schedule(data)}）")
+    last, label = got
+    rows = []
+    for role, name in (("starter", "首发"), ("sub", "替补")):
+        part = last[last["role"] == role]
+        if part.empty:
+            continue
+        rows.append([e(name), _players(part[part["side"] == "home"]), _players(part[part["side"] == "away"])])
+    # 开球前存了几份：只数赛前的（赛后那份是实际首发，不算“开球前变过”）
+    allv = data.lineups[mid]
+    n = allv.loc[allv["match_status"] != "Played", "fetched_at_utc"].nunique()
+    note = (f"{label}；{bj_text(last.iloc[0]['fetched_at_utc'])}（北京时间）看到的。"
+            + (f"开球前名单变过 {n - 1} 次，这里是最新一份。" if n > 1 else "")
+            + "模型现在不用首发，只给你参考。")
+    return table(["", data.zh(home), data.zh(away)], rows) + f"<p class='small muted'>{e(note)}</p>"
+
+
 # ---------- 赛后复盘 ----------
 def json_html(x, depth: int = 0) -> str:
     """把复盘 JSON（格式由 K2 定）照原样排成网页：字典 → 两列，列表 → 一行一项，字典组成的列表 → 表格。"""
@@ -531,6 +589,7 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         details("赔率变动", odds_html(data, mid)),
         details("各家公司的初盘和最新价格", books_html(data, mid)),
         details("竞彩赔率", lottery_html(data, mid)),
+        details("首发名单（懂球帝）", lineup_html(data, mid, info["home_team"], info["away_team"])),
         details("赛后复盘", review_html(data, mid), open_=has_review),
         details("模型依据（逐场贡献解释，完整版）", explanations_html(data, mid)),
         details("流程记录和技术细节（模型版本、归档状态、逐场验收）", tech),

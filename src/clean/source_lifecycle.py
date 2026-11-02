@@ -95,7 +95,7 @@ def reconcile_source_lifecycle(con: sqlite3.Connection, previous_sources: dict[i
         f" where match_id in ({restoring})", (now,)).rowcount
 
     # 无预测的垃圾不因这次保护而永久堆积；先清理派生子表，兼容启用外键的连接。
-    for table in (*RESULT_TABLES, "odds", "odds_changes", "lottery_odds", "match_source_state"):
+    for table in (*RESULT_TABLES, "odds", "odds_changes", "lottery_odds", "lineups", "match_source_state"):
         con.execute(f"delete from {table} where match_id in ({UNPREDICTED_MISSING})")
     deleted = con.execute(f"delete from matches where match_id in ({UNPREDICTED_MISSING})").rowcount
     unmatched = con.execute("select count(distinct match_id) from predictions"

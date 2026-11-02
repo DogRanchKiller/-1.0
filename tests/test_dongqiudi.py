@@ -6,10 +6,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.clean.dongqiudi_reader import (asia_line, count_game_rows, detail_columns, next_start, ou_line, parse_fixtures,
-                                        parse_history, parse_match_detail, parse_odds, parse_season_page, resolve_ts)
-from src.collect.dongqiudi import (DETAIL_URL, FIXTURES_URL, HISTORY_URL, ODDS_URL, SEASON_URL, Blocked, Collector,
-                                   check_detail, check_odds, snapshot_gap, spread)
+from src.clean.dongqiudi_reader import (asia_line, count_game_rows, detail_columns, lineup_kind, next_start, ou_line,
+                                        parse_fixtures, parse_history, parse_lineup, parse_match_detail, parse_odds,
+                                        parse_season_page, resolve_ts)
+from src.collect.dongqiudi import (DETAIL_URL, FIXTURES_URL, HISTORY_URL, LINEUP_URL, ODDS_URL, SEASON_URL, Blocked,
+                                   Collector, check_detail, check_odds, snapshot_gap, spread)
 from src.common.db import connect
 
 UTC = timezone.utc
@@ -149,7 +150,7 @@ class Clock:
 
 CFG = {"min_interval_seconds": 0, "league_ids": {"E0": 4}, "upcoming_lookback_days": 3, "upcoming_ahead_days": 8,
        "max_fixture_pages": 4, "odds_snapshot_rules": [[6, 1], [48, 3], [192, 12]], "final_after_hours": 3,
-       "detail_after_hours": 6}
+       "detail_after_hours": 6, "lineup_hours_before": 6, "lineup_every_hours": 1}
 
 
 @pytest.fixture
@@ -351,12 +352,13 @@ def test_upcoming_fetches_detail_after_hours(env):
         site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
         site.pages[DETAIL_URL.format(match_id=mid)] = (200, detail_html(mid))
     c.upcoming(["E0"])
-    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=1)]
+    # 详情页之后紧接着抓一次赛后首发页（假网站没有首发页，记“网站没有”）
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=1), LINEUP_URL.format(match_id=1)]
     assert (out / "match_detail/E0/2026/1.html.gz").exists()
     site.requests.clear()
     clock.t = now + timedelta(hours=3)
     c.upcoming(["E0"])
-    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=2)]
+    assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=2), LINEUP_URL.format(match_id=2)]
 
 
 def test_detail_backfill_since_and_stop(env):
@@ -391,3 +393,144 @@ def test_detail_backfill_since_and_stop(env):
     with pytest.raises(Blocked):                             # 再加上 101：连着 3 场拦截页 → 停
         c.detail_backfill(["E0"], date(2023, 8, 1), retry_bad=True)
     assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=m) for m in (103, 102, 101)]
+
+
+# ---------- 首发页 ----------
+def lineup_players(prefix, n, sub=False):
+    """一队 n 个假球员。首发第一个是门将；替补的 formation_place 是 0。"""
+    out = []
+    for i in range(n):
+        out.append({"person_id": 50000000 + i + (100 if sub else 0) + (1000 if prefix == "客" else 0),
+                    "person": f"{prefix}{'替' if sub else ''}{i + 1}", "captain": 1 if (i == 3 and not sub) else 0,
+                    "shirtnumber": str(i + 1), "position_x": None, "position_y": None,
+                    "formation_place": 0 if sub else i + 1, "events": [],
+                    "position": "Goalkeeper" if i == 0 else "Midfielder"})
+    return out
+
+
+def lineup_html(page_id, new_lineup=1, status="Fixture", home="甲", away="乙", starters=11, subs=0, home_extra=None):
+    """假的首发页：和真网页一样，开头有 data-id，数据在 window.__INITIAL_STATE__ 的 matchLineupData 里。"""
+    a, b = lineup_players("主", starters), lineup_players("客", starters)
+    if home_extra:
+        a[1]["person"] = home_extra
+    info = {"base": {"new_lineup": new_lineup, "weather": "阴"},
+            "lineup": [{"team_A": x, "team_B": y} for x, y in zip(a, b)]}
+    if subs:
+        info["sub"] = [{"team_B": y, "team_A": x} for x, y in zip(lineup_players("主", subs, True),
+                                                                   lineup_players("客", subs, True))]
+    state = {"matchContentStore": {"matchLineupData": {
+        "match": {"id": str(page_id - 50000000), "status": status, "team_A": {"name": home}, "team_B": {"name": away}},
+        "info": info, "per_posithion": {"goalkeeper": "守门员"}}}}
+    return (f'<html><div data-id="{page_id}" class="matchd"></div><script>window.__INITIAL_STATE__='
+            f'{json.dumps(state, ensure_ascii=False)};(function(){{}})()</script>'
+            f'<p>直播间 {page_id}-{new_lineup}-{starters}-{id(state)}</p></html>').encode()
+
+
+def test_parse_lineup():
+    lu = parse_lineup(lineup_html(54470959, home_extra="辛克格拉诺\u200b").decode())
+    assert (lu.page_id, lu.status, lu.home, lu.away, lu.new_lineup) == (54470959, "Fixture", "甲", "乙", 1)
+    assert lu.count("home") == 11 and lu.count("away") == 11 and lu.count("home", "sub") == 0
+    gk = lu.players[0]
+    assert (gk.side, gk.role, gk.name, gk.shirt_number, gk.position, gk.formation_place) == \
+        ("home", "starter", "主1", "1", "门将", 1)
+    assert [p.name for p in lu.players if p.side == "home"][1] == "辛克格拉诺"   # 看不见的字符去掉了
+    assert sum(p.captain for p in lu.players) == 2
+    post = parse_lineup(lineup_html(54483776, new_lineup=0, status="Played", subs=9).decode())
+    assert post.count("away", "sub") == 9 and lineup_kind(post.new_lineup, post.status) == "实际首发"
+    assert lineup_kind(1, "Fixture") == "预计首发" and lineup_kind(0, "Fixture") == "首发"
+    assert parse_lineup(lineup_html(5, starters=0).decode()).players == []        # 结构在、首发还没出
+    assert parse_lineup("<html>请验证</html>") is None
+
+
+def test_lineup_live_saves_only_when_lineup_changes(env):
+    """开球前 6 小时以内每小时看一次首发页；名单不变不存，变了存新的一份；还没出的不存。"""
+    con, site, clock, c, out = env
+    now = clock.t
+    site.pages[fixtures_url("2026-10-27 00:00:00")] = (200, {"list": [
+        fixture_item(7, now + timedelta(hours=5)),     # 5 小时后开球：看首发页
+        fixture_item(8, now + timedelta(hours=10)),    # 10 小时后：还不看
+        fixture_item(9, now + timedelta(hours=2)),     # 首发还没出
+    ], "nextDate": ""})
+    for mid in (7, 8, 9):
+        site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
+    site.pages[LINEUP_URL.format(match_id=7)] = (200, lineup_html(7))
+    site.pages[LINEUP_URL.format(match_id=9)] = (200, lineup_html(9, starters=0))
+    c.upcoming(["E0"])
+    lineup_requests = [u for u in site.requests if u.endswith("/lineup")]
+    assert lineup_requests == [LINEUP_URL.format(match_id=7), LINEUP_URL.format(match_id=9)]
+    # 首发页排在这个联赛的赔率后面
+    assert site.requests.index(LINEUP_URL.format(match_id=7)) > site.requests.index(ODDS_URL.format(match_id=9))
+    assert len(list((out / "lineup_live/E0/7").glob("*.html.gz"))) == 1
+    assert not (out / "lineup_live/E0/9").exists()
+    assert con.execute("select status, note from fetch_log where url = ?",
+                       (LINEUP_URL.format(match_id=9),)).fetchone() == ("not_found", "页面上还没有首发")
+
+    site.requests.clear()
+    clock.t = now + timedelta(minutes=30)              # 还不到 1 小时：不再看（9 上次“没找到”也算看过）
+    c.upcoming(["E0"])
+    assert not [u for u in site.requests if u.endswith("/lineup")]
+
+    clock.t = now + timedelta(hours=1)                 # 页面别的地方变了，名单没变：记“没变化”，不存
+    site.pages[LINEUP_URL.format(match_id=7)] = (200, lineup_html(7))
+    c.upcoming(["E0"])
+    last = "select status from fetch_log where url = ? order by id desc limit 1"
+    assert con.execute(last, (LINEUP_URL.format(match_id=7),)).fetchone() == ("unchanged",)
+    assert len(list((out / "lineup_live/E0/7").glob("*.html.gz"))) == 1
+
+    clock.t = now + timedelta(hours=2)                 # 名单变了（例如换成正式首发）：存新的一份
+    site.pages[LINEUP_URL.format(match_id=7)] = (200, lineup_html(7, new_lineup=0))
+    c.upcoming(["E0"])
+    assert len(list((out / "lineup_live/E0/7").glob("*.html.gz"))) == 2
+
+
+def test_lineup_page_with_changed_structure_does_not_stop_odds(env):
+    """网站改了首发页的结构（该是字典的写成了文字、该是列表的写成了数字）：只当读不出来，赔率照抓。"""
+    con, site, clock, c, out = env
+    now = clock.t
+    site.pages[fixtures_url("2026-10-27 00:00:00")] = (200, {"list": [
+        fixture_item(7, now + timedelta(hours=3)), fixture_item(8, now + timedelta(hours=4))], "nextDate": ""})
+    for mid in (7, 8):
+        site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
+    odd = {"matchContentStore": {"matchLineupData": {"match": {"team_A": "甲", "team_B": 5}, "info": {"lineup": 3, "base": []}}}}
+    for mid, state in ((7, odd), (8, {"matchContentStore": ["x"]})):
+        site.pages[LINEUP_URL.format(match_id=mid)] = (200, (
+            f'<html><div data-id="{mid}" class="matchd"></div><script>window.__INITIAL_STATE__='
+            f'{json.dumps(state, ensure_ascii=False)};</script></html>').encode())
+    c.upcoming(["E0"])
+    assert ODDS_URL.format(match_id=8) in site.requests
+    assert not (out / "lineup_live").exists()
+    assert {r[0] for r in con.execute("select status from fetch_log where data_type = 'lineup_live'")} == {"not_found"}
+
+
+def test_lineup_reader_error_is_recorded_as_failed(env, monkeypatch):
+    """读首发页时程序出了意外：这一次记“失败”、不存文件，赔率照抓；下次运行再看。"""
+    import src.collect.dongqiudi as collect
+
+    def broken(_html):
+        raise KeyError("x")
+    monkeypatch.setattr(collect, "parse_lineup", broken)
+    con, site, clock, c, out = env
+    now = clock.t
+    site.pages[fixtures_url("2026-10-27 00:00:00")] = (200, {"list": [
+        fixture_item(7, now + timedelta(hours=3)), fixture_item(8, now + timedelta(hours=4))], "nextDate": ""})
+    for mid in (7, 8):
+        site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
+        site.pages[LINEUP_URL.format(match_id=mid)] = (200, lineup_html(mid))
+    c.upcoming(["E0"])
+    assert ODDS_URL.format(match_id=8) in site.requests and not (out / "lineup_live").exists()
+    assert con.execute("select status, note from fetch_log where url = ?", (LINEUP_URL.format(match_id=7),)).fetchone() == \
+        ("failed", "首发页读不懂：KeyError")
+
+
+def test_lineup_page_of_other_match_is_suspicious_not_blocked(env):
+    """首发页是别的比赛：记“内容可疑”、照存方便查，但不停整个程序（赔率还要接着抓）。"""
+    con, site, clock, c, out = env
+    site.pages[LINEUP_URL.format(match_id=7)] = (200, lineup_html(8))
+    assert c.lineup_live("E0", 7) == "suspicious"
+    assert list((out / "lineup_live/E0/7").glob("*.suspicious.html.gz"))
+    site.pages[LINEUP_URL.format(match_id=6)] = (200, lineup_html(6, new_lineup=0, status="Played", subs=9))
+    assert c.lineup_final("E0", 2026, 6) == "saved"
+    assert c.lineup_final("E0", 2026, 6) == "skipped"         # 赛后的只存一次
+    site.pages[LINEUP_URL.format(match_id=5)] = (200, lineup_html(5, starters=0))
+    assert c.lineup_final("E0", 2026, 5) == "not_found"
+    assert c.lineup_final("E0", 2026, 5) == "skipped"         # 赛后也没有首发的不反复请求

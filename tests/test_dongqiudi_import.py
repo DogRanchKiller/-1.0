@@ -20,7 +20,7 @@ from src.clean.dongqiudi_import import fill_teams_yaml, run
 from src.clean.schema import create_tables
 from src.common.config import load_settings
 from src.common.db import connect
-from src.features import FeatureStore, LookAheadError
+from src.features import FeatureStore, LookAheadError, UsageNotAllowedError
 
 UTC = timezone.utc
 TEAMS = [("曼城", "Man City"), ("切尔西", "Chelsea"), ("利物浦", "Liverpool"), ("阿森纳", "Arsenal")]
@@ -287,3 +287,64 @@ def test_fill_teams_yaml(tmp_path):
     assert fill_teams_yaml(p, {"Man City": "曼城", "Chelsea": "别的名字"}) == 1
     text = p.read_text(encoding="utf-8")
     assert "{英文: \"Man City\", 中文: '曼城', 国家: 英格兰}  # 注释" in text and "'切尔西'" in text
+
+
+def put_lineup(raw, rel_path, html_bytes):
+    path = raw / "dongqiudi" / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(gzip.compress(html_bytes))
+
+
+def test_lineups(env):
+    """首发页导入 lineups 表：一样的名单只留一份；可疑的、别的比赛的、队名对不上的、还没有球员的都不导入。"""
+    from tests.test_dongqiudi import lineup_html
+    con, raw, _reports, s = env
+    live = "lineup_live/E0/902/"
+    put_lineup(raw, live + "20261107T0900Z.html.gz", lineup_html(902, home="利物浦", away="阿森纳", starters=0))
+    put_lineup(raw, live + "20261107T1000Z.html.gz", lineup_html(902, home="利物浦", away="阿森纳"))
+    put_lineup(raw, live + "20261107T1100Z.html.gz", lineup_html(902, home="利物浦", away="阿森纳"))   # 和上一份一样
+    put_lineup(raw, live + "20261107T1300Z.html.gz", lineup_html(902, home="利物浦", away="阿森纳", home_extra="新人"))
+    put_lineup(raw, live + "20261107T1400Z.suspicious.html.gz", lineup_html(5, home="利物浦", away="阿森纳"))
+    put_lineup(raw, live + "20261107T1405Z.html.gz", lineup_html(777, home="利物浦", away="阿森纳"))  # 页面是别的比赛
+    put_lineup(raw, "lineup_live/E0/903/20261107T1000Z.html.gz", lineup_html(903, home="曼城", away="阿森纳"))  # 主客反了
+    put_lineup(raw, "lineup_final/E0/2026/901.html.gz",
+               lineup_html(901, new_lineup=0, status="Played", home="曼城", away="切尔西", subs=9))
+    out = go(env)
+    c = out["counts"]
+    assert c["首发名单（份）"] == 3 and c["首发名单（球员行）"] == 22 * 2 + 40
+    assert c["首发页队名和赛程不一样（不导入）"] == 1
+    assert c["首发页：还没有球员，跳过"] == 1 and c["首发页：页面是别的比赛，跳过"] == 1
+    mid = con.execute("select match_id from match_sources where source = 'dongqiudi' and source_key = '902'").fetchone()[0]
+    times = [r[0] for r in con.execute("select distinct fetched_at_utc from lineups where match_id = ? order by 1", (mid,))]
+    assert times == ["2026-11-07 10:00:00", "2026-11-07 13:00:00"]
+    # 重导结果一样
+    go(env)
+    assert con.execute("select count(*) from lineups").fetchone()[0] == 84
+    # 取数层：只给截止时间之前看到的名单；用途只能显示、复盘
+    s = copy.deepcopy(s)
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    fs = FeatureStore(con, "实时", s)
+    got = fs.lineups(mid, "2026-11-07 12:00", "显示")
+    assert len(got) == 22 and (got["known_at_utc"] <= "2026-11-07 12:00:00").all()
+    assert got.iloc[0][["side", "role", "name", "position", "formation_place"]].tolist() == ["home", "starter", "主1", "门将", 1]
+    assert "新人" in fs.lineups(mid, "2026-11-07 14:00", "显示")["name"].tolist()
+    with pytest.raises(UsageNotAllowedError):
+        fs.lineups(mid, "2026-11-07 12:00", "B版输入")
+    m901 = con.execute("select match_id from match_sources where source = 'dongqiudi' and source_key = '901'").fetchone()[0]
+    post = fs.lineups(m901, NOW, "复盘")
+    assert (post["role"] == "sub").sum() == 18 and set(post["match_status"]) == {"Played"}
+
+
+def test_lineup_back_and_forth_keeps_each_change(env):
+    """名单 A → B → A：三份都是开球前不同时候看到的，都留；赛后那份和赛前最后一份一样也单独留（状态不同）。"""
+    from tests.test_dongqiudi import lineup_html
+    con, raw, _reports, _s = env
+    live = "lineup_live/E0/902/"
+    a = dict(home="利物浦", away="阿森纳")
+    put_lineup(raw, live + "20261107T1000Z.html.gz", lineup_html(902, **a))
+    put_lineup(raw, live + "20261107T1100Z.html.gz", lineup_html(902, home_extra="新人", **a))
+    put_lineup(raw, live + "20261107T1200Z.html.gz", lineup_html(902, **a))
+    put_lineup(raw, "lineup_final/E0/2026/902.html.gz", lineup_html(902, status="Played", **a))
+    out = go(env)
+    assert out["counts"]["首发名单（份）"] == 4
+    assert con.execute("select count(distinct fetched_at_utc) from lineups").fetchone()[0] == 4

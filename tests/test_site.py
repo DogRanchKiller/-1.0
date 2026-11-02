@@ -327,3 +327,59 @@ def test_main_writes_heartbeat(env, monkeypatch, capsys):
     state = json.loads((tmp / "jobs" / "site.json").read_text(encoding="utf-8"))
     assert state["任务"] == "site" and state["成功"] is True and state["摘要"]["页面合计"] == summary["页面合计"]
     assert "网站生成好了" in capsys.readouterr().out
+
+
+def add_lineups(db: Path) -> None:
+    """第 10 场两份懂球帝首发：09:00 一份预计首发、11:00 换了一个人；13:00 那份比“现在”晚，不能出现。"""
+    con = connect(db)
+    rows = []
+    for t, extra in (("2026-11-06 09:00:00", "主2"), ("2026-11-06 11:00:00", "<b>换人</b>"), ("2026-11-06 13:00:00", "太晚")):
+        for side, prefix in (("home", "主"), ("away", "客")):
+            for i in range(1, 12):
+                name = extra if (side == "home" and i == 2) else f"{prefix}{i}"
+                rows.append((10, "dongqiudi", t, "Fixture", 1, side, "starter", i, name, str(i),
+                             "门将" if i == 1 else "中场", None, i, int(i == 4), "x.html.gz"))
+    con.executemany("insert into lineups values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+
+
+def test_match_page_lineups(env):
+    add_lineups(env[0])
+    out, _ = build(env)
+    raw = read(out, "match/10.html")
+    html = plain(raw)
+    assert "首发名单（懂球帝）" in html and "懂球帝预计首发（网站猜的，不是官方公布）" in html
+    assert "<b>换人</b>" in html and "<b>换人</b>" not in raw     # 网站来的名字转义后再放进网页
+    assert "1 主1（门将）" in html and "4 主4（中场）（队长）" in html
+    assert "太晚" not in html and "主2（中场）" not in html       # 只显示“现在”之前最新的一份
+    assert "开球前名单变过 1 次" in html and "11-06 19:00（北京时间）看到" in html
+    assert "已经有懂球帝预计首发" in html                        # 分析里“伤停与首发”那一块
+    other = plain(read(out, "match/11.html"))
+    assert "还没有首发名单" in other
+
+
+def test_site_builds_without_lineups_table(env):
+    """真实数据库在导入程序第一次建首发表之前，网站照常生成，只是没有首发。"""
+    con = connect(env[0])
+    con.execute("drop table lineups")
+    con.commit()
+    con.close()
+    out, _ = build(env)
+    assert "还没有首发名单" in plain(read(out, "match/10.html"))
+
+
+def test_finished_match_lineup_counts_only_pre_match_changes(env):
+    """赛前只有一份、赛后又有一份实际首发：显示实际首发，不写“开球前名单变过”。"""
+    con = connect(env[0])
+    rows = [(1, "dongqiudi", t, st, nl, side, role, i, f"{side}{role}{i}", str(i), "中场", None, 0 if role == "sub" else i, 0, "x")
+            for t, st, nl, roles in (("2026-11-04 12:00:00", "Fixture", 1, ("starter",)),
+                                     ("2026-11-04 21:00:00", "Played", 0, ("starter", "sub")))
+            for side in ("home", "away") for role in roles for i in range(1, 12)]
+    con.executemany("insert into lineups values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    out, _ = build(env)
+    html = plain(read(out, "match/1.html"))
+    assert "赛后实际首发" in html and "homesub3" in html
+    assert "变过" not in html

@@ -40,6 +40,7 @@ LEVEL_NAMES = {"ok": "正常", "unknown": "未验证", "warn": "注意", "error"
 DATA_TYPE_NAMES = {"fixtures": "懂球帝 赛程", "odds_live": "懂球帝 赛前赔率快照", "odds_final": "懂球帝 赛后最终赔率",
                    "history_page": "懂球帝 历届赛季列表", "season_page": "懂球帝 赛季页",
                    "match_detail": "懂球帝 比赛详情页（xG）",
+                   "lineup_live": "懂球帝 赛前首发页", "lineup_final": "懂球帝 赛后首发页",
                    "league_csv": "football-data 联赛文件", "notes": "football-data 说明文件",
                    "understat_shots": "Understat 射门明细（GitHub 镜像）",
                    "transfermarkt_csv": "Transfermarkt 球员数据（salimt GitHub 镜像）"}

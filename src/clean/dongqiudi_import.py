@@ -25,9 +25,13 @@ r"""把懂球帝的原始文件导入数据库（需求文档 6.2、6.3、6.4、
    - 有比赛详情页的比赛：再加上射门、射正、xG（详情页的“技术统计”；xG 大约 2025 年 12 月起才有）。
      football-data 也有这场时两份都留，取数层每类数据各挑填得最全的来源（2025/26 的 xG 只有懂球帝有）。
      比分仍然用赛程 / 赛季页的；详情页的比分和它不一样时，这场的统计不导入（可能对错了比赛），记进报告。
-6. 报告：data/reports/dongqiudi_导入.md，另有没对上的比赛、队名对照两个 CSV。
+6. 首发名单（lineups 表）：赛前每小时的首发页（名单变了才存）和赛后一份。每份名单一位球员一行，
+   记“我们第一次看到这份名单”的时间。只显示、复盘用，不进模型。
+   首发页上的主客队名必须和赛程里的一样，不一样的不导入（可能对错了比赛）。
+7. 报告：data/reports/dongqiudi_导入.md，另有没对上的比赛、队名对照两个 CSV。
 
-只删、只写来源是 dongqiudi 的行（match_sources、match_stats、odds_changes、lottery_odds、team_names），不碰别的来源。
+只删、只写来源是 dongqiudi 的行（match_sources、match_stats、odds_changes、lottery_odds、lineups、team_names），
+不碰别的来源。
 采集程序（每小时任务、历史回补）可以同时运行：写数据库的那一步放在一个很短的事务里。
 """
 import argparse
@@ -43,8 +47,9 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from src.clean.dongqiudi_match import decide, load_db_matches, load_dqd_seasons, vote, write_csv
-from src.clean.dongqiudi_reader import (DETAIL_STATS, MatchDetail, SeasonGame, detail_columns, parse_fixtures,
-                                        parse_match_detail, parse_odds, read_json, read_text, resolve_ts)
+from src.clean.dongqiudi_reader import (DETAIL_STATS, Lineup, MatchDetail, SeasonGame, detail_columns,
+                                        lineup_fingerprint, parse_fixtures, parse_lineup, parse_match_detail, parse_odds,
+                                        read_json, read_text, resolve_ts)
 from src.clean.schema import create_tables
 from src.clean.source_lifecycle import (delete_replaced_results, new_match_ids, reconcile_source_lifecycle,
                                         snapshot_prediction_sources)
@@ -303,6 +308,64 @@ def load_details(raw: Path, leagues: list[str]) -> tuple[dict[int, MatchDetail],
 
 
 @dataclass
+class LineupSnap:
+    """一份首发名单：什么时候第一次看到、读出来的名单、原始文件。"""
+    fetched_at: str
+    lineup: Lineup
+    raw_file: str
+
+
+def load_lineups(raw: Path, leagues: list[str], fetched: dict) -> tuple[dict[int, list[LineupSnap]], Counter]:
+    """原始层里全部首发页 → {懂球帝比赛编号: [名单, ……]}（按时间从早到晚）。
+    内容可疑的文件跳过；读不出来、页面编号和文件名对不上、还没有球员的不要；
+    和上一份一模一样的名单不重复导入（采集时已经去过重，这里再保险一次）。"""
+    found, stats = defaultdict(list), Counter()
+    for lg in leagues:
+        base = raw / "dongqiudi"
+        files = [(f, int(f.parent.name)) for f in (base / "lineup_live" / lg).glob("*/*.html.gz")]
+        files += [(f, int(f.name.split(".")[0])) for f in (base / "lineup_final" / lg).glob("*/*.html.gz")]
+        for f, dqd_id in files:
+            if ".suspicious." in f.name:
+                continue
+            lu = parse_lineup(read_text(f))
+            if lu is None:
+                stats["首发页：读不出来，跳过"] += 1
+            elif lu.page_id != dqd_id:
+                stats["首发页：页面是别的比赛，跳过"] += 1
+            elif not lu.players:
+                stats["首发页：还没有球员，跳过"] += 1
+            else:
+                found[dqd_id].append(LineupSnap(file_time(f, fetched), lu, rel(f)))
+    out = {}
+    for dqd_id, snaps in found.items():
+        snaps.sort(key=lambda s: (s.fetched_at, s.raw_file))
+        kept, last = [], None
+        for s in snaps:
+            key = (s.lineup.status, lineup_fingerprint(s.lineup))
+            if key != last:
+                kept.append(s)
+                last = key
+        stats["首发页：读到的名单"] += len(kept)
+        out[dqd_id] = kept
+    return out, stats
+
+
+def lineup_rows(mid: int, c: "Candidate", snaps: list[LineupSnap], counts: Counter) -> list[tuple]:
+    """一场比赛的 lineups 行。首发页上的队名必须和赛程里的一样（team_A 主队），不一样说明对错了比赛，不导入。"""
+    rows = []
+    for s in snaps:
+        lu = s.lineup
+        if (lu.home, lu.away) != (c.home_zh, c.away_zh):
+            counts["首发页队名和赛程不一样（不导入）"] += 1
+            continue
+        counts["首发名单（份）"] += 1
+        rows += [(mid, SOURCE, s.fetched_at, lu.status, lu.new_lineup, p.side, p.role, p.person_id, p.name,
+                  p.shirt_number or None, p.position or None, p.position_code or None, p.formation_place,
+                  int(p.captain), s.raw_file) for p in lu.players]
+    return rows
+
+
+@dataclass
 class Ref:
     """推变盘时间的年份、判断“开球后的价格”要用的开球时间。"""
     kickoff: datetime
@@ -482,10 +545,15 @@ def stat_row(mid: int, goals: tuple | None, detail: MatchDetail | None, only_dqd
     return tuple(vals.get(k) for k in STAT_COLS)
 
 
+LINEUP_COLS = ["match_id", "source", "fetched_at_utc", "match_status", "new_lineup", "side", "role", "person_id", "name",
+               "shirt_number", "position", "position_code", "formation_place", "captain", "raw_file"]
+
+
 def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: list, lottery: list,
-             back_days: int, tz: ZoneInfo, details: dict[int, MatchDetail] | None = None) -> dict:
+             back_days: int, tz: ZoneInfo, details: dict[int, MatchDetail] | None = None,
+             lineups: dict[int, list[LineupSnap]] | None = None) -> dict:
     """在一个事务里写完。返回 {懂球帝比赛编号: 我们的比赛编号}、几个计数、详情页比分对不上的比赛。"""
-    details = details or {}
+    details, lineups = details or {}, lineups or {}
     others = {r[0] for r in con.execute("select distinct match_id from match_sources where source != ?", (SOURCE,))}
     counts = Counter()
     mismatches: list[str] = []
@@ -499,7 +567,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
         cur = con.executemany("update teams set name_zh = ? where team_id = ? and (name_zh is null or name_zh = '')",
                               [(zh, en) for en, zh in zh_names.items()])
         counts["填了中文名的球队"] = cur.rowcount
-        ids, sources, stats = {}, [], []
+        ids, sources, stats, players = {}, [], [], []
         new_ids = new_match_ids(con)
         for ln in links:
             c = ln.cand
@@ -535,6 +603,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
                 stats.append(row)
             ids[c.dqd_id] = mid
             sources.append((mid, SOURCE, str(c.dqd_id), c.raw_file, c.fetched_at))
+            players += lineup_rows(mid, c, lineups.get(c.dqd_id, []), counts)
         con.execute("delete from match_sources where source = ?", (SOURCE,))
         con.executemany("insert into match_sources (match_id, source, source_key, raw_file, fetched_at_utc)"
                         " values (?, ?, ?, ?, ?)", sources)
@@ -551,6 +620,10 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
         con.executemany("insert into lottery_odds (match_id, source, product, handicap, home, draw, away,"
                         " fetched_at_utc, raw_file) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [(ids[r[0]], *r[1:]) for r in lottery if r[0] in ids])
+        con.execute("delete from lineups where source = ?", (SOURCE,))
+        con.executemany(f"insert into lineups ({', '.join(LINEUP_COLS)}) values ({', '.join('?' * len(LINEUP_COLS))})",
+                        players)
+        counts["首发名单（球员行）"] = len(players)
         lifecycle = reconcile_source_lifecycle(con, previous_sources)
         counts["删掉的没有来源的比赛"] = lifecycle["deleted"]
         counts["有预测而保留的缺源比赛"] = lifecycle["missing"]
@@ -683,7 +756,10 @@ def run(con, raw: Path, reports: Path, s: dict, now: datetime | None = None, tea
     zh_names = chinese_names(links, mapping)
     details, detail_stats = load_details(raw, leagues)
     log.info("比赛详情页 %d 个（有 xG 的 %d 个）", len(details), detail_stats["详情页：其中有 xG"])
-    written = write_db(con, links, mapping, zh_names, changes, lottery, back_days, tz, details)
+    lineups, lineup_stats = load_lineups(raw, leagues, fetched)
+    log.info("首发页：%d 场比赛共 %d 份名单", len(lineups), lineup_stats["首发页：读到的名单"])
+    written = write_db(con, links, mapping, zh_names, changes, lottery, back_days, tz, details, lineups)
+    written["counts"].update({k: v for k, v in lineup_stats.items() if k != "首发页：读到的名单"})
     n_changes = sum(1 for r in changes if r[0] in written["ids"])
     n_lottery = sum(1 for r in lottery if r[0] in written["ids"])
     log.info("写好了：变盘记录 %d 行，彩票赔率 %d 行，用时 %s 秒", n_changes, n_lottery,

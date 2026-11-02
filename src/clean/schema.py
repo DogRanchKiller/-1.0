@@ -1,7 +1,7 @@
 """数据库里清洗层的正式表（需求文档第 17 节“统一标准”“按数据类型放进正式表”）。
 
 历史数据和以后爬到的实时数据放在同一套表里，用“来源”字段区分，不分两个数据库。
-football-data、维基百科（杯赛）、懂球帝（变盘记录、彩票赔率）用到的表；首发、伤停等表以后再加。
+football-data、维基百科（杯赛）、懂球帝（变盘记录、彩票赔率、首发）用到的表；伤停等表以后再加。
 
 比赛编号（match_id）一旦分配就不变：以后的预测存档要用它找到比赛。
 所以重建数据时，比赛表是“有就更新、没有才新增”，不是删掉重来；
@@ -134,6 +134,29 @@ create table if not exists lottery_odds (
     raw_file       text not null
 );
 create index if not exists lottery_odds_match on lottery_odds (match_id, product, fetched_at_utc);
+
+-- 首发名单：抓到的每一份名单每个球员一行（需求文档 6.5、第 17 节“首发”）。只显示、复盘用，不进模型。
+-- 同一场比赛可能有好几份：赛前懂球帝预计的、后来可能换成正式的、赛后的实际首发。旧的不覆盖，都留着，
+-- 按 fetched_at_utc（我们第一次看到这份名单的时间）区分；取数层只给截止时间以前看到的。
+-- 从原始层 data/raw/dongqiudi/lineup_live、lineup_final 算出来，按来源整批删掉重导。
+create table if not exists lineups (
+    match_id        integer not null references matches(match_id),
+    source          text not null,
+    fetched_at_utc  text not null,    -- 我们第一次看到这份名单的时间（标准时间 yyyy-mm-dd HH:MM:SS）
+    match_status    text not null,    -- 抓的时候网站写的比赛状态：Fixture 没踢 / Played 踢完 / ……
+    new_lineup      integer,          -- 懂球帝页面的 new_lineup：1 = 懂球帝预计的首发（不是官方公布）；没写是空
+    side            text not null,    -- home 主队 / away 客队
+    role            text not null,    -- starter 首发 / sub 替补
+    person_id       integer,          -- 来源的球员编号
+    name            text not null,    -- 球员名字（懂球帝是中文）
+    shirt_number    text,
+    position        text,             -- 门将 / 后卫 / 中场 / 前锋；没写是空
+    position_code   text,             -- 站位代码，例如 D1-CL（赛前常常没有）
+    formation_place integer,          -- 阵型里的第几个位置（1 = 门将；替补是 0）
+    captain         integer not null, -- 1 = 队长
+    raw_file        text not null
+);
+create index if not exists lineups_match on lineups (match_id, fetched_at_utc);
 
 -- 预测存档：每次出的预测都存一行，只加不改不删（需求文档第 17 节“预测存档”）。
 -- 为什么不能改、不能删：赛前做的预测过了开球就再也做不出来了（当时的数据、当时的模型都变了），

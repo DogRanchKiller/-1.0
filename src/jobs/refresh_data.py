@@ -21,9 +21,16 @@ log = logging.getLogger("dongqiudi")
 class RefreshCollector(Collector):
     """只收紧自动更新的失败判定，不改历史回补时“缺一场继续抓”的原有做法。"""
 
-    def fetch(self, url, data_type, target, check, once, retry_bad=False):
-        result = super().fetch(url, data_type, target, check, once, retry_bad=retry_bad)
+    def fetch(self, url, data_type, target, check, once, retry_bad=False, judge=None):
+        result = super().fetch(url, data_type, target, check, once, retry_bad=retry_bad, judge=judge)
         status, _ = result
+        # 首发页只给网页显示用、不进模型：一页没抓到不能耽误赔率导入和预测。
+        # 失败、可疑照样记在抓取记录里（数据状态页能看到），这里只写一条提醒，不算整次失败。
+        # 网站拒绝访问（403/429）在采集器里已经抛 Blocked，照常停下。
+        if data_type in ("lineup_live", "lineup_final"):
+            if status in ("failed", "suspicious"):
+                log.warning("首发页没抓到（%s 返回 %s），不影响赔率导入：%s", data_type, status, url)
+            return result
         # 原采集器对部分网络失败、可疑赔率返回状态而不抛异常。自动更新不能把这类情况
         # 记成成功后继续导入旧文件，否则看起来定时任务正常，预测实际仍在使用旧数据。
         # 单场最终赔率/详情的 404 可能只是来源本来没有，保留计数；赛程 404 则不能算成功。
