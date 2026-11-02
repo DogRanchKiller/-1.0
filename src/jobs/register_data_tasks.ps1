@@ -10,7 +10,8 @@ if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "找不到
 $refreshRunner = Join-Path (Split-Path -Parent $PythonPath) 'pythonw.exe'
 if (-not (Test-Path -LiteralPath $refreshRunner -PathType Leaf)) { throw "找不到后台运行 Python：$refreshRunner" }
 $refreshConfigPath = Join-Path $refreshRoot 'config\settings.yaml'
-$readConfig = 'import json,sys,yaml; s=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); print(json.dumps({"data_refresh":s["data_refresh"],"cups_enabled":s["cup_refresh"]["enabled"]}))'
+# 内置PowerShell 5.1会移除-c参数内的双引号；Python字面量用单引号以兼容两种Shell。
+$readConfig = "import json,sys,yaml; s=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); print(json.dumps({'data_refresh':s['data_refresh'],'cups_enabled':s['cup_refresh']['enabled']}))"
 $configText = & $PythonPath -X utf8 -c $readConfig $refreshConfigPath
 if ($LASTEXITCODE -ne 0) { throw '读取维护任务配置失败' }
 $refreshConfig = ($configText | ConvertFrom-Json)
