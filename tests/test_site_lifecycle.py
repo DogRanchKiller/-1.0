@@ -273,9 +273,7 @@ def test_source_state_keeps_unknown_distinct_from_verified_present(state, label,
     assert label in html and "验收报告暂不可用" not in html
 
 
-def test_completed_report_can_render_without_implying_lineup_acceptance():
-    from src.web.site import lifecycle
-
+def complete_site_fixture():
     data = site_fixture()
     row = data.lifecycle["matches"][0]
     for index, slot in enumerate(row["slots"]):
@@ -288,13 +286,44 @@ def test_completed_report_can_render_without_implying_lineup_acceptance():
         {"bookmaker": book, "market": market, "line": None if market == "1x2" else 2.5,
          "state": "qualified", "label": "已有合格收盘证据", "qualified": True, "candidate_count": 1, "reasons": []}
         for book in ("Bet365", "威廉希尔") for market in ("1x2", "ou")]
-    row.update(archives_complete=True, score_complete=True, complete_on_time=True)
+    row.update(archives_complete=True, score_complete=True, complete_on_time=True, source_missing=0,
+               source_state={"state": "present", "label": "当前来源可核对"})
     data.lifecycle["summary"].update(recorded_slot_count=3, late_slot_count=0, pending_slot_count=0,
                                      archived_complete_count=1, scored_complete_count=1,
                                      complete_on_time_count=1, closing_complete_count=1, due_slot_count=3)
-    html = lifecycle.render(data)
+    return data
+
+
+def test_completed_report_can_render_without_implying_lineup_acceptance():
+    from src.web.site import lifecycle
+
+    html = lifecycle.render(complete_site_fixture())
     assert "验收报告暂不可用" not in html and "三个正式时点的评分与单场复盘已核验" in html
     assert "首发链路尚未验收" in html and "首发验收通过" not in html
+
+
+@pytest.mark.parametrize("case", ["late_summary", "source_missing", "unknown_source", "absent_source",
+                                  "one_closing_group", "duplicate_closing_groups", "ou_not25"])
+def test_completed_report_rejects_contradictory_evidence(case):
+    from src.web.site import lifecycle
+
+    data = complete_site_fixture()
+    row = data.lifecycle["matches"][0]
+    if case == "late_summary":
+        data.lifecycle["summary"]["late_slot_count"] = 1
+    elif case == "source_missing":
+        row["source_missing"] = 1
+    elif case == "unknown_source":
+        row["source_state"] = {"state": "unknown", "label": "来源状态未知"}
+    elif case == "absent_source":
+        row.pop("source_state")
+    elif case == "one_closing_group":
+        row["closing"]["groups"] = row["closing"]["groups"][:1]
+    elif case == "duplicate_closing_groups":
+        row["closing"]["groups"] = [row["closing"]["groups"][0]] * 4
+    elif case == "ou_not25":
+        row["closing"]["groups"][1]["line"] = 2.75
+    assert "验收报告暂不可用" in lifecycle.render(data)
 
 
 def test_nonformal_archives_are_visible_without_completing_formal_slots():

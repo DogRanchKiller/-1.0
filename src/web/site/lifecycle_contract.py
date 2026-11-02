@@ -66,6 +66,8 @@ def report_problem(report) -> str | None:
     if (summary.get("complete_on_time_count", 0) > summary.get("closing_complete_count", 0)
             or summary.get("late_slot_count", 0) > summary.get("recorded_slot_count", 0)
             or summary.get("archived_complete_count", 0) * len(KINDS) > summary.get("recorded_slot_count", 0)
+            or summary.get("complete_on_time_count", 0) * len(KINDS)
+                > summary.get("recorded_slot_count", 0) - summary.get("late_slot_count", 0)
             or sum(summary.get(k, 0) for k in ("recorded_slot_count", "pending_slot_count", "overdue_slot_count",
                                                "missed_slot_count")) > len(matches) * len(KINDS)):
         return "存档、等待或完成汇总互相冲突"
@@ -121,6 +123,15 @@ def report_problem(report) -> str | None:
         if (type(closing.get("complete")) is not bool or (closing["state"] == "complete") != closing["complete"]
                 or (closing["complete"] and (not groups or not all(g["qualified"] for g in groups)))):
             return "收盘完成状态与分组证据不一致"
+        if closing["complete"]:
+            books = {group["bookmaker"] for group in groups}
+            groups_valid = (len(groups) == 4 and len(books) == 2
+                            and {(group["bookmaker"], group["market"]) for group in groups}
+                                == {(book, market) for book in books for market in ("1x2", "ou")}
+                            and all(group.get("line") is None if group["market"] == "1x2"
+                                    else group.get("line") == 2.5 for group in groups))
+            if not groups_valid:
+                return "四组收盘证据缺失、重复或市场不一致"
         lineup = row.get("lineup")
         if not isinstance(lineup, dict) or lineup.get("state") != "unverified" or lineup.get("label") != LINEUP_LABEL:
             return "首发链路尚未验收，不能显示完成结论"
@@ -128,7 +139,9 @@ def report_problem(report) -> str | None:
             return "逐场完成字段格式不完整"
         if (row["score_complete"] != review["score_complete"]
                 or (row["complete_on_time"] and not (row["archives_complete"] and row["score_complete"]
-                    and closing["complete"] and all(slot.get("on_time") is True for slot in slots)))):
+                    and closing["complete"] and all(slot.get("on_time") is True for slot in slots)
+                    and row.get("source_missing") == 0
+                    and row.get("source_state", {}).get("state") == "present"))):
             return "逐场完成结论互相冲突"
     for key, flag in (("archived_complete_count", "archives_complete"), ("scored_complete_count", "score_complete"),
                       ("complete_on_time_count", "complete_on_time")):
