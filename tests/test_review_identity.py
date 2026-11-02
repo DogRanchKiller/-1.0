@@ -343,3 +343,55 @@ def test_current_restored_source_state_overrides_old_missing_marker_in_scores(ar
     archive.execute("update match_source_state set source_missing=0, restored_at_utc='2026-11-01 23:00:00' where match_id=1")
     data = site_data.load(archive, settings, now)
     assert 1 not in data.result_notes
+
+
+@pytest.mark.parametrize("evidence", ["archive", "json"])
+def test_site_quarantines_known_conflicting_old_review_files_without_changing_disk(archive, tmp_path, evidence):
+    populate_results(archive)
+    valid_prediction = prediction(6).copy()
+    valid_prediction["match_id"] = 99
+    valid_prediction.to_frame().T.to_sql("predictions", archive, if_exists="append", index=False)
+    settings = load_settings()
+    settings["site"]["review_dir"] = str(tmp_path)
+    now = pd.Timestamp("2026-11-02", tz="UTC")
+    run_review(settings, archive, now, tmp_path)
+    review_path = tmp_path / "matches" / "1.json"
+    score_path = tmp_path / "scores.csv"
+    if evidence == "archive":
+        # 旧JSON没有自然身份，只能由CSV里的prediction_id回查预测存档识别冲突。
+        match_review.write_json(review_path, {"说明": "旧格式没有比赛身份"})
+    else:
+        # 只有无prediction_id的标杆行，仍必须利用JSON的自然身份隔离整场。
+        scores = pd.read_csv(score_path)
+        scores = scores[(scores["match_id"] != 1) | (scores["source"] == reconcile.SOURCE_CLOSE)]
+        scores.to_csv(score_path, index=False)
+    before = {path: path.read_bytes() for path in (review_path, score_path)}
+    archive.execute("update matches set home_team='B', away_team='A' where match_id=1")
+    data = site_data.load(archive, settings, now)
+    assert data.latest(1) is None
+    assert set(data.scores["match_id"]) == {99}
+    assert 1 not in data.reviews and 99 in data.reviews
+    assert any("比赛 1" in note and "身份冲突" in note and "重新生成" in note for note in data.notes)
+    teams = TeamFiles(["A", "B"])
+    assert "身份冲突" in match_page.render(data, 1, teams)
+    assert "身份冲突" in pages.render_record(data, tmp_path)
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+def test_report_and_record_show_each_metric_effective_denominator(tmp_path):
+    settings = load_settings()
+    m = match_record()
+    scores = reconcile.score_rows([m], settings)
+    scores = scores[(scores["model"] == "gb") & (scores["model_version"] == "v1") & (scores["kind"] == "T-1")].copy()
+    second = scores.copy()
+    second["match_id"] = 2
+    second["prediction_id"] = 200
+    scores["logloss_score"] = 1.25
+    second["logloss_score"] = None
+    scores = pd.concat([scores, second], ignore_index=True)
+    report = "\n".join(reports.average_table(scores, settings["review"]["kinds"]))
+    data = site_data.SiteData(now=pd.Timestamp("2026-11-02", tz="UTC"), settings=settings, scores=scores)
+    record = pages.render_record(data, tmp_path)
+    for text in (report, record):
+        assert "有效1/2" in text
+        assert "有效0/2" in text

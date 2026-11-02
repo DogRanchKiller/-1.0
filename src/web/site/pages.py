@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from src.features.known_time import to_utc_text
-from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics
+from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics, metric_text
 from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bj_text, day_title, details,
                                  e, kickoff_text, level_name, match_href, page, placeholder, table)
 from src.web.site.data import SiteData
@@ -187,7 +187,7 @@ def render_record(data: SiteData, out_dir: Path) -> str:
                 cells.append(e((level_name(value) if value in (1, 2, 3) else "未知") if col == "confidence"
                                else extra_text(col, value)))
             rows.append(cells + [str(item["n_matches"])]
-                        + [e(number(item["metrics"][c]["mean"])) for c in columns] + [e(item["note"])])
+                        + [e(metric_text(item["metrics"][c], 3)) for c in columns] + [e(item["note"])])
         return table([*group_headers, *[EXTRA_NAMES[x] for x in extra], "场数", "胜平负 log loss", "Brier", "RPS", "比分 log loss",
                       "大小 2.5 log loss", "双方进球 log loss", "证据说明"], rows) if rows else placeholder("无匹配证据")
 
@@ -272,7 +272,8 @@ def render_record(data: SiteData, out_dir: Path) -> str:
         rep = (f"<h2>周报、月报</h2><ul class='points'>{links}</ul>"
                + details(f"最新一份：{latest.name}", f"<pre class='small' style='white-space:pre-wrap'>{e(text)}</pre>"))
     body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
-            f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
+            + "".join(f"<p class='note'>{e(note)}</p>" for note in data.review_notes.values())
+            + f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
             f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
             f"收盘字段来自有证据的来源声明，不表示恰好在开球瞬间采集；最后一次观察到的赛前价格单独保留。零匹配表示无匹配证据。</p>"
             f"<h2>分组成绩</h2>{summary}<h2>独立收盘标杆</h2>{benchmarks}<h2>逐家公司同场比较</h2>{pairs}"

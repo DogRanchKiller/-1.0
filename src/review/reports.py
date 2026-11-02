@@ -68,6 +68,13 @@ def fmt(x, digits: int = 4) -> str:
     return "—" if x is None or pd.isna(x) else f"{x:.{digits}f}"
 
 
+def metric_text(metric: dict, digits: int = 4) -> str:
+    """均值旁边写本指标有效分母；没有分数也明确0场有效，不借组总场数充数。"""
+    valid = metric["n_matches"]
+    total = valid + metric["missing_matches"]
+    return f"{fmt(metric['mean'], digits)}（有效{valid}/{total}）"
+
+
 def md_table(header: list[str], rows: list[list]) -> list[str]:
     out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
@@ -123,7 +130,7 @@ def average_table(sc: pd.DataFrame, kinds: list[str], summaries=None) -> list[st
         return ["（没有数据）"]
     summaries = score_summary(sc, min_matches=0) if summaries is None else summaries
     rows = [group_cells(item["group"]) + [item["n_matches"]]
-            + [fmt(item["metrics"][c]["mean"]) for c, _ in METRICS] + [item["note"]] for item in summaries]
+            + [metric_text(item["metrics"][c]) for c, _ in METRICS] + [item["note"]] for item in summaries]
     return md_table(["模型", "模型版本", "预测时点", "概率来源", "归档状态", "场数"]
                     + [n for _, n in METRICS] + ["证据说明"], rows)
 
@@ -233,7 +240,7 @@ def build_report(kind: str, key: str, reviews: list[dict], sc: pd.DataFrame, set
                               ("按联赛", "competitions", ["competition"]),
                               ("按比赛标签", "tags", ["tag", "tag_value"])):
         rows = [group_cells(item["group"]) + [extra_text(x, item["group"][x]) for x in extra] + [item["n_matches"],
-                fmt(item["metrics"]["logloss_1x2"]["mean"]), fmt(item["metrics"]["brier_1x2"]["mean"]), item["note"]] for item in metrics[key]]
+                metric_text(item["metrics"]["logloss_1x2"]), metric_text(item["metrics"]["brier_1x2"]), item["note"]] for item in metrics[key]]
         lines += ["", f"## {title}", ""] + md_table(["模型", "模型版本", "预测时点", "概率来源", "归档状态", *[EXTRA_NAMES[x] for x in extra],
                                                      "场数", "胜平负 log loss", "Brier", "证据说明"], rows)
         if key == "confidence":

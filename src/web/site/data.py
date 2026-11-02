@@ -47,6 +47,7 @@ class SiteData:
     scores: pd.DataFrame | None = None                            # data/review/scores.csv；没有是 None
     scores_note: str | None = None                                # scores.csv 读不了的原因
     reviews: dict[int, dict] = field(default_factory=dict)        # data/review/matches/<match_id>.json
+    review_notes: dict[int, str] = field(default_factory=dict)   # 旧复盘与当前比赛身份冲突时，隔离展示并说明
     reports: list[Path] = field(default_factory=list)             # data/review/reports/ 里的周报、月报
     notes: list[str] = field(default_factory=list)                # 读数据时碰到的问题，写在首页上
     comp_names: dict[str, str] = field(default_factory=dict)
@@ -161,6 +162,90 @@ def read_review(folder: Path, data: SiteData) -> None:
         data.reports = sorted((folder / "reports").glob("*.md"), reverse=True)
 
 
+def quarantine_review_conflicts(con, data: SiteData) -> None:
+    """旧产物不能只凭match_id挂到当前对阵；只隔离已知冲突，不猜缺失身份。
+
+    CSV 的 prediction_id 回查原预测存档；JSON 使用已保存的联赛、赛季、主客队。
+    任一行有已知冲突就隔离整场成绩（包括没有prediction_id的标杆）与单场JSON。
+    这里只改本次构站的内存对象，磁盘文件仍保留，等待重新生成复盘。
+    """
+    scores = data.scores
+    mids = set(data.reviews)
+    if scores is not None:
+        mids.update(int(mid) for mid in scores["match_id"])
+    if not mids:
+        return
+    current = {}
+    for start in range(0, len(mids), 500):
+        part = sorted(mids)[start:start + 500]
+        rows = con.execute("select match_id, competition, season, home_team, away_team from matches "
+                           f"where match_id in ({','.join('?' * len(part))})", part)
+        current.update({int(row[0]): dict(zip(("match_id", "competition", "season", "home_team", "away_team"), row))
+                        for row in rows})
+
+    def differs(saved: dict, expected: dict) -> bool:
+        for key, value in saved.items():
+            if key not in expected or value is None or pd.isna(value) or value == "":
+                continue
+            target = expected[key]
+            if target is None or pd.isna(target) or target == "":
+                continue
+            if key in ("match_id", "season"):
+                try:
+                    if float(value) != float(target):
+                        return True
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            if str(value) != str(target):
+                return True
+        return False
+
+    archived = {}
+    if scores is not None:
+        numeric_ids = pd.to_numeric(scores["prediction_id"], errors="coerce").dropna()
+        pids = sorted({int(pid) for pid in numeric_ids if np.isfinite(pid) and pid == int(pid)})
+        for start in range(0, len(pids), 500):
+            part = pids[start:start + 500]
+            try:
+                rows = con.execute("select prediction_id, match_id, competition, season, home_team, away_team "
+                                   f"from predictions where prediction_id in ({','.join('?' * len(part))})", part)
+            except sqlite3.OperationalError:
+                break                       # 旧库没有预测存档：身份未知，不能虚构已验证或已冲突
+            archived.update({int(row[0]): dict(zip(("match_id", "competition", "season", "home_team", "away_team"), row[1:]))
+                             for row in rows})
+    conflicts = set()
+    if scores is not None:
+        for row in scores.to_dict("records"):
+            mid = int(row["match_id"])
+            expected = current.get(mid)
+            archive = archived.get(row.get("prediction_id"))
+            saved = {key: row.get(key) for key in ("match_id", "competition", "season")}
+            if (expected and differs(saved, expected)) or (archive and differs(saved, archive)) \
+                    or (expected and archive and differs(archive, expected)):
+                conflicts.add(mid)
+    for mid, review in data.reviews.items():
+        expected = current.get(mid)
+        saved = {"match_id": review.get("match_id"), "competition": review.get("competition", review.get("联赛")),
+                 "season": review.get("season"), "home_team": review.get("home_team", review.get("主队")),
+                 "away_team": review.get("away_team", review.get("客队"))}
+        if expected and saved["competition"] == data.comp(expected["competition"]):
+            saved["competition"] = expected["competition"]
+        if differs({"match_id": saved["match_id"]}, {"match_id": mid}) or (expected and differs(saved, expected)):
+            conflicts.add(mid)
+    for mid in sorted(conflicts):
+        note = f"比赛 {mid} 的旧复盘存在身份冲突，已隔离本次展示，等待重新生成复盘；磁盘文件保留。"
+        data.review_notes[mid] = note
+        data.notes.append(note)
+        data.reviews.pop(mid, None)
+    if conflicts and scores is not None:
+        data.scores = scores[~scores["match_id"].isin(conflicts)].copy()
+    if conflicts and data.reports:
+        # 旧汇总报告没有比赛集合清单，无法证明它排除了冲突场次，因此暂停在网页引用。
+        data.reports = []
+        data.notes.append("旧汇总报告可能包含身份冲突比赛，等待重新生成后展示；磁盘报告保留。")
+
+
 # ---------- 整站要的数据 ----------
 def load(con, settings: dict, now: datetime) -> SiteData:
     """读整站要的数据。con：数据库连接（建议只读打开）；now：现在（UTC，带时区）。"""
@@ -207,6 +292,7 @@ def load(con, settings: dict, now: datetime) -> SiteData:
 
     # 3. 对账结果（K2）；scores.csv 里有、上面还没有的比赛也做单场页（战绩页要链接过去）
     read_review(resolve_path(cfg["review_dir"]), data)
+    quarantine_review_conflicts(con, data)
     if data.scores is not None:
         for r in data.scores.drop_duplicates("match_id").to_dict("records"):
             mid = int(r["match_id"])

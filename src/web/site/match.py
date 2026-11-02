@@ -403,6 +403,8 @@ def json_html(x, depth: int = 0) -> str:
 def review_html(data: SiteData, mid: int) -> str:
     """赛后对账（scores.csv 里这场的几行）+ 单场复盘（matches/<match_id>.json）。都没有写“还没有复盘数据”。"""
     parts = []
+    if mid in data.review_notes:
+        parts.append(f"<p class='note'>{e(data.review_notes[mid])}</p>")
     if data.scores is not None:
         s = data.scores[data.scores["match_id"] == mid]
         if not s.empty:
