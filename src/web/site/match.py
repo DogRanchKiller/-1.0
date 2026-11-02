@@ -1,12 +1,11 @@
 """单场页 match/<match_id>.html（需求文档第 3 节“输出”、第 8 节）。
 
-一页从上到下：
-- 结论：一句大字（谁赢的可能更大）+ 一根大号三色概率条 + 各玩法倾向和信心，最多 3 条要点。
-- 结论是怎么得出来的（src/web/site/story.py）：6 步，每步都用这场自己的数字
-  （预期进球 → 比分 → 模型胜平负 → 赔率 → 合并 → 倾向门槛和信心等级）。
-- 四块分析：实力对比、近期状态与赛程、伤停与首发、盘口与水位解读；再列模型自己影响最大的几类因素。
+一页从上到下（2026-11-03 起精简：一眼要看的放上面，细节默认收起）：
+- 结论：一句大字（谁赢的可能更大）+ 一根大号三色概率条 + 信心等级。
+- 四个玩法的预测：胜平负、让球、大小球 2.5、比分各一个，踢完写中没中（规则 picks_v1，src/web/site/picks.py）。
+- 为什么这样看（src/web/site/story.py）：最多 3 句话；下面收起的是结论链 6 步、四块分析、影响最大的几类因素。
 - 更多数据（点标题展开，<details>，不用脚本）：比分概率热力图和各玩法、各版本对比（简表 + 完整记录）、
-  赔率变动图、各家公司的初盘和最新价格、竞彩赔率、赛后复盘、逐场贡献解释完整版、流程记录和技术细节。
+  赔率变动图、首发名单、赛后复盘；最后一块“流程记录和技术细节”里是各家公司价格、竞彩、逐场贡献解释完整版、流程记录。
 比分概率和各玩法（亚盘、大小球、双方进球）只从存档里存的比分矩阵算（src/common/markets.py），不重新跑模型；
 这一版没存矩阵就写“这一版没有存比分矩阵”，不另外算。
 """
@@ -103,8 +102,8 @@ def probs_text(p) -> str:
     return " / ".join(f"{OUTCOMES[i]} {pct0(x)}" for i, x in enumerate(p))
 
 
-def conclusion_html(row: dict, with_leans: bool = True) -> str:
-    """一版的结论：胜平负概率、信心等级、倾向。首页和单场页共用（单场页上面另列要点，不重复写倾向）。"""
+def conclusion_html(row: dict) -> str:
+    """一版的结论：胜平负概率、信心等级、倾向（首页每场一格用）。"""
     p, src = final_probs(row)
     st = fusion(row).get("状态")
     bits = [f"<span class='probs'>{e(probs_text(p))}</span> <span class='tag'>{e(level_name(level(row)))}</span>"]
@@ -112,7 +111,7 @@ def conclusion_html(row: dict, with_leans: bool = True) -> str:
         bits.append(" <span class='tag warn'>只有模型（没和赔率融合）</span>")
     elif st and st != "已融合":
         bits.append(f" <span class='tag warn'>{e(st)}</span>")
-    lt = leans(row) if with_leans else []
+    lt = leans(row)
     if lt:
         bits.append("<br><span class='small'>" + "；".join(e(t) for t in lt) + "</span>")
     return "".join(bits)
@@ -531,11 +530,39 @@ def review_html(data: SiteData, mid: int) -> str:
 
 
 # ---------- 整页 ----------
-def key_points(row: dict) -> list[str]:
-    """要点，最多 3 条：有倾向的玩法、平局风险、不确定因素。"""
-    pts = [t for t in leans(row) if "无明显倾向" not in t]
-    pts += [f"要注意：{u}" for u in uncertain(row)]
-    return pts[:3] or ["各玩法都没有明显倾向"]
+def tags_html(row: dict) -> str:
+    """信心等级，加上“只有模型”“赔率不全”这类提醒（概率本身在上面的概率条里，不再写一遍）。"""
+    p, src = final_probs(row)
+    st = fusion(row).get("状态")
+    out = f"信心 <span class='tag'>{e(level_name(level(row)))}</span>"
+    if src == "模型":
+        out += " <span class='tag warn'>只有模型（没和赔率融合）</span>"
+    elif st and st != "已融合":
+        out += f" <span class='tag warn'>{e(st)}</span>"
+    return out
+
+
+def picks_html(data: SiteData, mid: int, row: dict) -> str:
+    """结论卡片里的“四个预测”表：胜平负、让球、大小球 2.5、比分各一个（规则 picks_v1，src/web/site/picks.py）。
+    踢完了写中没中；“预测”只是哪个更可能，不是值得买。"""
+    from src.web.site import picks as pk
+
+    info = data.matches[mid]
+    home, away = data.zh(info["home_team"]), data.zh(info["away_team"])
+    ps = pk.match_picks(row, data.settings)
+    score = data.results.get(mid)
+    got = pk.before_kickoff(data, mid) if score else None
+    late = bool(score) and not (isinstance(got, tuple) and got[2] is row)   # 这一版开球以后才出（理论上不该有）
+    rows = []
+    for k in pk.MARKETS:
+        rows.append([e(pk.MARKET_NAMES[k]), f"<b>{e(pk.pick_text(k, ps[k], home, away))}</b>", pk.prob_html(k, ps[k]),
+                     pk.outcome_html(pk.settle(k, ps[k], score)) if score else "<span class='muted'>还没踢</span>"])
+    note = ("<p class='small muted'>每个玩法写最可能的那一边，踢完记中没中，汇总在<a href='../record.html'>战绩页</a>。"
+            "让球：-0.5 = 要赢 1 球以上才算中，+0.5 = 不输就算中；四分之一球会有赢半、输半，整数球打平会走盘。"
+            "比分只是 121 个比分里可能性最大的一个，一般只有一成左右，常常和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。</p>")
+    if late:
+        note = "<p class='note'>这一版是开球以后才出的，不算进战绩页的命中率。</p>" + note
+    return table(["玩法", "预测", "可能性", "结果"], rows, "picks") + note
 
 
 def tech_line(row: dict) -> str:
@@ -547,7 +574,7 @@ def tech_line(row: dict) -> str:
 def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
     """单场页的整页 HTML。页面在 match/ 文件夹里，回到网站根目录要 "../"。
 
-    从上到下：赛况 → 结论卡片（一句话、概率条、要点）→ 结论是怎么得出来的 → 四块分析 → 影响最大的因素
+    从上到下：赛况 → 结论卡片（一句话、概率条、信心）→ 四个玩法的预测 → 为什么这样看（细节收起）
     → 更多数据（可以展开）→ 最下面是流程记录和技术细节。
     """
     from src.web.site.lifecycle import match_reference
@@ -572,27 +599,28 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         summary = f"<div class='card pad'>{placeholder('这场还没有预测')}</div>"
     else:
         kind, row = latest
-        pts = "".join(f"<li>{e(t)}</li>" for t in key_points(row))
-        hit = f"<p>胜平负{hit_html(row, data.results.get(mid))}</p>" if score else ""
-        summary = (f"<h2>结论</h2><div class='card pad hero'>{hero_html(data, mid, row)}"
-                   f"<p>{conclusion_html(row, with_leans=False)}</p><ul class='points'>{pts}</ul>{hit}"
+        summary = (f"<h2>结论</h2><div class='card pad hero'>{hero_html(data, mid, row)}<p>{tags_html(row)}</p>"
                    f"<p class='small muted'>最新一版：{e(version_name(kind))}，用 {e(bj_text(row['cutoff_utc']))}（北京时间）"
-                   f"之前的数据。</p></div>")
+                   f"之前的数据。</p></div><h2>四个玩法的预测</h2>{picks_html(data, mid, row)}")
         story = story_html(data, mid, row)
     has_review = mid in data.review_notes or data.reviews.get(mid) is not None or (
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))
     tech = (f"<p class='small muted'>{e(tech_line(latest[1]))}</p>" if latest else "") + match_reference(data, mid)
+    # 普通读者用不上的放最后一块“技术细节”里：各家公司价格、竞彩、模型逐场解释完整版、流程记录
+    tech_all = "".join([
+        details("各家公司的初盘和最新价格", books_html(data, mid)),
+        details("竞彩赔率", lottery_html(data, mid)),
+        details("模型依据（逐场贡献解释，完整版）", explanations_html(data, mid)),
+        details("流程记录（模型版本、归档状态、逐场验收）", tech),
+    ])
     body = "".join([
         head, summary, f"<div class='note'>{NOT_ADVICE}</div>", story,
         "<h2>更多数据</h2>",
-        details("比分概率和各玩法（亚盘、大小球、双方进球）", scores_html(data, mid), open_=latest is not None),
+        details("比分概率和各玩法（亚盘、大小球、双方进球）", scores_html(data, mid)),
         details("各版本对比（开球前 24 / 6 / 1 小时、预览版）", versions_html(data, mid)),
         details("赔率变动", odds_html(data, mid)),
-        details("各家公司的初盘和最新价格", books_html(data, mid)),
-        details("竞彩赔率", lottery_html(data, mid)),
         details("首发名单（懂球帝）", lineup_html(data, mid, info["home_team"], info["away_team"])),
         details("赛后复盘", review_html(data, mid), open_=has_review),
-        details("模型依据（逐场贡献解释，完整版）", explanations_html(data, mid)),
-        details("流程记录和技术细节（模型版本、归档状态、逐场验收）", tech),
+        details("流程记录和技术细节（各家公司价格、竞彩、模型依据完整版、版本和验收记录）", tech_all),
     ])
     return page(f"{title} - 足球预测", body, pre, data.now, data.settings["site"]["refresh_minutes"])

@@ -56,6 +56,7 @@ def env(tmp_path):
     s = copy.deepcopy(load_settings())
     s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
     s["site"]["review_dir"] = str(tmp_path / "review")
+    s["picks"]["reference_dir"] = str(tmp_path / "picks_reference")   # 不读真的历史参考
     db = tmp_path / "t.db"
     con = connect(db)
     create_tables(con)

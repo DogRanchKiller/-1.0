@@ -13,6 +13,7 @@ from src.features.known_time import to_utc_text
 from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics, metric_text
 from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bar_html, bj_text, day_title, details,
                                  e, kickoff_text, level_name, match_href, page, placeholder, table)
+from src.web.site import picks as pk
 from src.web.site.data import SiteData
 from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text,
                                 score_text, side_of, version_name)
@@ -179,31 +180,76 @@ def render_team(data: SiteData, team: str, teams: TeamFiles) -> str:
 
 
 # ---------- 战绩页 ----------
-def record_summary(data: SiteData) -> str:
-    """战绩页最上面的大白话：踢完、有预测的比赛里，最新一版“最可能的那项”猜中了几场。
+def picks_record(data: SiteData) -> str:
+    """战绩页最上面：四个玩法的预测命中率（规则 picks_v1，src/web/site/picks.py），再列每场的四个预测。
 
-    只是看个大概：猜中率受运气影响很大，几十场看不出好坏；对照写“这些比赛里主队赢了几场”（一直猜主胜能中几场）。
-    更全的对账（log loss、和收盘赔率比）在下面“详细统计”里。
+    每场用开球前最新的那一版（和单场页一样）；只算有 90 分钟比分的。旁边写历史参考（期末考试那两季按同一规则算的，
+    src/evaluate/picks_reference.py）和“一直猜主胜”的对照。不用 scores.csv，所以还没有复盘数据也能算。
     """
-    done = [mid for mid in data.preds if mid in data.results and data.latest(mid) is not None]
-    if not done:
-        return ""
-    hits = sum(int(np.argmax(final_probs(data.latest(mid)[1])[0])) == side_of(data.results[mid]) for mid in done)
-    home = sum(side_of(data.results[mid]) == 0 for mid in done)
-    n = len(done)
-    return (f"<div class='stats'><div class='stat hi'><b>{hits} / {n}</b><span>最新一版猜中胜平负（{hits / n:.0%}）</span></div>"
-            f"<div class='stat'><b>{home} / {n}</b><span>对照：一直猜主胜能中几场</span></div></div>"
-            "<p class='small'>猜中 = 概率最大的那项和赛果一样。足球随机性大，几十场的猜中率主要看运气，"
-            "要几百场以上才看得出模型好不好；更准的比法是下面“详细统计”里的 log loss（越小越准）。</p>")
+    items, skipped = pk.finished(data)
+    if not items:
+        return "<h2>四个玩法的命中率</h2>" + placeholder("还没有踢完、开球前出过预测的比赛")
+    s = pk.summarize(items)
+    ref, ref_why = pk.load_reference(data.settings)
+    tiles, rows = [], []
+    for k in pk.MARKETS:
+        t = s[k]
+        tiles.append(f"<div class='stat hi'><b>{pk.rate_text(t)}</b><span>{e(pk.MARKET_NAMES[k])}（{t['n']} 场）</span></div>")
+        r = ref["markets"][k] if ref else None
+        rows.append([e(pk.MARKET_NAMES[k]), str(t["n"]), e(pk.counts_text(t)) if t["n"] else "—", f"<b>{pk.rate_text(t)}</b>",
+                     f"{r['rate']:.0%}" if r else "—"])
+    home = s["always_home"]
+    rows.append(["<span class='muted'>对照：一直猜主胜</span>", str(home["n"]), e(pk.counts_text(home)), pk.rate_text(home),
+                 f"{ref['always_home']['rate']:.0%}" if ref else "—"])
+    ref_head = e(f"历史参考（{ref['seasons'][0]}/{str(ref['seasons'][0] + 1)[2:]}–{ref['seasons'][1]}/{str(ref['seasons'][1] + 1)[2:]}"
+                  f" 赛季 {ref['n_matches']} 场）") if ref else "历史参考"
+    notes = []
+    if not ref:
+        notes.append(f"历史参考：{ref_why}。")
+    if s["n_matches"] - s["score"]["n"]:
+        notes.append(f"有 {s['n_matches'] - s['score']['n']} 场的最新一版没存比分矩阵（定时版本之前出的预览版），比分不算这几场。")
+    if s["n_matches"] - s["ah"]["n"]:
+        notes.append(f"有 {s['n_matches'] - s['ah']['n']} 场的最新一版没有让球的线或胜算，让球不算这几场。")
+    if s["n_matches"] - s["ou"]["n"]:
+        notes.append(f"有 {s['n_matches'] - s['ou']['n']} 场的最新一版没有 2.5 球的大小球概率，大小球不算这几场。")
+    if s["model_only"]:
+        notes.append(f"有 {s['model_only']} 场的那一版没用上赔率（接赔率融合以前出的，或那时还没有赔率），四个预测都是模型自己的数。")
+    notes += [f"{why}的 {n} 场不算。" for why, n in skipped.items()]
+    guide = ("<p class='small'>命中率 = 中的场数 ÷ 场数；让球、大小球的“赢半”算半场中、“输半”算半场没中，“走盘”（退回）不算。"
+             "每个玩法预测的都是更可能的那一边，所以胜平负、让球、大小球的命中率在 50% 上下才正常，比分一般一成左右。"
+             "几十场的命中率主要看运气，要几百场以上才看得出好坏，所以旁边放了历史参考（同一规则、开球前 24 小时、"
+             "期末考试那两季，只是描述，不是又考了一次）。命中率高也不代表能赚钱：赔率已经把可能性算进去了。</p>")
+    # 每场的四个预测（最近 record_matches 场）
+    per = []
+    for x in items[:data.settings["site"]["record_matches"]]:
+        info = data.matches.get(x["mid"]) or {}
+        home_n, away_n = data.zh(info.get("home_team", "")), data.zh(info.get("away_team", ""))
+        name = match_link(data, x["mid"], "") if x["mid"] in data.matches else e(str(x["mid"]))
+        cells = [e(bj_text(x["kickoff"])), f"<td class='match'>{name}</td>",
+                 f"<span class='score'>{x['score'][0]}–{x['score'][1]}</span>"]
+        for k in pk.MARKETS:
+            p = x["picks"][k]
+            cells.append("—" if p is None else f"{e(pk.pick_text(k, p, home_n, away_n))} {pk.outcome_html(x['outcomes'][k])}")
+        per.append(cells)
+    shown = min(len(items), data.settings["site"]["record_matches"])
+    return ("<h2>四个玩法的命中率</h2>"
+            f"<p>踢完、开球前出过预测的 {s['n_matches']} 场，每场用开球以前出的最新一版。</p>"
+            f"<div class='stats'>{''.join(tiles)}</div>"
+            + table(["玩法", "场数", "结果", "命中率", ref_head], rows) + guide
+            + "".join(f"<p class='small muted'>{e(n)}</p>" for n in notes)
+            + f"<h2>每场的四个预测（最近 {shown} 场）</h2>"
+            + table(["开球", "比赛", "比分", "胜平负", "让球", "大小球 2.5", "比分预测"], per))
 
 
 def render_record(data: SiteData, out_dir: Path) -> str:
-    """总战绩，从 data/review/scores.csv 汇总（K2 每次全部重算）。"""
+    """总战绩：最上面四个玩法的命中率和每场的四个预测（从预测存档算，picks_record）；
+    下面“详细统计”从 data/review/scores.csv 汇总（K2 每次全部重算）。"""
     cfg = data.settings["site"]
     review_notes = "".join(f"<p class='note'>{e(note)}</p>" for note in data.review_notes.values())
     if data.scores is None:
         why = data.scores_note or "还没有复盘数据"
-        body = f"<h1>战绩</h1>{review_notes}{placeholder(why)}" + (placeholder("还没有复盘数据") if data.scores_note else "")
+        body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>{review_notes}{picks_record(data)}<h2>详细统计</h2>"
+                + placeholder(why) + (placeholder("还没有复盘数据") if data.scores_note else ""))
         return page("战绩 - 足球预测", body, "", data.now, cfg["refresh_minutes"])
     s = data.scores.copy()
     metrics = live_metrics(s, data.settings, {mid: r.get("自动标签") for mid, r in data.reviews.items()})
@@ -318,9 +364,9 @@ def render_record(data: SiteData, out_dir: Path) -> str:
             f"<h2>按联赛</h2>{summary_table(metrics['competitions'], ('competition',))}"
             f"<h2>按比赛标签（未知单列）</h2>{summary_table(metrics['tags'], ('tag', 'tag_value'))}")
     body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
-            + review_notes + record_summary(data)
-            + (f"<h2>最近踢完的</h2>{recent}" if recent else "") + rep
+            + review_notes + picks_record(data) + rep
             + "<h2>详细统计</h2>"
+            + (details("最近踢完的：各版本胜平负猜中（不分玩法，每个版本都列）", recent) if recent else "")
             + details("详细统计表（log loss、校准、按信心等级、按联赛、和收盘赔率逐家比较）",
                       f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
             f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
