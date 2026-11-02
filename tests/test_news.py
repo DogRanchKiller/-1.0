@@ -184,6 +184,41 @@ def test_facts_import_rules(env):
     assert row[0] == '2026-11-06 08:00:00' and row[1] is not None
 
 
+def test_rule_fact_needs_source_but_manual_fact_can_be_entered_with_no_sources(env):
+    """来源表为空时，规则产物不能绕过来源登记；用户明确手动写下的一件事仍可录入。"""
+    env['s']['news']['sources'] = {}
+    s = do_run(env, facts=[
+        fact(person='规则产物', method='规则', news_source=None, news_url=None),
+        fact(person='人工录入', method='人工', news_source=None, news_url=None),
+    ])
+    assert s['facts_new'] == 1 and s['facts_rejected'] == 1
+    assert env['con'].execute('select person, method, news_id from news_facts').fetchall() == [
+        ('人工录入', '人工', None)]
+    assert '规则' in s['rejects'][0][2] and '来源新闻' in s['rejects'][0][2]
+
+
+@pytest.mark.parametrize('source_status', [None, '待定', '不用'])
+def test_rule_fact_rechecks_source_permission_after_news_was_imported(env, source_status):
+    """新闻以前导入过，不代表现在仍允许从这个来源导入新整理的信息。"""
+    do_run(env, items=[item('http://x/n1')])
+    if source_status is None:
+        env['s']['news']['sources'].pop('测试社')
+    else:
+        env['s']['news']['sources']['测试社']['status'] = source_status
+    s = do_run(env, facts=[fact(method='规则')])
+    assert s['facts_new'] == 0 and s['facts_rejected'] == 1
+    assert env['con'].execute('select count(*) from news_facts').fetchone()[0] == 0
+    assert any('来源' in why and '允许' in why for _, _, why in s['rejects'])
+
+
+def test_rule_fact_links_allowed_imported_news(env):
+    s = do_run(env, items=[item('http://x/n1')], facts=[fact(method='规则')])
+    assert s['facts_new'] == 1 and s['facts_rejected'] == 0
+    assert env['con'].execute(
+        'select f.method, i.source, i.url from news_facts f join news_items i using (news_id)'
+    ).fetchall() == [('规则', '测试社', 'http://x/n1')]
+
+
 # ======================= 取数层：什么时候能知道 =======================
 def test_news_visible_only_after_fetched_time(env):
     do_run(env, [item('http://x/1', title='曼城新闻'),

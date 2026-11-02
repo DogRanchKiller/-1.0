@@ -10,11 +10,11 @@
                         team（球队名，必填）、fact_type（coach_change / long_injury，必填）、
                         effective_date（生效日 yyyy-mm-dd，必填）、recorded_at（录入时间，必填，要带时间）、
                         person、note（选填）、method（人工 / 规则，默认人工）、
-                        news_source + news_url（选填，两个一起写：这件事是从哪条已导入的新闻来的）
+                        news_source + news_url（规则产物必填；人工录入选填，两个一起写：来自哪条已导入且仍允许的新闻）
 注意：news_facts_ 开头的文件也符合 news_ 开头，程序先判断 news_facts_。
 
 三条硬规则（防偷看未来，需求文档 7.1）：
-  1. 来源必须先在 settings.yaml 的 news.sources 登记为“允许”，没登记、待定、不用的来源一行都不导入；
+  1. 新闻及引用它的结构化信息，来源必须在 news.sources 登记为“允许”；规则产物必须引用已导入新闻，只有人工录入可无新闻；
   2. 抓到时间 / 录入时间必须有，而且要带时间；比现在还晚（超过容忍分钟数）的拒绝，不猜、不补；
   3. 重复的新闻只留先导入的那一行，不改它（抓到时间也不往早改，往早改会让它在更早的截止时间出现）。
 
@@ -183,6 +183,12 @@ class Importer:
             raise RowError(f'{what} {t} 比现在 {self.now_text} 还晚（超过容忍时间），多半是时钟或时区写错了')
         return t
 
+    def check_source(self, source: str) -> None:
+        """每次新导入都检查来源仍然允许；曾经导入过新闻不能替代这次的来源检查。"""
+        status = (self.sources.get(source) or {}).get('status')
+        if status != '允许':
+            raise RowError(f'来源「{source}」没有登记为允许（现在是：{status or "没登记"}）')
+
     # ---------- 一个文件 ----------
     def file(self, path: Path) -> None:
         name = path.name
@@ -218,9 +224,7 @@ class Importer:
         source, url, title = cell(row, 'source'), cell(row, 'url'), cell(row, 'title')
         if not source or not url or not title:
             raise RowError('source、url、title 都要写')
-        status = (self.sources.get(source) or {}).get('status')
-        if status != '允许':
-            raise RowError(f'来源「{source}」没有登记为允许（现在是：{status or "没登记"}）')
+        self.check_source(source)
         fetched = self.check_recorded_time(row.get('fetched_at'), '抓到时间')
         published = parse_time(row.get('published_at'), '发布时间', date_only_ok=True)
         teams_given, match_ids = row.get('teams') or [], row.get('match_ids') or []
@@ -287,9 +291,12 @@ class Importer:
             raise RowError(f'method 只能是 {METHODS}')
         news_source, news_url = cell(row, 'news_source'), cell(row, 'news_url')
         news_id = None
+        if method == '规则' and not (news_source and news_url):
+            raise RowError('规则整理的信息必须写 news_source 和 news_url，关联已导入且来源仍允许的来源新闻')
         if news_source or news_url:
             if not (news_source and news_url):
                 raise RowError('news_source 和 news_url 要一起写')
+            self.check_source(news_source)
             news_id = self.con.execute('select min(news_id) from news_items where source = ? and url = ?',
                                        (news_source, news_url)).fetchone()[0]
             if news_id is None:
