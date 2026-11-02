@@ -514,6 +514,10 @@ def lifecycle_check(report: dict) -> Check:
     warnings = report.get("warnings", [])
     if not isinstance(warnings, list) or any(not isinstance(w, str) for w in warnings):
         return unavailable
+    matches = report.get("matches")
+    if (not isinstance(matches, list) or len(matches) != counts["match_count"]
+            or any(not isinstance(m, dict) for m in matches)):
+        return unavailable
     warning_text = " 证据提示：" + "；".join(warnings) if warnings else ""
     bad = (counts["overdue_slot_count"] + counts["invalid_slot_count"]
            + counts.get("missed_slot_count", 0) + counts.get("source_missing_count", 0))
@@ -530,11 +534,14 @@ def lifecycle_check(report: dict) -> Check:
                     and all(counts.get(k, 0) <= 3 * total for k in slots)
                     and occupied <= 3 * total
                     and 3 * counts["archived_complete_count"] <= counts["recorded_slot_count"]
+                    and 3 * finished <= counts["recorded_slot_count"] - counts["late_slot_count"]
                     and counts.get("source_missing_count", 0) <= total
                     and finished <= counts.get("closing_complete_count", total) <= total)
     if not valid_counts:
         return Check("prediction_lifecycle", "逐场流程验收", "warn", "验收汇总计数关系异常，不能确认流程完整。" + warning_text)
     all_complete = bool(counts["match_count"]) and finished == counts["match_count"]
+    if all_complete and "closing_complete_count" not in counts:
+        return unavailable
     level = "warn" if bad or warnings else "ok" if all_complete else "unknown"
     if not counts["match_count"]:
         text = "当前范围没有可验收比赛；全周期未完成，不能从空样本得出通过结论。"

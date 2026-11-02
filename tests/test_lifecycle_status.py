@@ -9,9 +9,10 @@ def report(**changes):
         "match_count": 5, "recorded_slot_count": 5, "late_slot_count": 5,
         "pending_slot_count": 10, "overdue_slot_count": 0, "invalid_slot_count": 0,
         "archived_complete_count": 0, "scored_complete_count": 0, "complete_on_time_count": 0,
+        "closing_complete_count": 0,
     }
     summary.update(changes)
-    return {"summary": summary, "warnings": [], "matches": []}
+    return {"summary": summary, "warnings": [], "matches": [{"match_id": n} for n in range(summary["match_count"])]}
 
 
 def test_future_stages_and_late_startup_do_not_pass_complete_acceptance():
@@ -45,15 +46,16 @@ def test_readable_but_incomplete_or_broken_report_cannot_be_green():
 def test_completed_archives_and_scores_still_do_not_claim_accuracy_or_lineups():
     check = sp.lifecycle_check(report(recorded_slot_count=15, late_slot_count=0,
                                       pending_slot_count=0, archived_complete_count=5,
-                                      scored_complete_count=5, complete_on_time_count=5))
+                                      scored_complete_count=5, closing_complete_count=5, complete_on_time_count=5))
     assert check.level == "ok"
     assert "已评分 5" in check.text
     assert "准确率" not in check.text and "首发已" not in check.text
 
 
 def test_one_completed_match_does_not_make_the_other_pending_matches_pass():
-    check = sp.lifecycle_check(report(archived_complete_count=1, scored_complete_count=1,
-                                      complete_on_time_count=1))
+    check = sp.lifecycle_check(report(recorded_slot_count=6, late_slot_count=3, pending_slot_count=9,
+                                      archived_complete_count=1, scored_complete_count=1,
+                                      closing_complete_count=1, complete_on_time_count=1))
     assert check.level == "unknown"
 
 
@@ -96,3 +98,28 @@ def test_archived_late_match_with_no_pending_slots_is_not_an_inconsistent_count(
 ])
 def test_impossible_count_relationships_cannot_pass(changes):
     assert sp.lifecycle_check(report(**changes)).level == "warn"
+
+
+def complete_report():
+    return report(recorded_slot_count=15, late_slot_count=0, pending_slot_count=0,
+                  archived_complete_count=5, scored_complete_count=5, closing_complete_count=5,
+                  complete_on_time_count=5)
+
+
+def test_missing_closing_summary_cannot_support_complete_acceptance():
+    payload = complete_report()
+    del payload["summary"]["closing_complete_count"]
+    assert sp.lifecycle_check(payload).level == "unknown"
+
+
+def test_all_matches_on_time_conflicts_with_a_late_archive():
+    payload = complete_report()
+    payload["summary"]["late_slot_count"] = 1
+    assert sp.lifecycle_check(payload).level == "warn"
+
+
+@pytest.mark.parametrize("matches", [[], None, "bad", [None] * 5])
+def test_missing_match_evidence_cannot_support_summary(matches):
+    payload = complete_report()
+    payload["matches"] = matches
+    assert sp.lifecycle_check(payload).level == "unknown"
