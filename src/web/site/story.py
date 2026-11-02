@@ -2,9 +2,11 @@
 
 给不看技术细节的人：
 - 一句话结论 + 一条三色概率条（绿 = 主胜，灰 = 平，蓝 = 客胜；只用样式画，不用图片和脚本）。
-- “结论是怎么得出来的”：6 步，每一步都填这场比赛自己的数字（模型猜几球 → 比分 → 胜平负 → 看赔率 → 合并 → 倾向和信心）。
-- 四块分析：实力对比、近期状态与赛程、伤停与首发、盘口与水位解读。
-- 影响最大的 3 个因素：把模型解释里同一类的特征加在一起，用大白话写。
+- “为什么这样看”：最多 3 句话（最后的概率从哪来、模型自己怎么看、要注意什么），一直显示。
+- 下面三块默认收起（点标题展开）：
+  - “结论是怎么得出来的”：6 步，每一步都填这场比赛自己的数字（模型猜几球 → 比分 → 胜平负 → 看赔率 → 合并 → 倾向和信心）。
+  - 四块分析：实力对比、近期状态与赛程、伤停与首发、盘口与水位解读。
+  - 影响最大的 3 个因素：把模型解释里同一类的特征加在一起，用大白话写。
 
 只用这一版存档里已经有的东西（比分矩阵、融合记录、模型解释）和开球前的赔率记录，不重新跑模型；
 缺什么就写“这一版没有存……”，不拿别的版本或别的比赛来补。
@@ -20,9 +22,10 @@ from src.common import markets
 from src.common.odds import devig
 from src.web.explanation import validate_explanation
 from src.web.preview_page import ah_text
-from src.web.site.common import OUTCOMES, bar_html, bj_text, e, level_name, pct0, pct1
+from src.web.site.common import OUTCOMES, bar_html, bj_text, details, e, level_name, pct0, pct1
 from src.web.site.data import SiteData
-from src.web.site.match import final_probs, fusion, latest_lineup, lineup_schedule, version_matrices
+from src.web.site.match import final_probs, fusion, latest_lineup, lineup_schedule, uncertain, version_matrices
+from src.web.site.picks import used_odds
 
 # 降级候选因素的中文名（src/predict 存的“降级候选因素”里的键）
 FACTOR_NAMES = {"gap": "模型和赔率分歧大", "early": "赛季前几轮", "promoted": "有升班马", "no_pinnacle": "没有平博赔率",
@@ -425,13 +428,52 @@ def hero_html(data: SiteData, mid: int, row: dict) -> str:
             f"{bar_html(p, big=True)}{bar_legend(data, home, away)}")
 
 
+def why_points(data: SiteData, row: dict, home: str, away: str) -> list[str]:
+    """“为什么这样看”：最多 3 句大白话（已转义的 HTML）——最后的概率从哪来、模型自己怎么看、要注意什么。
+    细节（6 步、四块分析、影响最大的因素）放在下面可以展开的地方。"""
+    fus = fusion(row)
+    hn, an = data.zh(home), data.zh(away)
+    p, _ = final_probs(row)
+    w = _num(fus.get("w"))
+    used = used_odds(row)       # “无赔率，未融合”时存档的融合概率就是模型的，不能写成赔率
+    # 胜平负用了哪几家：用平博时只用平博一家，否则是“胜平负几家”的平均（不是全部公司数）
+    n = _num(fus.get("胜平负几家"))
+    books = "平博" if fus.get("胜平负用平博") else (f" {int(n)} 家博彩公司" if n else "几家博彩公司")
+    out = []
+    if used and w == 1:
+        out.append(f"最后的概率是从{e(books)}的赔率（去掉抽水）算出来的：<b>{e(_probs3(p, hn, an))}</b>。"
+                   "回测里赔率比模型准，所以全用赔率；赔率里已经有伤停、首发传闻等模型不知道的信息。")
+    elif used and w is not None:
+        out.append(f"最后的概率是{e(books)}的赔率（占 {w * 100:g}%）和模型（占 {(1 - w) * 100:g}%）合起来的：<b>{e(_probs3(p, hn, an))}</b>。")
+    else:
+        # 没用上赔率的原因：存档写了状态（例如“无赔率，未融合”）就照写；什么都没写的是接赔率融合以前出的旧版
+        why = fus.get("状态") if isinstance(fus.get("状态"), str) else "那时还没接赔率融合"
+        out.append(f"这一版最后的概率只是模型自己算的（{e(why)}）：<b>{e(_probs3(p, hn, an))}</b>，参考价值低一些。")
+    if used:
+        mp = row_probs(row)
+        diff = [mp[i] - p[i] for i in range(3)]
+        k = int(np.argmax(np.abs(diff)))
+        gap = float(data.settings["confidence_study"]["gap"])   # “差得多”和信心等级的“分歧大”同一个数
+        names = [f"{hn}赢", "平局", f"{an}赢"]
+        if abs(diff[k]) >= gap:
+            look = f"和赔率差得最多的是{names[k]}（模型{'高' if diff[k] > 0 else '低'} {abs(diff[k]) * 100:.0f} 个百分点），两边看法不太一样。"
+        else:
+            look = "和赔率差不多。"
+        out.append(f"模型自己（只看两队以前的比赛数据）算的是 {e(_probs3(mp, hn, an))}，{e(look)}")
+    u = uncertain(row)
+    if u:
+        out.append("要注意：" + "；".join(e(x) for x in u) + "。")
+    return out[:3]
+
+
 def story_html(data: SiteData, mid: int, row: dict) -> str:
-    """结论卡片下面：结论链、四块分析、影响最大的因素。"""
+    """结论卡片下面：“为什么这样看”几句话；结论链（6 步）、四块分析、影响最大的因素默认收起，想看再展开。"""
     info = data.matches[mid]
     home, away = info["home_team"], info["away_team"]
     atol = (data.settings.get("explanation") or {}).get("atol", 1e-6)
     return "".join([
-        "<h2>结论是怎么得出来的</h2>", f"<div class='card pad'>{chain_html(data, row, home, away)}</div>",
-        "<h2>四块分析</h2>", analysis_html(data, mid, row, home, away),
-        "<h2>影响最大的几个因素（模型自己）</h2>", f"<div class='card pad'>{factors_html(row, data.zh(home), atol)}</div>",
+        "<h2>为什么这样看</h2>", f"<div class='card pad'>{_li(why_points(data, row, home, away))}</div>",
+        details("结论是怎么得出来的（6 步，每步都有这场的数字）", f"<div class='card pad'>{chain_html(data, row, home, away)}</div>"),
+        details("四块分析（实力、状态、伤停和首发、盘口和水位）", analysis_html(data, mid, row, home, away)),
+        details("影响最大的几个因素（模型自己）", f"<div class='card pad'>{factors_html(row, data.zh(home), atol)}</div>"),
     ])

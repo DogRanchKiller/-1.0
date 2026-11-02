@@ -101,8 +101,8 @@ def test_index_cell_is_short_and_record_starts_with_plain_summary(env):
     assert "开球前 24 小时这一版" in plain(index)
     assert "title='gb / gb-1" in index                         # 模型版本只在悬停提示里
     record = text_of(read(out, "record.html"))
-    assert "1 / 1最新一版猜中胜平负（100%）" in record and "对照：一直猜主胜能中几场" in record
-    assert record.index("最新一版猜中") < record.index("详细统计表")
+    assert "四个玩法的命中率" in record and "对照：一直猜主胜" in record
+    assert record.index("四个玩法的命中率") < record.index("详细统计表")
 
 
 

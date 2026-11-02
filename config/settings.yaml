@@ -686,6 +686,40 @@ site:
   matrix_sum_tol: 0.001          # 存档里的矩阵是 6 位小数，加起来和 1 差这么多以内按比例补成 1；差更多就当矩阵坏了，不用
   refresh_minutes: 15            # 页面开着时多少分钟自己重新加载一次（和定时任务“足球预测_生成网站”的间隔一样）
   story_move_min: 0.01           # 单场页“盘口与水位解读”：胜平负概率变得最多的那项不到 1 个百分点就写“基本没动”（只是措辞，不影响预测）
+  record_matches: 60             # 战绩页“每场四个预测”列最近多少场（命中率汇总照样算全部）
+
+# 四个玩法的预测和命中率 picks_v2（src/web/site/picks.py、src/evaluate/picks_reference.py，需求文档第 3 节“四个玩法的预测和命中率”，
+# 算命中率之前写下）。想改规则另起一版，旧的照留（picks_v1 比分只给 1 个，picks_v2 给 4 个，别的一样）
+picks:                           # 规则名写在 src/web/site/picks.py 的 RULE、比分几个写在 SCORE_TOP（历史参考文件里也记着规则名，对不上不用）
+  reference_dir: data/backtest/picks_reference   # 历史参考（期末考试存下的结果按同一规则算，只是描述统计）放这里的 <规则名>/ 下面；picks_v1 的在这个文件夹本身
+  reference_run: final_exam      # 用哪一次回测存下的结果（data/backtest/<这个>/）
+
+# 局域网网站：带登录的网站服务器 src/web/serve.py（需求文档第 8 节“局域网网站”、第 16 节“安全”，工作树 W1）
+# 只把 site.output_dir 里生成好的网页和 paths.reports 里的 status.html 发出去，不读数据库、不联网。只在局域网用，不对公网开放
+site_server:
+  host: 0.0.0.0                  # 监听哪个地址：0.0.0.0 = 这台电脑的所有网卡（同一个 Wi-Fi 的手机才连得进来）；127.0.0.1 = 只有本机
+  port: 8790                     # 网址里冒号后面的数字；防火墙规则也只放行这个端口。改了要重新双击“开启局域网访问.bat”
+  state_dir: data/site_server    # 密码哈希 credentials.json、会话 sessions.json、给你看的 网站地址和密码.txt（data/ 不进 Git）
+  status_page: status.html       # /status 发的是 paths.reports 下的这个文件（数据状态页）
+  log_file: logs/site_server.log # 访问日志：只记时间、IP、方法、路径、状态码，不记密码和 cookie
+  log_max_bytes: 1000000         # 日志满 1 MB 换一个新文件
+  log_backups: 3                 # 旧日志留几个
+  username: admin                # 登录账号（固定一个）
+  # 密码哈希：PBKDF2-SHA256 迭代次数。OWASP 2023 年的建议是 60 万次；每次登录多算约零点几秒，换来猜密码慢得多。
+  # 存进 credentials.json 时把次数一起存下，以后改这个数，旧密码照样能验证
+  pbkdf2_iterations: 600000
+  password_groups: 4             # 自动生成的密码：几组
+  password_group_len: 4          # 每组几个字符（小写字母和数字，去掉容易看错的 0 o 1 l i）
+  min_password_length: 8         # 自己改密码时最短几位
+  session_days: 30               # 登录一次能用多少天（手机不用每次登）
+  max_sessions: 50               # 最多同时有多少个登录（超出时先挤掉最早的）
+  max_failures: 5                # 同一个 IP 连续输错几次锁定
+  lockout_minutes: 15            # 锁定多少分钟
+  max_login_body_bytes: 4096     # 登录表单最多收多少字节（防止有人发很大的数据把服务器卡住）
+  request_timeout_seconds: 20    # 一个连接多少秒没动静就断开
+  max_connections: 32            # 最多同时处理几个连接，满了新连接直接关掉（防止慢速连接把服务器拖垮）
+  firewall_rule: 足球预测_局域网网站   # Windows 防火墙规则名（开启局域网访问.bat 加、关闭局域网访问.bat 删）
+  task_name: 足球预测_网站服务       # 开机自动运行的定时任务名（register_tasks.ps1 登记）
 
 # 虚拟投注机器人的历史回测 bots_v1（src/bots/、src/evaluate/bot_backtest.py，需求文档第 14 节“历史回测第一版规则 bots_v1”，跑之前写下）
 # 跑完不改这一段的数来调结果；想改规则就另起一版（例如 bots_v2），旧的结果照留。全是虚拟投注，不连任何账户。
