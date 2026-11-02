@@ -499,6 +499,43 @@ def new_alerts(checks: list[Check], state_file: Path) -> list[Check]:
 
 
 # ---------- 主程序 ----------
+def lifecycle_check(report: dict) -> Check:
+    """逐场事实和任务心跳分别看；还没有全周期样本时不写成验收通过。"""
+    counts = report.get("summary") or {}
+    fields = ("match_count", "recorded_slot_count", "late_slot_count", "pending_slot_count",
+              "overdue_slot_count", "invalid_slot_count", "archived_complete_count",
+              "scored_complete_count", "complete_on_time_count")
+    if any(type(counts.get(k)) is not int or counts[k] < 0 for k in fields):
+        return Check("prediction_lifecycle", "逐场流程验收", "unknown", "验收汇总不可用，不能确认流程完整。")
+    warnings = report.get("warnings") or []
+    bad = (counts["overdue_slot_count"] + counts["invalid_slot_count"]
+           + counts.get("missed_slot_count", 0) + counts.get("source_missing_count", 0))
+    level = "warn" if bad or warnings else "ok" if counts["complete_on_time_count"] else "unknown"
+    if not counts["match_count"]:
+        text = "当前范围没有可验收比赛；全周期未完成，不能从空样本得出通过结论。"
+    else:
+        text = (f"当前范围 {counts['match_count']} 场；时点已保存 {counts['recorded_slot_count']}、"
+                f"迟到 {counts['late_slot_count']}、待完成 {counts['pending_slot_count']}、"
+                f"逾期 {counts['overdue_slot_count']}、错过窗口 {counts.get('missed_slot_count', 0)}、"
+                f"无效 {counts['invalid_slot_count']}。三时点留档齐全 {counts['archived_complete_count']} 场，"
+                f"已评分 {counts['scored_complete_count']} 场；")
+        if counts["complete_on_time_count"]:
+            text += f"严格准点且评分/收盘齐全 {counts['complete_on_time_count']} 场。"
+        else:
+            text += "严格准点且评分/收盘齐全的全周期未完成。"
+        text += "首发链路另行验收；逐场证据见网站“流程验收”页。"
+    if warnings:
+        text += " 证据提示：" + "；".join(str(w) for w in warnings)
+    return Check("prediction_lifecycle", "逐场流程验收", level, text)
+
+
+def check_lifecycle(con, settings: dict, now: datetime) -> Check:
+    """只读同一验收计算，不拿网站上次生成的绿色状态作为本次证据。"""
+    from src.review.lifecycle import build_report
+
+    return lifecycle_check(build_report(con, settings, now))
+
+
 def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, list[tuple], list[dict], list[Listing]]:
     """做全部检查、统计次数。网页和日报都用这一份结果。"""
     cfg = settings["status"]
@@ -511,6 +548,7 @@ def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, 
               backfill, check_backup(resolve_path(settings["paths"]["backup"]), now, cfg),
               check_database(con, now), names, unmatched]
     checks += build_checks(con, settings, now)
+    checks.append(check_lifecycle(con, settings, now))
     # 任务是否完成与上面的数据覆盖独立展示：正常运行仍可能缺赛果或收盘证据。
     checks += check_jobs(resolve_path(settings["jobs"]["state_dir"]), settings, now,
                          get_token(load_secrets()))

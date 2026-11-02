@@ -60,6 +60,14 @@ def test_all_ok(env):
     assert today == {"fixtures": {"saved": 1}} and problems == []
 
 
+def test_build_includes_per_match_lifecycle_evidence(env, monkeypatch):
+    con, s, tmp = env
+    marker = sp.Check("prediction_lifecycle", "逐场流程验收", "warn", "T-6 逾期未保存")
+    monkeypatch.setattr(sp, "check_lifecycle", lambda *_: marker, raising=False)
+    checks, *_ = sp.build(con, s, NOW)
+    assert marker in checks
+
+
 def test_problems_found(env):
     """超过 2 小时没成功、被网站拒绝、备份太旧、失败太多，都要标出来。"""
     con, s, tmp = env
