@@ -596,3 +596,58 @@ site:
   ah_extra: [-0.5, -0.25, 0.25, 0.5]   # 亚盘除了主盘口，另外列主盘口加减这几个数的线
   matrix_sum_tol: 0.001          # 存档里的矩阵是 6 位小数，加起来和 1 差这么多以内按比例补成 1；差更多就当矩阵坏了，不用
   refresh_minutes: 15            # 页面开着时多少分钟自己重新加载一次（和定时任务“足球预测_生成网站”的间隔一样）
+
+# 虚拟投注机器人的历史回测 bots_v1（src/bots/、src/evaluate/bot_backtest.py，需求文档第 14 节“历史回测第一版规则 bots_v1”，跑之前写下）
+# 跑完不改这一段的数来调结果；想改规则就另起一版（例如 bots_v2），旧的结果照留。全是虚拟投注，不连任何账户。
+bots:
+  version: bots_v1               # 规则版本名，也是输出子文件夹名
+  output_dir: data/backtest/bots # 结果放这里（data/ 不进 Git）
+  run: w9_gb_l7                  # 用哪次回测的概率（data/backtest/ 下的文件夹，要有 predictions.csv 和 matrices_<模型>.npz）
+  model: gb_l7
+  horizon: T-24                  # 下注时点 = 开球前 24 小时（和概率同一个时点）
+  hours_before_kickoff: 24
+  leagues: [E0, SP1, D1, I1, F1]
+  first_season: 2005             # 只用开发赛季（2005/06–2023/24）；最后一季程序里按 seasons.dev_last 检查，不能跨进考试赛季
+  last_season: 2023
+  usage_bet: 机器人下注          # 下注时取赔率的用途（数据字典）
+  usage_settle: 机器人结算       # 结算时取比分、收盘赔率的用途
+  settle_after_kickoff_hours: 72 # 结算“站在”开球后几小时（和 backtest.eval_after_kickoff_hours 一样）
+  odds_source: football-data
+  price_books:                   # 两种下注价格：名字 → 公司（odds 表的写法）和倒数之和的正常范围用 quality.overround 的哪一档
+    平博: {bookmaker: 平博 Pinnacle, overround: 1x2}
+    最高: {bookmaker: 多家最高, overround: best}
+  fusion_books: [平博 Pinnacle, 多家平均]   # 融合概率（w = 1）用哪家赛前胜平负，按顺序选（和 market_odds.result_books 一样）
+  clv_bookmaker: 平博 Pinnacle   # CLV 用这家的收盘胜平负
+  devig_method: proportional     # 融合概率、CLV、随机机器人理论值都按比例去水
+  random_seed: 20261101          # 随机机器人的种子：每场用（种子, match_id）定选哪个，重跑结果一样
+  bankroll: 10000                # 初始虚拟资金
+  flat_stake: 100                # 固定注额（初始资金的 1%）
+  kelly_fraction: 0.25           # 四分之一凯利
+  kelly_cap: 0.05                # 凯利类单注最多资金的 5%
+  flat_cap: 0.02                 # 资金模拟：固定注额类单注最多当前资金的 2%
+  daily_cap: 0.20                # 资金模拟：同一天（截止时间的 UTC 日期）合计最多当天第一注时资金的 20%
+  stop_drawdown: 0.30            # 资金模拟：从最高点回撤超过 30% 就停
+  min_clv_bets: 300              # 有 CLV 的注至少这么多才进排行榜
+  period_split: 2012             # 两段分开报告：这个赛季之前（没有平博）/ 这个赛季起
+  # 机器人：rule 怎么选（random 随机 / favorite 热门 / home 主队 / top 概率最高 / value 期望收益过门槛），
+  # prob 概率来源（model 模型 / fusion 融合），book 价格（上面 price_books 的名字），edge 期望收益门槛，stake flat 固定 / kelly 四分之一凯利
+  list:
+    - {name: 对照_随机_平博, rule: random, book: 平博, stake: flat, control: true}
+    - {name: 对照_随机_最高, rule: random, book: 最高, stake: flat, control: true}
+    - {name: 对照_热门_平博, rule: favorite, book: 平博, stake: flat, control: true}
+    - {name: 对照_热门_最高, rule: favorite, book: 最高, stake: flat, control: true}
+    - {name: 对照_主队_平博, rule: home, book: 平博, stake: flat, control: true}
+    - {name: 对照_主队_最高, rule: home, book: 最高, stake: flat, control: true}
+    - {name: 跟模型_平博, rule: top, prob: model, book: 平博, stake: flat}
+    - {name: 跟模型_最高, rule: top, prob: model, book: 最高, stake: flat}
+    - {name: 模型价值3_平博, rule: value, prob: model, book: 平博, edge: 0.03, stake: flat}
+    - {name: 模型价值5_平博, rule: value, prob: model, book: 平博, edge: 0.05, stake: flat}
+    - {name: 模型价值8_平博, rule: value, prob: model, book: 平博, edge: 0.08, stake: flat}
+    - {name: 模型价值3_最高, rule: value, prob: model, book: 最高, edge: 0.03, stake: flat}
+    - {name: 模型价值5_最高, rule: value, prob: model, book: 最高, edge: 0.05, stake: flat}
+    - {name: 模型价值8_最高, rule: value, prob: model, book: 最高, edge: 0.08, stake: flat}
+    - {name: 融合价值3_最高, rule: value, prob: fusion, book: 最高, edge: 0.03, stake: flat}
+    - {name: 融合价值5_最高, rule: value, prob: fusion, book: 最高, edge: 0.05, stake: flat}
+    - {name: 融合价值8_最高, rule: value, prob: fusion, book: 最高, edge: 0.08, stake: flat}
+    - {name: 模型凯利_最高, rule: value, prob: model, book: 最高, edge: 0.03, stake: kelly}
+    - {name: 融合价值凯利_最高, rule: value, prob: fusion, book: 最高, edge: 0.03, stake: kelly}
