@@ -74,6 +74,23 @@ def test_collect_then_import_and_success_heartbeat(env):
     assert summary["写入"] == {"新增比赛": 2}
 
 
+def test_busy_source_refresh_does_not_start_collection_and_records_failure(env, monkeypatch):
+    from contextlib import contextmanager
+
+    job, settings, calls, _, tmp = env
+
+    @contextmanager
+    def busy(_settings):
+        raise TimeoutError("其他来源正在更新")
+        yield
+
+    monkeypatch.setattr(job, "data_write_lock", busy, raising=False)
+    with pytest.raises(TimeoutError, match="其他来源正在更新"):
+        job.run_refresh(settings)
+    assert calls == []
+    assert read_state("refresh_data", tmp / "jobs")["成功"] is False
+
+
 def test_collection_failure_does_not_import_and_is_not_swallowed(env):
     job, settings, calls, control, tmp = env
     control["collect_error"] = RuntimeError("赛程响应无效")

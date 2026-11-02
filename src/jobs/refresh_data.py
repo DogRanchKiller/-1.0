@@ -12,6 +12,7 @@ from src.clean.dongqiudi_import import run as import_raw
 from src.collect.dongqiudi import Collector, setup_logging
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
+from src.jobs.data_lock import data_write_lock
 from src.jobs.heartbeat import job_run, state_dir
 
 log = logging.getLogger("dongqiudi")
@@ -34,7 +35,7 @@ class RefreshCollector(Collector):
 def run_refresh(settings: dict | None = None) -> dict:
     """完整更新一次。测试传入临时设置，并替换采集器、导入函数；不读取任何密钥。"""
     settings = settings or load_settings()
-    with job_run("refresh_data", state_dir(settings)) as run:
+    with job_run("refresh_data", state_dir(settings)) as run, data_write_lock(settings):
         run.summary["阶段"] = "采集"
         con = connect(resolve_path(settings["paths"]["database"]))
         collector = None

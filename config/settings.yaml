@@ -47,6 +47,19 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
 
 football_data:
   timezone: Europe/London    # football-data 的开球时间是英国当地时间（已核对，见需求文档 6.1）
+  refresh_leagues: [E0, SP1, D1, I1, F1, E1, SP2, D2, I2, F2] # 只自动检查当前赛季；已有十联赛范围
+
+# 自动维护只更新已登记来源。北京时间每天运行，错过时开机补跑；不触发预测、研究或消息发送。
+data_refresh:
+  lock_timeout_seconds: 300   # 三个采集入口共用数据库旁的进程锁，最多等待五分钟
+  lock_poll_seconds: 0.25
+  football_data_at: '08:20'
+  cups_at: '07:20'
+  task_limit_minutes: 45
+
+cup_refresh:
+  enabled: true
+  competitions: [UCL, UEL, UECL, FAC, ELC, DFB, CI, CDR, CDF, UESC, ECS, DSC, ISC, SSC, FSC]
 
 scrape:
   min_interval_seconds: 5    # 同一网站两次请求之间至少隔几秒（低频访问）
@@ -123,6 +136,14 @@ dongqiudi:
 
 # 数据状态页 src/jobs/status_page.py（需求文档第 6.2、8 节）：超过这些界限就在网页上标出来，并弹窗提醒一次
 status:
+  data_health:
+    football_data_stale_hours: 36 # 每日检查，留出来源发布和开机补跑余量
+    cup_stale_hours: 36
+    dongqiudi_stale_hours: 8     # 赛程每六小时检查；每小时任务自身另按两小时监控
+    result_lookback_days: 7
+    result_due_hours: 3
+    upcoming_days: 8
+    closing_snapshot_stale_hours: 30
   hourly_stale_hours: 2      # 懂球帝每小时任务超过几小时没成功，算出错（关机、睡眠或程序坏了）
   max_failures_24h: 3        # 最近 24 小时失败超过几次算“注意”（偶尔一两次多半是网络抖动）
   backup_stale_hours: 30     # 最新备份超过几小时，算“注意”（每天 3:30 备份一次，留一点余地）
@@ -701,6 +722,8 @@ notify:
   # 定时任务监控（数据状态页“定时任务”和故障推送共用）。任务名见接口 2
   jobs:
     refresh_data: {name: 数据采集与导入, stale_hours: 2}   # 每小时采集成功后立即导入；失败时保留失败心跳
+    refresh_football_data: {name: 联赛赛果与收盘数据更新, stale_hours: 36}
+    refresh_cups: {name: 杯赛与欧战赛程更新, stale_hours: 36}
     scheduled_predict: {name: 定时预测, stale_hours: 2}     # 每 15 分钟跑一次；超过 2 小时没成功算故障
     review: {name: 赛后对账、复盘, stale_hours: 18}        # 每天 09:10、21:10；留 6 小时余地
     site: {name: 网站重新生成, stale_hours: 2}             # 每 15 分钟重新生成一次
