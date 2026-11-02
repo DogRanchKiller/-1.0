@@ -27,10 +27,11 @@ def test_match_page_tells_the_story_with_this_matchs_numbers(env):
     assert "结论是怎么得出来的" in t and page.count("<li><b class='step'>") == 6
     assert "利物浦平均进 1.40 球" in t and "阿森纳平均进 1.20 球" in t
     assert "最可能的 3 个是：1–1" in t
-    assert "合并时赔率占 60%、模型占 40%" in t and "0.979" in t and "0.964" in t
+    # 造的数据模型叫 gb，不是选比例用的 gb_l7：不把 gb_l7 的回测成绩写成这一版的理由
+    assert "合并时赔率占 60%、模型占 40%" in t and "用 gb_l7 模型回测选出来的（这一版用的是 gb）" in t and "0.979" not in t
     assert "这一版用到了赔率，但没有单独存赔率算出来的概率" in t       # 造的数据没存“赔率概率”，不编
-    assert "高 23.0 个百分点，门槛是 4 个百分点，够门槛" in t
-    assert "没到 28% 这条线" in t
+    assert "高 23.0 个百分点，现在的门槛是 4 个百分点。这一版写的是“倾向 主胜”。" in t
+    assert "平局 27.0%，平局风险的线是 28%，这一版没标平局风险" in t
     assert "所以几乎每场都是 ●●● 高" in t
     # 四块分析：没存模型解释的写明没有；伤停与首发写明模型不看
     for title in ("实力对比", "近期状态与赛程", "伤停与首发", "盘口与水位解读"):
@@ -102,3 +103,80 @@ def test_index_cell_is_short_and_record_starts_with_plain_summary(env):
     record = text_of(read(out, "record.html"))
     assert "1 / 1最新一版猜中胜平负（100%）" in record and "对照：一直猜主胜能中几场" in record
     assert record.index("最新一版猜中") < record.index("详细统计表")
+
+
+
+def one_row():
+    """site_data 里比赛 10 的一版，只留它一版（方便单独改存档内容看页面怎么写）。"""
+    data = site_data()
+    row = next(iter(data.preds[10].values()))
+    data.preds[10] = {k: v for k, v in data.preds[10].items() if v is row}
+    return data, row
+
+
+def test_old_row_without_fusion_does_not_claim_no_lean():
+    # 接融合之前存的旧版没有“融合”：不能写“两边差不多”，只说最可能的是哪个，并注明没存倾向
+    data, row = one_row()
+    row["detail"].pop("融合", None)
+    row["detail"].pop("融合概率", None)
+    row.update(p_home=.5, p_draw=.27, p_away=.23)
+    head = story.headline(data, row, "Liverpool", "Arsenal")
+    assert head == "最可能是利物浦赢（50%；这一版没有存倾向）"
+    t = text_of(story.chain_html(data, row, "Liverpool", "Arsenal"))
+    assert "这一版没有存倾向；按现在的门槛够" in t and "这一版没有存平局风险" in t and "两边差不多" not in t
+
+
+def test_stored_lean_wins_over_recomputed_threshold():
+    # 4 位小数的概率差正好在门槛边上：页面跟着存档写，并说明为什么和重算的不一样
+    data, row = one_row()
+    row["detail"]["融合概率"] = [.42, .20, .38]
+    row["detail"]["融合"]["倾向"] = {"result": {"side": 0, "p": .42, "lean": False}, "draw": {"p": .2, "risk": False}}
+    assert story.headline(data, row, "Liverpool", "Arsenal") == "两边差不多，没有明显倾向"
+    t = text_of(story.lean_rule_text(data.settings, row, [.42, .20, .38]))
+    assert "高 4.0 个百分点" in t and "这一版写的是“无明显倾向”。（以出这一版时定下的为准" in t
+
+
+def test_draw_shown_with_one_decimal_near_line():
+    data, row = one_row()
+    row["detail"]["融合"]["倾向"] = {"result": {"side": 0, "p": .4, "lean": False}, "draw": {"p": .2796, "risk": False}}
+    t = text_of(story.lean_rule_text(data.settings, row, [.40, .2796, .3204]))
+    assert "平局 28.0%，平局风险的线是 28%，这一版没标平局风险" in t and "没到 28%" not in t
+    assert "高 8.0 个百分点" in t                                # 40.0 − 32.0，用显示出来的数减
+
+
+def test_odds_probability_step_and_no_odds_downgrade():
+    data, row = one_row()
+    row["detail"]["赔率概率"] = [.45, .3, .25]
+    row["detail"]["赔率公司数"] = 12
+    t = text_of(story.chain_html(data, row, "Liverpool", "Arsenal"))
+    assert "12 家公司的胜平负赔率，先去掉公司的抽水，再平均成概率：利物浦赢 45% / 平 30% / 阿森纳赢 25%" in t
+    row["detail"]["融合"] = {"状态": "无赔率，未融合", "信心等级": 2, "降级候选因素": {"early": True}}
+    t = text_of(story.confidence_text(data.settings, row))
+    assert "这一版一家赔率都没有，降 1 级" in t and "赛季前几轮（只作提醒，不降级）" in t and "●●○ 中" in t
+
+
+def test_model_backtest_shown_only_for_the_model_that_chose_w():
+    data, row = one_row()
+    row["model"] = data.settings["fusion"]["model"]
+    t = text_of(story.chain_html(data, row, "Liverpool", "Arsenal"))
+    assert "0.979" in t and "0.964" in t
+
+
+def test_odds_move_uses_only_prices_before_cutoff_each_book_against_itself():
+    import pandas as pd
+    o = pd.DataFrame([("A", "1x2", 2.0, 3.5, 4.0, "2026-11-05 08:00:00"), ("A", "1x2", 1.9, 3.6, 4.2, "2026-11-06 08:00:00"),
+                      ("B", "1x2", 2.0, 3.4, 3.9, "2026-11-06 09:00:00"),       # B 后来才开，不算“变动”
+                      ("A", "1x2", 1.2, 6.0, 9.0, "2026-11-06 13:00:00")],      # 截止以后的，不能用
+                     columns=["bookmaker", "market", "home", "draw", "away", "changed_at_utc"])
+    p0, p1, n = story.cutoff_move(o, "2026-11-06 10:00:00")
+    assert n == 2
+    from src.common.odds import devig
+    a0, a1, b = (devig([[2.0, 3.5, 4.0]])[0], devig([[1.9, 3.6, 4.2]])[0], devig([[2.0, 3.4, 3.9]])[0])
+    assert abs(p0[0] - (a0[0] + b[0]) / 2) < 1e-12 and abs(p1[0] - (a1[0] + b[0]) / 2) < 1e-12
+    assert story.cutoff_move(o, "2026-11-01 00:00:00") is None
+
+
+def test_form_uses_real_game_count():
+    v = {("home", "form5_pts_own"): 1.5, ("home", "form5_gf_own"): 1.0, ("home", "form5_ga_own"): 2.0,
+         ("home", "form_n_own"): 2.0}
+    assert "甲最近 2 场：场均 1.5 分" in story.form_block(v, "甲", "乙")

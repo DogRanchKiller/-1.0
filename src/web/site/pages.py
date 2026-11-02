@@ -51,13 +51,22 @@ def latest_cell(data: SiteData, mid: int) -> str:
 
 # ---------- 首页 ----------
 # 首页表格上面的“怎么看”：颜色条、概率、倾向、信心各是什么意思
-INDEX_GUIDE = ("<div class='card pad guide'><b>怎么看这张表</b><ul class='points small'>"
-               "<li>彩色条：<span class='legend'><span><i class='s0'></i>主队赢</span><span><i class='s1'></i>平局</span>"
-               "<span><i class='s2'></i>客队赢</span></span>，越长越可能。下面三个数就是三种结果的可能性，加起来 100%。</li>"
-               "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
-               "<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。现在几乎每场都是 ●●● 高，因为回测里还没找到能区分把握大小的信号，"
-               "只有完全没有赔率时才降级，所以它暂时不能拿来挑比赛。</li>"
-               "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
+def index_guide(settings: dict) -> str:
+    """首页表格上面的“怎么看”。信心那一条按 settings.yaml 的 confidence 写：现在一个降级因素都不用时，说明几乎都是 ●●● 高。"""
+    conf = settings.get("confidence") or {}
+    if conf.get("downgrade_factors"):
+        level = "按规则碰上提醒因素会降级，规则在单场页“结论是怎么得出来的”最后一步。"
+    else:
+        level = ("现在几乎每场都是 ●●● 高，因为回测里还没找到能区分把握大小的信号，"
+                 "只有完全没有赔率时才降级，所以它暂时不能拿来挑比赛。")
+    return ("<div class='card pad guide'><b>怎么看这张表</b><ul class='points small'>"
+            "<li>彩色条：<span class='legend'><span><i class='s0'></i>主队赢</span><span><i class='s1'></i>平局</span>"
+            "<span><i class='s2'></i>客队赢</span></span>，越长越可能。下面三个数就是三种结果的可能性，加起来 100%。</li>"
+            "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
+            f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>"
+            "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
+
+
 def render_index(data: SiteData, teams: TeamFiles) -> str:
     cfg = data.settings["site"]
     now = to_utc_text(data.now)
@@ -105,7 +114,7 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
     notes = "".join(f"<li>{e(n)}</li>" for n in data.notes[:10])
     body = (f"<h1>足球预测 <span class='accent'>即将开赛</span></h1><p class='muted'>"
             f"{e('、'.join(data.settings['leagues'][cfg['leagues']].values()))}，时间都是北京时间。点比赛看各版本对比、比分概率和赔率变动。</p>"
-            f"{stats}<div class='note'>{NOT_ADVICE}</div>{INDEX_GUIDE}{blocks}"
+            f"{stats}<div class='note'>{NOT_ADVICE}</div>{index_guide(data.settings)}{blocks}"
             f"<h2>最近踢完的</h2>{rec}"
             + (f"<h2>读数据时的提示</h2><ul class='points small muted'>{notes}</ul>" if notes else ""))
     return page("足球预测 - 即将开赛", body, "", data.now, cfg["refresh_minutes"])

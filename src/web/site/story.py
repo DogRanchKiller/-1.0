@@ -14,13 +14,15 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 
 from src.common import markets
+from src.common.odds import devig
 from src.web.explanation import validate_explanation
 from src.web.preview_page import ah_text
 from src.web.site.common import OUTCOMES, bar_html, e, level_name, pct0, pct1
 from src.web.site.data import SiteData
-from src.web.site.match import final_probs, fusion, odds_timeline, version_matrices
+from src.web.site.match import final_probs, fusion, version_matrices
 
 # 降级候选因素的中文名（src/predict 存的“降级候选因素”里的键）
 FACTOR_NAMES = {"gap": "模型和赔率分歧大", "early": "赛季前几轮", "promoted": "有升班马", "no_pinnacle": "没有平博赔率",
@@ -57,19 +59,37 @@ def bar_legend(data: SiteData, home: str, away: str) -> str:
 def headline(data: SiteData, row: dict, home: str, away: str) -> str:
     """例：“佛罗伦萨赢的可能稍大（40%）”；差不多时写“两边差不多，没有明显倾向”。只描述可能性，不给建议。"""
     p, _ = final_probs(row)
-    ln = fusion(row).get("倾向") or {}
-    res = ln.get("result") if isinstance(ln, dict) else None
+    ln = fusion(row).get("倾向")
+    ln = ln if isinstance(ln, dict) else {}
     names = [data.zh(home), "平局", data.zh(away)]
-    if isinstance(res, dict) and res.get("lean") and res.get("side") in (0, 1, 2):
-        side = res["side"]
-        text = "平局的可能最大" if side == 1 else f"{names[side]}赢的可能更大"
-        text += f"（{pct0(p[side])}）"
+    lean, side = stored_lean(row)
+    if lean is None:
+        # 旧格式存档（接融合之前出的那一版）没存倾向：只说哪个最可能，不判断“够不够倾向”
+        side = int(np.argmax(p))
+        text = ("最可能是平局" if side == 1 else f"最可能是{names[side]}赢") + f"（{pct0(p[side])}；这一版没有存倾向）"
+    elif lean:
+        text = ("平局的可能最大" if side == 1 else f"{names[side]}赢的可能更大") + f"（{pct0(p[side])}）"
     else:
         text = "两边差不多，没有明显倾向"
-    draw = ln.get("draw") if isinstance(ln, dict) else None
+    draw = ln.get("draw")
     if isinstance(draw, dict) and draw.get("risk"):
         text += f"；平局风险高（{pct0(p[1])}）"
     return text
+
+
+def stored_lean(row: dict) -> tuple[bool | None, int | None]:
+    """存档里胜平负的倾向：(有没有倾向, 哪一边 0/1/2)。没存或存得不对返回 (None, None)。
+    页面上“写不写倾向”一律以存档为准（出这一版时按当时的门槛定的），不按现在的门槛重算。"""
+    ln = fusion(row).get("倾向")
+    res = ln.get("result") if isinstance(ln, dict) else None
+    if not isinstance(res, dict) or not isinstance(res.get("lean"), bool):
+        return None, None
+    side = res.get("side")
+    if res["lean"]:
+        if isinstance(side, bool) or side not in (0, 1, 2):
+            return None, None
+        return True, int(side)
+    return False, None
 
 
 # ---------- 结论是怎么得出来的 ----------
@@ -89,7 +109,7 @@ def chain_html(data: SiteData, row: dict, home: str, away: str) -> str:
         g = np.arange(model_m.shape[0])
         xh, xa = float(model_m.sum(axis=1) @ g), float(model_m.sum(axis=0) @ g)
         steps.append(("模型先猜两队各进几球",
-                      f"把两队的实力评分、近期进球失球、射正、休息天数等交给模型，它估计：{e(hn)}平均进 <b>{xh:.2f}</b> 球，"
+                      f"模型（{e(str(row.get('model') or '未知'))}）根据两队以前的比赛数据估计：{e(hn)}平均进 <b>{xh:.2f}</b> 球，"
                       f"{e(an)}平均进 <b>{xa:.2f}</b> 球（这叫“预期进球”）。"))
         tops = "、".join(f"{h}–{a}（{pct1(q)}）" for h, a, q in markets.top_scores(model_m, 3))
         steps.append(("由此算出每个比分的可能性",
@@ -112,7 +132,7 @@ def chain_html(data: SiteData, row: dict, home: str, away: str) -> str:
 
     # 第 4 步：赔率
     mkt = d.get("赔率概率")
-    books = _num(fus.get("胜平负几家")) or _num(d.get("赔率公司数"))
+    books = _num(d.get("赔率公司数")) or _num(fus.get("胜平负几家"))     # “赔率概率”是全部公司的平均，家数也按全部公司
     if isinstance(mkt, list) and len(mkt) == 3 and all(_num(x) is not None for x in mkt):
         steps.append(("再看博彩公司的赔率",
                       f"{int(books) if books else '几'} 家公司的胜平负赔率，先去掉公司的抽水，再平均成概率："
@@ -128,7 +148,10 @@ def chain_html(data: SiteData, row: dict, home: str, away: str) -> str:
     info = (cfg.get("preview") or {}).get("model_info") or {}
     if src == "融合" and w is not None:
         why = ""
-        if all(k in info for k in ("backtest_period", "backtest_n", "backtest_model", "backtest_pinnacle")):
+        chosen = (cfg.get("fusion") or {}).get("model")
+        if row.get("model") != chosen:
+            why = f"这个比例是用 {e(str(chosen))} 模型回测选出来的（这一版用的是 {e(str(row.get('model')))}）。"
+        elif all(k in info for k in ("backtest_period", "backtest_n", "backtest_model", "backtest_pinnacle")):
             why = (f"为什么这么分：用 {e(info['backtest_period'])} 年 {int(info['backtest_n'])} 场比赛回测，模型的平均误差（log loss，"
                    f"越小越准）是 {float(info['backtest_model']):.3f}，平博收盘赔率是 {float(info['backtest_pinnacle']):.3f}，"
                    "赔率比模型准，所以按回测选出来的比例更信赔率。")
@@ -161,19 +184,32 @@ def _probs3(p, hn: str, an: str) -> str:
 def lean_rule_text(cfg: dict, row: dict, p) -> str:
     """第 6 步前半：门槛是多少、这场差多少、所以写什么。门槛读 settings.yaml 的 lean。"""
     th = cfg.get("lean") or {}
+    if any(_num(x) is None for x in p):
+        return "这一版的概率不完整，没法说明倾向。"
     order = sorted(range(3), key=lambda i: -p[i])
-    gap = p[order[0]] - p[order[1]]
+    shown = [round(x * 100, 1) for x in p]                  # 页面上显示的一位小数；差值用它算，读者自己减也对得上
+    gap = round(shown[order[0]] - shown[order[1]], 1)
+    lean, side = stored_lean(row)
     parts = []
     r = _num(th.get("result"))
     if r is not None:
-        verdict = (f"够门槛，写“倾向 {OUTCOMES[order[0]]}”" if gap >= r - 1e-12 else "不够门槛，写“无明显倾向”")
-        parts.append(f"胜平负：最高的（{OUTCOMES[order[0]]} {pct0(p[order[0]])}）比第二高的（{OUTCOMES[order[1]]} "
-                     f"{pct0(p[order[1]])}）高 {gap * 100:.1f} 个百分点，门槛是 {r * 100:g} 个百分点，{verdict}。")
+        head = (f"胜平负：最高的（{OUTCOMES[order[0]]} {shown[order[0]]:.1f}%）比第二高的（{OUTCOMES[order[1]]} "
+                f"{shown[order[1]]:.1f}%）高 {gap:.1f} 个百分点，现在的门槛是 {r * 100:g} 个百分点。")
+        now = p[order[0]] - p[order[1]] >= r - 1e-12
+        if lean is None:
+            verdict = f"这一版没有存倾向；按现在的门槛{'够' if now else '不够'}。"
+        else:
+            verdict = f"这一版写的是“{('倾向 ' + OUTCOMES[side]) if lean else '无明显倾向'}”。"
+            if lean != now or (lean and side != order[0]):
+                verdict += "（以出这一版时定下的为准；和现在按门槛算的不一样，是因为四舍五入或门槛后来改过。）"
+        parts.append(head + verdict)
     dr = _num(th.get("draw"))
     if dr is not None:
-        risk = p[1] >= dr - 1e-12
-        parts.append(f"平局 {pct0(p[1])}，{'达到' if risk else '没到'} {dr * 100:g}% 这条线，"
-                     f"{'标“平局风险高”' if risk else '不标平局风险'}。")
+        ln = fusion(row).get("倾向")
+        draw = ln.get("draw") if isinstance(ln, dict) else None
+        risk = draw.get("risk") if isinstance(draw, dict) and isinstance(draw.get("risk"), bool) else None
+        mark = "标了“平局风险高”" if risk else ("没标平局风险" if risk is False else "这一版没有存平局风险")
+        parts.append(f"平局 {shown[1]:.1f}%，平局风险的线是 {dr * 100:g}%，这一版{mark}。")
     o = _num(th.get("over25"))
     if o is not None:
         parts.append(f"大小球、双方进球、亚盘：偏向那边的概率比 50% 多 {o * 100:g} 个百分点以上才写倾向。")
@@ -185,17 +221,27 @@ def confidence_text(cfg: dict, row: dict) -> str:
     fus = fusion(row)
     lv = fus.get("信心等级")
     conf = cfg.get("confidence") or {}
-    used = [FACTOR_NAMES.get(k, k) for k in conf.get("downgrade_factors") or []]
+    used_keys = list(conf.get("downgrade_factors") or [])
+    used = [FACTOR_NAMES.get(k, k) for k in used_keys]
     flags = fus.get("降级候选因素")
-    hit = [FACTOR_NAMES.get(k, k) for k, x in flags.items() if x] if isinstance(flags, dict) else []
+    hit_keys = [k for k, x in flags.items() if x is True] if isinstance(flags, dict) else []
+    hit_down = [FACTOR_NAMES.get(k, k) for k in hit_keys if k in used_keys]
+    hit_note = [FACTOR_NAMES.get(k, k) for k in hit_keys if k not in used_keys]
+    drop = int(_num(conf.get("no_odds_downgrade")) or 0)
     rule = "信心从 ●●● 高开始。"
     if used:
         rule += f"碰上这些因素每个降一级：{'、'.join(used)}。"
     else:
-        rule += ("“模型和赔率分歧大”“赛季前几轮”“有升班马”“没有平博赔率”这几个因素在开发赛季回测里都没有让预测明显变差，"
-                 "所以现在一个都不降级；")
-    rule += f"只有一家赔率都没有时降 {int(_num(conf.get('no_odds_downgrade')) or 0)} 级。"
-    here = f"这场：{'碰上了 ' + '、'.join(hit) + '（只作提醒）' if hit else '没有碰上要提醒的因素'}，信心 {level_name(lv)}。"
+        rule += "提醒的那几个因素在开发赛季回测里都没有让预测明显变差，所以现在一个都不降级；"
+    rule += f"一家赔率都没有时降 {drop} 级。"
+    why = []
+    if fus.get("状态") == "无赔率，未融合" and drop:
+        why.append(f"这一版一家赔率都没有，降 {drop} 级")
+    if hit_down:
+        why.append(f"碰上了 {'、'.join(hit_down)}（每个降一级）")
+    if hit_note:
+        why.append(f"碰上了 {'、'.join(hit_note)}（只作提醒，不降级）")
+    here = f"这场：{'；'.join(why) if why else '没有碰上要提醒的因素'}，信心 {level_name(lv)}。"
     if lv == 3 and not used:
         here += "所以几乎每场都是 ●●● 高，这不等于“很有把握”，只说明还没找到能区分把握大小的信号。"
     return "<br>" + e(rule + here)
@@ -228,7 +274,7 @@ def strength_block(v: dict, hn: str, an: str) -> str:
         out.append(f"按主客场实力评分，{e(hn)}在主场预计净胜 {egd:+.2f} 球。")
     # dyn_loglam_for / against：动态评分模型对这场的 log（预期进球），已经算上对手防守和主场优势（src/models/dynamic.py）
     lf, la = v.get(("home", "dyn_loglam_for")), v.get(("home", "dyn_loglam_against"))
-    if lf is not None and la is not None:
+    if lf is not None and la is not None and max(abs(lf), abs(la)) < 5:     # e^5 ≈ 148 球，再大就是坏数，不写
         out.append(f"动态评分（按两队最近的进攻、防守随时更新）估计这场：{e(hn)}约进 {math.exp(lf):.2f} 球，"
                    f"{e(an)}约进 {math.exp(la):.2f} 球（已经算上对手防守和主场）。")
     for side, name in (("home", hn), ("away", an)):
@@ -243,8 +289,10 @@ def form_block(v: dict, hn: str, an: str) -> str:
     out = []
     for side, name in (("home", hn), ("away", an)):
         pts, gf, ga, sf = (v.get((side, f"form5_{k}_own")) for k in ("pts", "gf", "ga", "sotf"))
+        n = v.get((side, "form_n_own"))                     # 本联赛一年内踢了几场；不满 5 场时按实际场数平均
         if None not in (pts, gf, ga):
-            s = f"{e(name)}最近 5 场：场均 {pts:.1f} 分、进 {gf:.1f} 球、丢 {ga:.1f} 球"
+            games = f"最近 {min(5, int(n))} 场" if n is not None and n >= 1 else "最近几场"
+            s = f"{e(name)}{games}：场均 {pts:.1f} 分、进 {gf:.1f} 球、丢 {ga:.1f} 球"
             out.append(s + (f"、射正 {sf:.1f} 次。" if sf is not None else "。"))
     for side, name in (("home", hn), ("away", an)):
         rest = v.get((side, "rest_days_own"))
@@ -273,14 +321,37 @@ def odds_block(data: SiteData, mid: int, row: dict, hn: str, an: str) -> str:
     if isinstance(ou, dict) and _num(ou.get("line")) is not None and _num(ou.get("p_over")) is not None:
         out.append(f"大小球 {float(ou['line']):g} 球（{int(_num(ou.get('n_books')) or 0)} 家）：去掉抽水后，"
                    f"总进球超过 {float(ou['line']):g} 球的胜算约 {pct0(ou['p_over'])}。")
-    odds = data.odds.get(mid)
-    line = odds_timeline(odds) if odds is not None and not odds.empty else []
-    if len(line) >= 2:
-        (_, p0, _), (_, p1, n1) = line[0], line[-1]
+    mv = cutoff_move(data.odds.get(mid), row.get("cutoff_utc"))
+    if mv is not None:
+        p0, p1, n = mv
         i = int(np.argmax(np.abs(p1 - p0)))
-        move = "基本没动" if abs(p1[i] - p0[i]) < 0.01 else f"变得最多的是{OUTCOMES[i]}：{pct0(p0[i])} → {pct0(p1[i])}"
-        out.append(f"胜平负赔率从初盘到最新（{n1} 家平均），{move}。赔率大幅变动常常说明有新消息（伤停、首发等）。")
+        small = float(data.settings["site"]["story_move_min"])
+        move = ("基本没动" if abs(p1[i] - p0[i]) < small
+                else f"变得最多的是{OUTCOMES[i]}：{pct1(p0[i])} → {pct1(p1[i])}")
+        out.append(f"胜平负赔率：{n} 家公司各自从开出的第一个价到这一版截止时（每家去掉抽水后平均），{move}。"
+                   "赔率大幅变动常常说明有新消息（伤停、首发等）。")
     return _li(out)
+
+
+def cutoff_move(odds, cutoff) -> tuple[np.ndarray, np.ndarray, int] | None:
+    """这一版截止时间以前，每家公司胜平负的“第一个价”和“最后一个价”，各自去水后平均：(开始, 截止时, 几家)。
+    只算截止以前有价的公司，每家和自己比；一家都没有返回 None。"""
+    if odds is None or odds.empty or not cutoff:
+        return None
+    o = odds[odds["market"] == "1x2"].dropna(subset=["home", "draw", "away"])
+    o = o[(o[["home", "draw", "away"]] > 1).all(axis=1)].copy()
+    if o.empty:
+        return None
+    o["_t"] = pd.to_datetime(o["changed_at_utc"])
+    o = o[o["_t"] <= pd.Timestamp(cutoff)].sort_values("_t", kind="stable")
+    if o.empty:
+        return None
+    g = o.groupby("bookmaker", sort=True)
+    cols = ["home", "draw", "away"]
+    first, last = g.head(1).sort_values("bookmaker"), g.tail(1).sort_values("bookmaker")
+    p0 = devig(first[cols].to_numpy(float)).mean(axis=0)
+    p1 = devig(last[cols].to_numpy(float)).mean(axis=0)
+    return p0, p1, len(first)
 
 
 def analysis_html(data: SiteData, mid: int, row: dict, home: str, away: str) -> str:
