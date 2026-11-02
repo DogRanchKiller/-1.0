@@ -34,7 +34,8 @@ def report():
          "state": "not_due", "label": "尚未到点", "prediction_id": None, "issues": []},
     ]
     return {
-        "generated_at_utc": "2026-11-02 11:00:00", "scope": {"model": "gb_l7", "model_version": "gb_l7-fixture",
+        "generated_at_utc": "2026-11-02 11:00:05", "evaluation_cutoff_utc": "2026-11-02 11:00:00",
+        "scope": {"model": "gb_l7", "model_version": "gb_l7-fixture",
           "leagues": ["I1"], "enabled_since_utc": "2026-11-02 01:47:37", "start_utc": "2026-10-30 11:00:00",
           "end_utc": "2026-11-09 11:00:00", "grace_minutes": 20},
         "summary": {"match_count": 1, "recorded_slot_count": 1, "late_slot_count": 1,
@@ -85,6 +86,19 @@ def test_lifecycle_page_keeps_future_late_and_unverified_evidence_distinct():
     assert "全链验收通过" not in html and "首发验收通过" not in html and "准确率" not in html
     assert "<script>" not in html and "&lt;script&gt;" in html and "&lt;raw&gt;" in html
     assert "id='match-146417'" in html and "href='match/146417.html'" in html
+
+
+def test_report_generation_time_does_not_hide_historical_evidence_cutoff():
+    from src.web.site import lifecycle
+
+    data = site_fixture()
+    data.lifecycle["evaluation_cutoff_utc"] = "2026-11-01 01:02:03"
+    html = lifecycle.render(data)
+    assert "证据截止" in html and "11-01 09:02:03" in html
+    assert "报告生成" in html and "11-02 19:00:05" in html
+    data.lifecycle.pop("evaluation_cutoff_utc")
+    html = lifecycle.render(data)
+    assert "证据截止时间未知" in html
 
 
 @pytest.mark.parametrize("payload", [{}, {"generated_at_utc": "2026-11-02 11:00:00", "scope": {},

@@ -141,9 +141,11 @@ def render(data: SiteData) -> str:
         return page("逐场验收 - 足球预测", body, "", data.now, data.settings["site"]["refresh_minutes"])
     scope, summary = report.get("scope") or {}, report.get("summary") or {}
     competitions = "、".join(data.comp(code) for code in scope.get("leagues", [])) or "未知"
+    cutoff = (f"证据截止 {stamp(report['evaluation_cutoff_utc'])}" if report.get("evaluation_cutoff_utc")
+              else "证据截止时间未知")
     scope_html = (f"<p class='small'>当前模型 {e(scope.get('model') or '未知')} / {e(scope.get('model_version') or '未知')}；"
                   f"赛事 {e(competitions)}。比赛范围 {stamp(scope.get('start_utc'))} 至 {stamp(scope.get('end_utc'))}。</p>"
-                  f"<p class='small'>启用时间 {stamp(scope.get('enabled_since_utc'))}；证据快照 "
+                  f"<p class='small'>启用时间 {stamp(scope.get('enabled_since_utc'))}；{cutoff}；报告生成 "
                   f"{stamp(report.get('generated_at_utc'))}。页面时间均为北京时间。</p>")
     counters = [("match_count", "本次范围内比赛"), ("archived_complete_count", "三时点有效存档齐备"),
                 ("scored_complete_count", "三时点评分齐备"), ("closing_complete_count", "四组收盘证据齐备"),
