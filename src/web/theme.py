@@ -131,4 +131,50 @@ dl.kv dt { color: var(--sub); } dl.kv dd { margin: 0; }
 @media (max-width: 760px) { dl.kv { grid-template-columns: 1fr; } dl.kv dd { margin-bottom: 6px; } }
 .legend { display: inline-flex; gap: 14px; flex-wrap: wrap; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* 2026-11-02 看得清楚一点（工作树 S11）：正式网站字大一号、行距大一点、版面窄一点，次要文字不要太淡 */
+body { font-size: 16px; line-height: 1.75; }
+.wrap { max-width: 1180px; }
+h2 { font-size: 20px; margin-top: 40px; }
+h3 { font-size: 16.5px; color: var(--text); margin: 0 0 8px; }
+.small { font-size: 14px; }
+.muted { color: #7d9286; }
+td { font-size: 15px; } th { font-size: 13.5px; }
+.note { font-size: 15px; }
+details.more > summary { font-size: 16.5px; }
+.points li { margin: 6px 0; }
+/* 结论卡片：一句话 + 大号概率条 */
+.hero .headline { font-size: clamp(20px, 2.6vw, 26px); font-weight: 650; margin: 0 0 12px; color: var(--text); }
+.pbar { display: flex; width: 100%; max-width: 220px; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 6px;
+        background: var(--line); }
+.pbar.big { max-width: none; height: 30px; border-radius: 8px; margin: 4px 0 8px; }
+.pbar .seg { display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 650; color: #062016;
+             white-space: nowrap; overflow: hidden; }
+.s0 { background: var(--green); } .s1 { background: #8fa397; } .s2 { background: var(--blue); }
+/* 结论链：一步一个圆圈数字 */
+ol.chain { counter-reset: step; list-style: none; margin: 0; padding: 0; }
+ol.chain > li { counter-increment: step; position: relative; padding: 0 0 18px 46px; }
+ol.chain > li:last-child { padding-bottom: 0; }
+ol.chain > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 30px; height: 30px;
+                        border-radius: 50%; background: var(--card-2); border: 1px solid var(--green-2); color: var(--green);
+                        display: flex; align-items: center; justify-content: center; font-weight: 650; }
+ol.chain > li:not(:last-child)::after { content: ""; position: absolute; left: 15px; top: 34px; bottom: 4px; width: 1px;
+                                        background: var(--line); }
+ol.chain .step { display: block; color: var(--green); margin-bottom: 2px; }
+ol.chain b { color: var(--text); }
+@media (max-width: 760px) { body { font-size: 15px; } .pbar.big { height: 26px; } ol.chain > li { padding-left: 40px; } }
+/* 表格太宽时能在卡片里左右滑（上面 .card > .scroll 的 overflow: hidden 会把左右滑也关掉，这里只放开左右） */
+.card > .scroll { overflow-x: auto; overflow-y: hidden; }
+/* 首页的比赛列表（table class='list'）：手机上每场变成一小块，不再挤成一字一行 */
+@media (max-width: 760px) {
+  table.list thead { display: none; }
+  table.list, table.list tbody, table.list tr { display: block; width: 100%; }
+  table.list tr { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  table.list tr:last-child { border-bottom: none; }
+  table.list td { display: inline-block; border: none; padding: 0 10px 0 0; vertical-align: baseline; }
+  table.list td:empty { display: none; }
+  table.list td:nth-child(n+3) { display: block; padding: 6px 0 0; }
+  table.list td.match { font-size: 16px; }
+  table.list .pbar { max-width: none; }
+}
 """

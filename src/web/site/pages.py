@@ -11,10 +11,10 @@ import pandas as pd
 
 from src.features.known_time import to_utc_text
 from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics, metric_text
-from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bj_text, day_title, details,
+from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bar_html, bj_text, day_title, details,
                                  e, kickoff_text, level_name, match_href, page, placeholder, table)
 from src.web.site.data import SiteData
-from src.web.site.match import (archive_name, conclusion_html, hit_html, identity_text, known_text,
+from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text,
                                 score_text, side_of, version_name)
 
 
@@ -41,11 +41,23 @@ def latest_cell(data: SiteData, mid: int) -> str:
     if lt is None:
         return "<span class='muted'>还没有预测</span>"
     kind, row = lt
-    return (f"{conclusion_html(row)}<br><span class='small muted'>{e(identity_text(row))}，{e(version_name(kind))}，"
-            f"{e(archive_name(row.get('archive_status')))}，{e(bj_text(row['cutoff_utc']))} 截止</span>")
+    # 一格里：三色小条 + 概率和信心 + 各玩法倾向，最下面一行淡字写是哪一版。
+    # 模型版本、归档状态这些技术信息只放在鼠标悬停的提示里（title），点进单场页的“技术细节”能看到全部。
+    p, _ = final_probs(row)
+    tip = f"{identity_text(row)}，{archive_name(row.get('archive_status'))}，{bj_text(row['cutoff_utc'])} 截止"
+    return (f"<div title='{e(tip)}'>{bar_html(p)}{conclusion_html(row)}"
+            f"<br><span class='small muted'>{e(version_name(kind))}这一版</span></div>")
 
 
 # ---------- 首页 ----------
+# 首页表格上面的“怎么看”：颜色条、概率、倾向、信心各是什么意思
+INDEX_GUIDE = ("<div class='card pad guide'><b>怎么看这张表</b><ul class='points small'>"
+               "<li>彩色条：<span class='legend'><span><i class='s0'></i>主队赢</span><span><i class='s1'></i>平局</span>"
+               "<span><i class='s2'></i>客队赢</span></span>，越长越可能。下面三个数就是三种结果的可能性，加起来 100%。</li>"
+               "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
+               "<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。现在几乎每场都是 ●●● 高，因为回测里还没找到能区分把握大小的信号，"
+               "只有完全没有赔率时才降级，所以它暂时不能拿来挑比赛。</li>"
+               "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
 def render_index(data: SiteData, teams: TeamFiles) -> str:
     cfg = data.settings["site"]
     now = to_utc_text(data.now)
@@ -77,7 +89,7 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
                f"<td class='match'>{match_link(data, mid, '')}</td>", latest_cell(data, mid), state_html(data, mid)]
         groups.setdefault(key, (title, []))[1].append(row)
     if groups:
-        blocks = "".join(f"<h2>{e(title)}</h2>" + table(["时间", "联赛", "比赛", "最新一版的结论", ""], rows)
+        blocks = "".join(f"<h2>{e(title)}</h2>" + table(["时间", "联赛", "比赛", "最新一版的结论", ""], rows, "list")
                          for _, (title, rows) in sorted(groups.items()))
     else:
         blocks = "<h2>即将开赛</h2>" + placeholder(f"未来 {cfg['days_ahead']} 天没有{'、'.join(data.settings['leagues'][cfg['leagues']].values())}的比赛")
@@ -88,12 +100,12 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
         rec_rows.append([e(kickoff_text(m)), e(data.comp(m["competition"])), f"<td class='match'>{match_link(data, mid, '')}</td>",
                          state_html(data, mid) or "<span class='muted'>比分还没进来</span>", latest_cell(data, mid) if lt else "—",
                          hit_html(lt[1], data.results.get(mid)) if lt else "—"])
-    rec = (table(["开球", "联赛", "比赛", "赛果", "赛前最后一版", "胜平负猜中"], rec_rows) if rec_rows
+    rec = (table(["开球", "联赛", "比赛", "赛果", "赛前最后一版", "胜平负猜中"], rec_rows, "list") if rec_rows
            else placeholder(f"最近 {cfg['days_back']} 天没有踢完的比赛"))
     notes = "".join(f"<li>{e(n)}</li>" for n in data.notes[:10])
     body = (f"<h1>足球预测 <span class='accent'>即将开赛</span></h1><p class='muted'>"
             f"{e('、'.join(data.settings['leagues'][cfg['leagues']].values()))}，时间都是北京时间。点比赛看各版本对比、比分概率和赔率变动。</p>"
-            f"{stats}<div class='note'>{NOT_ADVICE}</div>{blocks}"
+            f"{stats}<div class='note'>{NOT_ADVICE}</div>{INDEX_GUIDE}{blocks}"
             f"<h2>最近踢完的</h2>{rec}"
             + (f"<h2>读数据时的提示</h2><ul class='points small muted'>{notes}</ul>" if notes else ""))
     return page("足球预测 - 即将开赛", body, "", data.now, cfg["refresh_minutes"])
@@ -158,6 +170,24 @@ def render_team(data: SiteData, team: str, teams: TeamFiles) -> str:
 
 
 # ---------- 战绩页 ----------
+def record_summary(data: SiteData) -> str:
+    """战绩页最上面的大白话：踢完、有预测的比赛里，最新一版“最可能的那项”猜中了几场。
+
+    只是看个大概：猜中率受运气影响很大，几十场看不出好坏；对照写“这些比赛里主队赢了几场”（一直猜主胜能中几场）。
+    更全的对账（log loss、和收盘赔率比）在下面“详细统计”里。
+    """
+    done = [mid for mid in data.preds if mid in data.results and data.latest(mid) is not None]
+    if not done:
+        return ""
+    hits = sum(int(np.argmax(final_probs(data.latest(mid)[1])[0])) == side_of(data.results[mid]) for mid in done)
+    home = sum(side_of(data.results[mid]) == 0 for mid in done)
+    n = len(done)
+    return (f"<div class='stats'><div class='stat hi'><b>{hits} / {n}</b><span>最新一版猜中胜平负（{hits / n:.0%}）</span></div>"
+            f"<div class='stat'><b>{home} / {n}</b><span>对照：一直猜主胜能中几场</span></div></div>"
+            "<p class='small'>猜中 = 概率最大的那项和赛果一样。足球随机性大，几十场的猜中率主要看运气，"
+            "要几百场以上才看得出模型好不好；更准的比法是下面“详细统计”里的 log loss（越小越准）。</p>")
+
+
 def render_record(data: SiteData, out_dir: Path) -> str:
     """总战绩，从 data/review/scores.csv 汇总（K2 每次全部重算）。"""
     cfg = data.settings["site"]
@@ -272,16 +302,19 @@ def render_record(data: SiteData, out_dir: Path) -> str:
             text = "读不了"
         rep = (f"<h2>周报、月报</h2><ul class='points'>{links}</ul>"
                + details(f"最新一份：{latest.name}", f"<pre class='small' style='white-space:pre-wrap'>{e(text)}</pre>"))
-    body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
-            + review_notes
-            + f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
-            f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
-            f"收盘字段来自有证据的来源声明，不表示恰好在开球瞬间采集；最后一次观察到的赛前价格单独保留。零匹配表示无匹配证据。</p>"
-            f"<h2>分组成绩</h2>{summary}<h2>独立收盘标杆</h2>{benchmarks}<h2>逐家公司同场比较</h2>{pairs}"
+    tech = (f"<h2>分组成绩</h2>{summary}<h2>独立收盘标杆</h2>{benchmarks}<h2>逐家公司同场比较</h2>{pairs}"
             f"<h2>收盘证据覆盖</h2><p class='small muted'>分母为当前复盘比赛集合，各公司、玩法独立统计；缺失原因可以重叠。</p>{coverage_table}"
             f"<h2>按保存的信心等级</h2>{by_level}<h2>概率校准</h2>{calibration}"
             f"<h2>按信心等级校准</h2>{confidence_calibration}"
             f"<h2>按联赛</h2>{summary_table(metrics['competitions'], ('competition',))}"
-            f"<h2>按比赛标签（未知单列）</h2>{summary_table(metrics['tags'], ('tag', 'tag_value'))}"
-            + (f"<h2>最近踢完的</h2>{recent}" if recent else "") + rep)
+            f"<h2>按比赛标签（未知单列）</h2>{summary_table(metrics['tags'], ('tag', 'tag_value'))}")
+    body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
+            + review_notes + record_summary(data)
+            + (f"<h2>最近踢完的</h2>{recent}" if recent else "") + rep
+            + "<h2>详细统计</h2>"
+            + details("详细统计表（log loss、校准、按信心等级、按联赛、和收盘赔率逐家比较）",
+                      f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
+            f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
+            f"收盘字段来自有证据的来源声明，不表示恰好在开球瞬间采集；最后一次观察到的赛前价格单独保留。零匹配表示无匹配证据。</p>"
+                      + tech))
     return page("战绩 - 足球预测", body, "", data.now, cfg["refresh_minutes"])

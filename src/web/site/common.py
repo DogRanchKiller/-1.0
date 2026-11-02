@@ -144,6 +144,14 @@ def details(title: str, inner: str, open_: bool = False) -> str:
             f"<div class='inner'>{inner}</div></details>")
 
 
+def bar_html(p, big: bool = False) -> str:
+    """三色概率条（绿 = 主胜，灰 = 平，蓝 = 客胜）：每一段的宽度就是那一项的概率。只用样式画，不是图片。
+    big=True 是结论卡片里的大号条，段里写上百分比（太窄的段不写字，免得挤）；小号条不写字，数字写在条的旁边。"""
+    segs = "".join(f"<span class='seg s{i}' style='width:{x * 100:.1f}%'>{pct0(x) if big and x >= 0.12 else ''}</span>"
+                   for i, x in enumerate(p))
+    return f"<div class='pbar{' big' if big else ''}'>{segs}</div>"
+
+
 def placeholder(text: str) -> str:
     return f"<div class='placeholder'>{e(text)}</div>"
 

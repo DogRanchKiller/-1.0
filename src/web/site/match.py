@@ -1,9 +1,12 @@
 """单场页 match/<match_id>.html（需求文档第 3 节“输出”、第 8 节）。
 
 一页从上到下：
-- 简要（不用点开就看得到）：最新一版的结论（胜平负概率、信心等级、各玩法倾向）、最多 3 条要点。
-- 详细（点标题展开，<details>，不用脚本）：各版本对比（T-24 / T-6 / T-1 / 预览版）、比分概率热力图和各玩法、
-  赔率变动图、各家公司的初盘和最新价格、竞彩赔率、赛后复盘。
+- 结论：一句大字（谁赢的可能更大）+ 一根大号三色概率条 + 各玩法倾向和信心，最多 3 条要点。
+- 结论是怎么得出来的（src/web/site/story.py）：6 步，每步都用这场自己的数字
+  （预期进球 → 比分 → 模型胜平负 → 赔率 → 合并 → 倾向门槛和信心等级）。
+- 四块分析：实力对比、近期状态与赛程、伤停与首发、盘口与水位解读；再列模型自己影响最大的几类因素。
+- 更多数据（点标题展开，<details>，不用脚本）：比分概率热力图和各玩法、各版本对比（简表 + 完整记录）、
+  赔率变动图、各家公司的初盘和最新价格、竞彩赔率、赛后复盘、逐场贡献解释完整版、流程记录和技术细节。
 比分概率和各玩法（亚盘、大小球、双方进球）只从存档里存的比分矩阵算（src/common/markets.py），不重新跑模型；
 这一版没存矩阵就写“这一版没有存比分矩阵”，不另外算。
 """
@@ -19,7 +22,7 @@ from src.common.odds import devig
 from src.features.usage import season_label
 from src.web.explanation import EXPLANATION_CSS, render_explanation
 from src.web.preview_page import ah_text, lean_texts
-from src.web.site.common import (NOT_ADVICE, OUTCOMES, STATUS_TAGS, TeamFiles, bj_text, details, e, heatmap_svg,
+from src.web.site.common import (NOT_ADVICE, bar_html, OUTCOMES, STATUS_TAGS, TeamFiles, bj_text, details, e, heatmap_svg,
                                  kickoff_text, level_name, line_chart_svg, page, pct0, pct1, placeholder, table)
 from src.web.site.data import SiteData, matrix
 
@@ -181,7 +184,26 @@ def versions_html(data: SiteData, mid: int) -> str:
         ])
     note = ("<p class='small muted'>截止时间和存档时间分别列出，均为北京时间。模型名称、模型版本、预测时点与归档状态分别保留。各版本只用当时已经知道的数据，"
             "所以越晚的版本赔率越新；“首发”还没有接进来时写“未含首发”。猜中 = 胜平负里概率最大的那项和赛果一样。</p>")
-    return table(["模型", "模型版本", "预测时点", "归档状态", "数据截止时间", "存档时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"], out) + note
+    full = table(["模型", "模型版本", "预测时点", "归档状态", "数据截止时间", "存档时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"], out) + note
+    return short_versions(data, mid) + details("完整记录（模型版本、归档状态、存档时间、换模型前的旧版本）", full)
+
+
+def short_versions(data: SiteData, mid: int) -> str:
+    """简表：只列最新一版那个模型的几个时点，看“越接近开球，结论有没有变”。"""
+    latest = data.latest(mid)
+    if latest is None:
+        return ""
+    rows, ident = data.preds.get(mid) or {}, (latest[1]["model"], latest[1]["model_version"])
+    score = data.results.get(mid)
+    out = []
+    for kind in data.settings["site"]["versions"]:
+        r = rows.get((*ident, kind))
+        if r is None:
+            continue
+        p, _ = final_probs(r)
+        out.append([e(version_name(kind)), e(bj_text(r["cutoff_utc"])), e(probs_text(p)) + bar_html(p), e(level_name(level(r))),
+                    "<br>".join(e(t) for t in leans(r)) or "—", hit_html(r, score)])
+    return table(["哪一版", "用到这个时间的数据", "最后的概率（主胜 / 平 / 客胜）", "信心", "倾向", "胜平负猜中"], out)
 
 
 def explanations_html(data: SiteData, mid: int) -> str:
@@ -457,9 +479,20 @@ def key_points(row: dict) -> list[str]:
     return pts[:3] or ["各玩法都没有明显倾向"]
 
 
+def tech_line(row: dict) -> str:
+    """最新一版的技术身份：模型 / 模型版本、归档状态、截止和存档时间。普通读者用不上，放进“技术细节”。"""
+    return (f"最新一版：{version_name(row['kind'])}，{identity_text(row)}，归档状态 {archive_name(row.get('archive_status'))}，"
+            f"{bj_text(row['cutoff_utc'])} 截止，{bj_text(row.get('created_at_utc'))} 存档。")
+
+
 def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
-    """单场页的整页 HTML。页面在 match/ 文件夹里，回到网站根目录要 "../"。"""
+    """单场页的整页 HTML。页面在 match/ 文件夹里，回到网站根目录要 "../"。
+
+    从上到下：赛况 → 结论卡片（一句话、概率条、要点）→ 结论是怎么得出来的 → 四块分析 → 影响最大的因素
+    → 更多数据（可以展开）→ 最下面是流程记录和技术细节。
+    """
     from src.web.site.lifecycle import match_reference
+    from src.web.site.story import hero_html, story_html     # story 要用这里的函数，放这里导入免得互相导入
 
     info = data.matches[mid]
     pre = "../"
@@ -475,25 +508,31 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
             f"<p class='muted'>{e(data.comp(info['competition']))} {e(season_label(info['season']))} 赛季 · "
             f"{e(kickoff_text(info))}（北京时间） · {state}</p>")
     latest = data.latest(mid)
+    story = ""
     if latest is None:
         summary = f"<div class='card pad'>{placeholder('这场还没有预测')}</div>"
     else:
         kind, row = latest
         pts = "".join(f"<li>{e(t)}</li>" for t in key_points(row))
-        summary = (f"<h2>结论</h2><div class='card pad'><p class='small muted'>最新一版：{e(version_name(kind))}，"
-                   f"{e(identity_text(row))}，{e(archive_name(row.get('archive_status')))}，{e(bj_text(row['cutoff_utc']))} 截止</p><p>{conclusion_html(row, with_leans=False)}</p>"
-                   f"<ul class='points'>{pts}</ul>{f'<p>{hit_html(row, data.results.get(mid))}</p>' if score else ''}</div>")
+        hit = f"<p>胜平负{hit_html(row, data.results.get(mid))}</p>" if score else ""
+        summary = (f"<h2>结论</h2><div class='card pad hero'>{hero_html(data, mid, row)}"
+                   f"<p>{conclusion_html(row, with_leans=False)}</p><ul class='points'>{pts}</ul>{hit}"
+                   f"<p class='small muted'>最新一版：{e(version_name(kind))}，用 {e(bj_text(row['cutoff_utc']))}（北京时间）"
+                   f"之前的数据。</p></div>")
+        story = story_html(data, mid, row)
     has_review = mid in data.review_notes or data.reviews.get(mid) is not None or (
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))
+    tech = (f"<p class='small muted'>{e(tech_line(latest[1]))}</p>" if latest else "") + match_reference(data, mid)
     body = "".join([
-        head, summary, f"<div class='note'>{NOT_ADVICE}</div>",
-        match_reference(data, mid),
-        details("模型依据（逐场贡献解释）", explanations_html(data, mid), open_=True),
+        head, summary, f"<div class='note'>{NOT_ADVICE}</div>", story,
+        "<h2>更多数据</h2>",
+        details("比分概率和各玩法（亚盘、大小球、双方进球）", scores_html(data, mid), open_=latest is not None),
         details("各版本对比（开球前 24 / 6 / 1 小时、预览版）", versions_html(data, mid)),
-        details("比分概率和各玩法（亚盘、大小球、双方进球）", scores_html(data, mid)),
         details("赔率变动", odds_html(data, mid)),
         details("各家公司的初盘和最新价格", books_html(data, mid)),
         details("竞彩赔率", lottery_html(data, mid)),
         details("赛后复盘", review_html(data, mid), open_=has_review),
+        details("模型依据（逐场贡献解释，完整版）", explanations_html(data, mid)),
+        details("流程记录和技术细节（模型版本、归档状态、逐场验收）", tech),
     ])
     return page(f"{title} - 足球预测", body, pre, data.now, data.settings["site"]["refresh_minutes"])
