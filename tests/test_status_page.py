@@ -31,6 +31,8 @@ def env(tmp_path):
     # 报告文件夹、teams.yaml 都换成临时的，不读真实的副本
     s = {**s, "paths": {**s["paths"], "raw": str(tmp_path / "raw"), "backup": str(tmp_path / "backup"),
                         "reports": str(tmp_path / "reports"), "teams": str(tmp_path / "teams.yaml")}}
+    s["jobs"]["state_dir"] = str(tmp_path / "jobs")
+    s["review"]["output_dir"] = str(tmp_path / "review")
     (tmp_path / "backup" / "database").mkdir(parents=True)
     (tmp_path / "reports").mkdir()
     return con, s, tmp_path
@@ -52,7 +54,9 @@ def test_all_ok(env):
     make_backup(tmp, NOW - timedelta(hours=6))
     checks, today, day, problems, rows, lists = sp.build(con, s, NOW)
     lv = levels(checks)
-    assert lv["懂球帝 每小时赔率任务"] == "ok" and lv["每日备份"] == "ok" and lv["有没有被网站拒绝"] == "ok"
+    assert sp.check_dongqiudi_hourly(con, NOW, s["status"]).level == "ok"
+    assert lv["每日备份"] == "ok" and lv["有没有被网站拒绝"] == "ok"
+    assert "懂球帝 赛程请求（全局）" not in lv
     assert today == {"fixtures": {"saved": 1}} and problems == []
 
 
@@ -66,7 +70,7 @@ def test_problems_found(env):
     make_backup(tmp, NOW - timedelta(hours=40))
     checks, _, _, problems, _, _ = sp.build(con, s, NOW)
     lv = levels(checks)
-    assert lv["懂球帝 每小时赔率任务"] == "error"
+    assert sp.check_dongqiudi_hourly(con, NOW, s["status"]).level == "error"
     assert lv["有没有被网站拒绝"] == "error"
     assert lv["失败和内容可疑"] == "warn"      # 4 次普通失败（403 不算在这里）
     assert lv["每日备份"] == "warn"

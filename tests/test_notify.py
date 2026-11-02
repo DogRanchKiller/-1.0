@@ -505,10 +505,10 @@ def test_status_page_jobs(env, monkeypatch):
     finally:
         sc.close()
     c = {x.name: x for x in checks}
-    old = ["懂球帝 每小时赔率任务", "每日备份", "数据库", "待确认的队名", "懂球帝没对上的比赛"]
-    assert all(n in c for n in old)                                          # 原有的检查都还在
-    assert [x.name for x in checks][-5:] == ["定时任务：数据采集与导入", "定时任务：定时预测", "定时任务：赛后对账、复盘",
-                                              "定时任务：网站重新生成", "定时任务：推送"]
+    required = ["数据来源：dongqiudi E0 2026/27", "每日备份", "数据库", "待确认的队名", "懂球帝没对上的比赛"]
+    assert all(n in c for n in required)       # 数据覆盖与任务心跳都显示，不再用全局赛程请求冒充赔率健康。
+    job_names = ["定时任务：" + cfg["name"] for cfg in s["notify"]["jobs"].values()]
+    assert [x.name for x in checks][-len(job_names):] == job_names
     assert c["定时任务：定时预测"].level == "ok" and "新存 3" in c["定时任务：定时预测"].text
     assert "新存的编号" not in c["定时任务：定时预测"].text
     assert c["定时任务：推送"].level == "error" and "RuntimeError" in c["定时任务：推送"].text

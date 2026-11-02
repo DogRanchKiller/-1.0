@@ -225,6 +225,8 @@ def test_review_job_writes_exact_coverage_independent_benchmarks_and_live_metric
     assert groups[("多家平均", "ou")]["line"] == 2.5
     metrics = json.loads((tmp_path / "live_metrics.json").read_text(encoding="utf-8"))
     assert metrics["counts"]["benchmark_rows"] == 3
+    assert pd.Timestamp(metrics["generated_at"], tz="UTC") >= pd.Timestamp("2026-11-02", tz="UTC")
+    assert pd.Timestamp(metrics["evaluation_cutoff"], tz="UTC") == pd.Timestamp("2026-11-02", tz="UTC")
     review = json.loads((tmp_path / "matches" / "1.json").read_text(encoding="utf-8"))
     assert len(review["收盘标杆"]) == 3
     assert len(review["收盘证据"]) == 4

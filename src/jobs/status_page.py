@@ -28,14 +28,15 @@ import yaml
 
 from src.clean.dongqiudi_reader import BEIJING
 from src.common.config import load_secrets, load_settings, resolve_path
-from src.common.db import connect
+from src.features.store import open_readonly
+from src.jobs.data_health import Check, build_checks, database_check
 from src.jobs.dongqiudi_progress import run_state, season_rows
 from src.jobs.heartbeat import read_state
 from src.notify.send import get_token
 from src.notify.watch import job_status
 from src.web.theme import BASE_CSS, VIEWPORT
 
-LEVEL_NAMES = {"ok": "正常", "warn": "注意", "error": "出错"}
+LEVEL_NAMES = {"ok": "正常", "unknown": "未验证", "warn": "注意", "error": "出错"}
 DATA_TYPE_NAMES = {"fixtures": "懂球帝 赛程", "odds_live": "懂球帝 赛前赔率快照", "odds_final": "懂球帝 赛后最终赔率",
                    "history_page": "懂球帝 历届赛季列表", "season_page": "懂球帝 赛季页",
                    "match_detail": "懂球帝 比赛详情页（xG）",
@@ -44,14 +45,6 @@ DATA_TYPE_NAMES = {"fixtures": "懂球帝 赛程", "odds_live": "懂球帝 赛�
                    "transfermarkt_csv": "Transfermarkt 球员数据（salimt GitHub 镜像）"}
 STATUS_NAMES = {"saved": "已保存", "unchanged": "没变化", "not_found": "网站没有", "suspicious": "内容可疑",
                 "failed": "失败"}
-
-
-@dataclass
-class Check:
-    key: str     # 问题的编号，用来记“这个问题提醒过没有”
-    name: str    # 检查项
-    level: str   # ok 正常 / warn 注意 / error 出错
-    text: str    # 给人看的说明
 
 
 @dataclass
@@ -87,10 +80,10 @@ def last_time(con, sql: str, args=()) -> datetime | None:
 
 # ---------- 各项检查 ----------
 def check_dongqiudi_hourly(con, now: datetime, cfg: dict) -> Check:
-    """每小时的懂球帝任务：看赛程最近一次请求成功（已保存 / 没变化）是什么时候。"""
+    """兼容旧调用的全局请求时钟。正式页面改用逐联赛检查和独立任务心跳。"""
     t = last_time(con, "select max(fetched_at_utc) from fetch_log where source = 'dongqiudi' and data_type = 'fixtures'"
                        " and status in ('saved', 'unchanged')")
-    name = "懂球帝 每小时赔率任务"
+    name = "懂球帝 赛程请求（全局）"
     if t is None:
         return Check("dqd_hourly_never", name, "error", "还没有成功过")
     hours = (now - t).total_seconds() / 3600
@@ -162,18 +155,16 @@ def check_backup(backup_root: Path, now: datetime, cfg: dict) -> Check:
     return Check("backup", name, "ok", text)
 
 
-def check_database(con) -> Check:
-    """数据库：比赛有多少场、最近一场是哪天（football-data 导入的已结束比赛）。"""
-    n, last = con.execute("select count(*), max(match_date) from matches").fetchone()
-    return Check("database", "数据库", "ok", f"比赛 {n:,} 场，最近一场 {last or '—'}")
+def check_database(con, now: datetime | None = None) -> Check:
+    return database_check(con, now)
 
 
 def check_football_data(con, now: datetime) -> Check:
-    """football-data 联赛文件：手动（让 Claude）运行，只显示上次下载时间，不报警。"""
-    t = last_time(con, "select max(fetched_at_utc) from fetch_log where source = 'football-data'"
+    """兼容旧调用；这是全局检查时钟，不能据此判断某个联赛/赛季的数据新鲜度。"""
+    t = last_time(con, "select max(fetched_at_utc) from fetch_log where source = 'football-data' and data_type='league_csv'"
                        " and status in ('saved', 'unchanged')")
-    text = f"上次下载 {bj(t)}（{ago(t, now)}）" if t else "还没下载过"
-    return Check("football_data", "football-data 联赛文件", "ok", text + "。这个不定时自动下载，需要新数据时让 Claude 运行")
+    text = f"最近联赛文件检查 {bj(t)}（{ago(t, now)}）" if t else "尚无联赛文件成功检查"
+    return Check("football_data", "football-data 全局检查", "unknown", text + "。分联赛、赛季的变化与导入时间见数据来源检查")
 
 
 def check_jobs(jobs_dir: Path, settings: dict, now: datetime, secret: str | None = None) -> list[Check]:
@@ -354,8 +345,10 @@ def today_start(now: datetime) -> datetime:
 # 共用的颜色、字体、表格、卡片在 src/web/theme.py；这里只加这一页特有的
 CSS = BASE_CSS + """
 .ok { color: var(--green); } .warn { color: var(--amber); font-weight: 600; } .error { color: var(--red); font-weight: 600; }
+.unknown { color: var(--sub); }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
 .dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(52, 211, 153, .7); }
+.dot.unknown { background: var(--sub); }
 .dot.warn { background: var(--amber); box-shadow: 0 0 8px rgba(251, 191, 36, .7); }
 .dot.error { background: var(--red); box-shadow: 0 0 8px rgba(248, 113, 113, .7); }
 .url { word-break: break-all; font-size: 12px; color: var(--sub); }
@@ -419,8 +412,8 @@ def listing_html(lst: Listing) -> str:
 
 def render_html(checks: list[Check], today: dict, day: dict, problems: list[tuple], rows: list[dict],
                 now: datetime, lists: list[Listing] = ()) -> str:
-    worst = max(checks, key=lambda c: ["ok", "warn", "error"].index(c.level)).level
-    summary = {"ok": "一切正常", "warn": "有需要注意的地方", "error": "有地方出错了"}[worst]
+    worst = max(checks, key=lambda c: ["ok", "unknown", "warn", "error"].index(c.level)).level
+    summary = {"ok": "一切正常", "unknown": "有数据尚未验证", "warn": "有需要注意的地方", "error": "有地方出错了"}[worst]
     items = "".join(f"<tr><td class='name'><span class='dot {c.level}'></span>{e(c.name)}</td>"
                     f"<td class='level {c.level}'>{e(LEVEL_NAMES[c.level])}</td><td class='text'>{e(c.text)}</td></tr>" for c in checks)
     probs = "".join(f"<tr><td>{e(bj(datetime.fromisoformat(p[0])))}</td><td>{e(p[1])}</td>"
@@ -498,7 +491,8 @@ def new_alerts(checks: list[Check], state_file: Path) -> list[Check]:
     问题消失后从记录里删掉，以后再出现会重新提醒。
     """
     old = set(json.loads(state_file.read_text(encoding="utf-8"))) if state_file.exists() else set()
-    bad = [c for c in checks if c.level != "ok"]
+    # 无样本、无分页凭据与抓取故障不同：页面保留“未验证”，不把休赛期弹成故障。
+    bad = [c for c in checks if c.level in ("warn", "error")]
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(json.dumps(sorted(c.key for c in bad), ensure_ascii=False), encoding="utf-8")
     return [c for c in bad if c.key not in old]
@@ -513,10 +507,11 @@ def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, 
     backfill, rows = check_backfill(con, raw, settings["dongqiudi"], now)
     names, names_list = check_team_names(con, reports, resolve_path(settings["paths"]["teams"]), settings)
     unmatched, unmatched_list = check_unmatched(reports, settings)
-    checks = [check_dongqiudi_hourly(con, now, cfg), check_blocked(con, now), check_failures(con, now, cfg),
+    checks = [check_blocked(con, now), check_failures(con, now, cfg),
               backfill, check_backup(resolve_path(settings["paths"]["backup"]), now, cfg),
-              check_database(con), check_football_data(con, now), names, unmatched]
-    # 定时任务（K5 加在最后，原有检查不变）
+              check_database(con, now), names, unmatched]
+    checks += build_checks(con, settings, now)
+    # 任务是否完成与上面的数据覆盖独立展示：正常运行仍可能缺赛果或收盘证据。
     checks += check_jobs(resolve_path(settings["jobs"]["state_dir"]), settings, now,
                          get_token(load_secrets()))
     today = count_table(con, today_start(now))
@@ -527,7 +522,7 @@ def build(con, settings: dict, now: datetime) -> tuple[list[Check], dict, dict, 
 def main(now: datetime | None = None, notify=popup) -> list[Check]:
     s = load_settings()
     now = now or datetime.now(timezone.utc)
-    con = connect()
+    con = open_readonly(resolve_path(s["paths"]["database"]))
     try:
         checks, today, day, problems, rows, lists = build(con, s, now)
     finally:

@@ -50,6 +50,9 @@ def run_review(settings: dict, con, now: datetime | None = None, out_dir: Path |
     write_scores(out_dir / "scores.csv", scores)
     metrics = live_metrics(scores, settings, labels)
     metrics["closing_coverage"] = col.closing_coverage
+    # 快照写出时间和取数截止分别保存；重新打开旧文件、文件mtime变化都不代表证据更新。
+    metrics["generated_at"] = to_utc_text(datetime.now(timezone.utc))
+    metrics["evaluation_cutoff"] = to_utc_text(now)
     write_json(out_dir / "live_metrics.json", metrics)
     n_files = write_match_files(out_dir, reviews)
     reports = write_reports(out_dir, reviews, scores, settings, now)
