@@ -10,7 +10,7 @@
 - 每个网页顶上插一条小栏“首页 · 数据状态 · 退出登录”（只在发出去时插，网页文件本身不改）。
 
 几个词：
-- 端口：一台电脑上可以同时跑很多网络程序，端口号用来区分它们，网址里冒号后面的数字（8765）就是端口。
+- 端口：一台电脑上可以同时跑很多网络程序，端口号用来区分它们，网址里冒号后面的数字（8790）就是端口。
 - 0.0.0.0：监听这台电脑所有网卡上的地址，同一个 Wi-Fi 的手机才连得进来；127.0.0.1 只有本机自己能连。
 - cookie：网站存在浏览器里的一小段文字，浏览器每次访问都带上，服务器靠它认出“这是登录过的人”。
 - 路径穿越：坏人在网址里写 ../../ 之类，想让服务器把网站文件夹外面的文件（例如密码文件）发出来。这里层层挡住。
@@ -726,6 +726,8 @@ def run(settings: dict, host: str | None = None, port: int | None = None, ready:
     try:
         _rec, new_plain = serve_auth.ensure_credentials(settings)   # 第一次运行：自动生成账号密码
         if new_plain:
+            # 马上写进 txt：后面万一端口被占、提前退出，密码也不会丢（哈希倒推不出密码）
+            serve_auth.write_info_file(settings, plain=new_plain, port=port or None)
             LOG.info("第一次运行，已生成网站密码（写在 %s）", serve_auth.INFO_FILE)
     except (serve_auth.CredentialsError, OSError) as e:
         LOG.error("密码文件有问题：%s", e)      # 不覆盖；下面 create_server 会拒绝对局域网开放

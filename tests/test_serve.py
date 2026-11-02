@@ -445,6 +445,27 @@ def test_broken_credentials_not_overwritten(tree):
         serve.create_server(make_config(tree), "0.0.0.0", 0)
 
 
+def test_first_run_port_busy_keeps_password(tree):
+    """第一次运行（还没有密码）就遇到端口被别的程序占着：新密码也要写进 txt，不能只剩哈希。"""
+    settings = make_settings(tree)
+    (tree / "state" / serve_auth.CRED_FILE).unlink()
+    other = socket.socket()
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            other.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        other.bind(("127.0.0.1", 0))
+        other.listen(1)
+        assert serve.run(settings, "127.0.0.1", other.getsockname()[1]) == 2
+    finally:
+        other.close()
+        for h in list(serve.LOG.handlers):
+            serve.LOG.removeHandler(h)
+            h.close()
+    rec = serve_auth.load_credentials(serve_auth.cred_path(settings))
+    text = serve_auth.info_path(settings).read_text(encoding="utf-8-sig")
+    m = serve_auth._PW_LINE.search(text)
+    assert rec is not None and m and serve_auth.verify_password(m.group(1), rec)   # txt 里的密码能登录
+
 def test_is_loopback():
     assert serve.is_loopback("127.0.0.1") and serve.is_loopback("::1") and serve.is_loopback("localhost")
     assert not serve.is_loopback("0.0.0.0") and not serve.is_loopback("192.168.1.2") and not serve.is_loopback("pc.local")
@@ -537,7 +558,7 @@ def test_generate_password_format():
 
 def test_settings_block_is_complete():
     ss = load_settings()["site_server"]
-    assert ss["port"] == 8765 and ss["host"] == "0.0.0.0" and ss["pbkdf2_iterations"] >= 600000
+    assert ss["port"] == 8790 and ss["host"] == "0.0.0.0" and ss["pbkdf2_iterations"] >= 600000
     cfg = serve.ServerConfig.from_settings(load_settings())
     assert cfg.site_dir.name == "site" and cfg.status_file.name == "status.html"
     assert ss["state_dir"].startswith("data/")                     # 密码、会话都在 data/ 下（不进 Git）
@@ -630,7 +651,7 @@ def test_firewall_info_is_ascii_json(capsys):
     out = capsys.readouterr().out
     assert out.isascii()
     info = json.loads(out)
-    assert info == {"port": 8765, "rule": "足球预测_局域网网站", "task": "足球预测_网站服务"}
+    assert info == {"port": 8790, "rule": "足球预测_局域网网站", "task": "足球预测_网站服务"}
 
 
 def test_connection_limit(tree):

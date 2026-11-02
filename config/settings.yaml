@@ -668,7 +668,7 @@ picks:                           # 规则名写在 src/web/site/picks.py 的 RUL
 # 只把 site.output_dir 里生成好的网页和 paths.reports 里的 status.html 发出去，不读数据库、不联网。只在局域网用，不对公网开放
 site_server:
   host: 0.0.0.0                  # 监听哪个地址：0.0.0.0 = 这台电脑的所有网卡（同一个 Wi-Fi 的手机才连得进来）；127.0.0.1 = 只有本机
-  port: 8765                     # 网址里冒号后面的数字；防火墙规则也只放行这个端口。改了要重新双击“开启局域网访问.bat”
+  port: 8790                     # 网址里冒号后面的数字；防火墙规则也只放行这个端口。改了要重新双击“开启局域网访问.bat”
   state_dir: data/site_server    # 密码哈希 credentials.json、会话 sessions.json、给你看的 网站地址和密码.txt（data/ 不进 Git）
   status_page: status.html       # /status 发的是 paths.reports 下的这个文件（数据状态页）
   log_file: logs/site_server.log # 访问日志：只记时间、IP、方法、路径、状态码，不记密码和 cookie
