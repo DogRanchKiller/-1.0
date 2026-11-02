@@ -1,12 +1,12 @@
 """赛后对账（需求文档第 15 节、第 9 节“完整链路的分工和接口”接口 1、3）：把预测存档和实际比分对上，算每一版的分数。
 
 做什么：
-1. 读预测存档 predictions 表（接口 1：预测存档可以直接读）。同一场、同一 kind 只取 prediction_id 最大的那一行。
+1. 读预测存档 predictions 表。同一场、同一模型、模型版本、kind 只取 prediction_id 最大的那一行，不改原始存档。
 2. 比分、xG、红牌、收盘赔率一律经过取数层 FeatureStore 取，用途「复盘」（config/data_usage.yaml 允许）。
 3. 每场已经踢完、有预测的比赛，出这几种“行”（scores.csv 一行 = 一个版本的一种概率）：
    - 每个 kind 一行“模型”：p_home / p_draw / p_away 是存档里模型自己的概率；
    - 这一版有融合结果就再出一行“融合”；
-   - 每场一行“收盘赔率”：收盘胜平负赔率去水后的概率，prediction_id 为空，kind 写成“收盘（公司名）”，例如“收盘（多家平均）”。
+   - 收盘标杆按来源、公司、市场、时点独立保留，prediction_id 和模型身份为空；不随模型版本数增加。
      这场还没有收盘赔率（football-data 还没更新）就不出这一行。
 4. 分数（都是越小越好，函数全部用 src/evaluate/metrics.py 现有的）：
    - 胜平负：log loss、Brier、RPS；
@@ -37,6 +37,7 @@ from src.evaluate.metrics import brier_per_match, log_loss_per_match, rps_per_ma
 from src.features import FeatureAccessError, FeatureStore
 from src.features.known_time import to_utc_text
 from src.features.usage import season_label
+from src.review.closing_evidence import COLUMNS as EVIDENCE_COLUMNS, closing_coverage
 
 USAGE = "复盘"                       # 取数层的用途（data_usage.yaml）
 SOURCE_MODEL, SOURCE_FUSION, SOURCE_CLOSE = "模型", "融合", "收盘赔率"
@@ -45,13 +46,17 @@ RESULT_INDEX = {"H": 0, "D": 1, "A": 2}
 
 # scores.csv 的列，严格按接口 3 的顺序
 SCORE_COLUMNS = ["prediction_id", "match_id", "competition", "season", "kickoff_utc", "kind", "source",
+                 "model", "model_version", "cutoff_utc", "created_at_utc", "late_minutes", "rescheduled",
+                 "archive_status", "confidence", "benchmark_source", "bookmaker", "market", "timing", "line",
+                 "qualified", "qualification", "evidence_reason",
+                 "source_missing", "missing_since_utc", "restored_at_utc", "missing_reason", "last_sources_json",
                  "home_goals", "away_goals", "p_home", "p_draw", "p_away",
                  "logloss_1x2", "brier_1x2", "rps_1x2", "logloss_score", "logloss_over25", "logloss_btts"]
 
 
 # ======================= 读预测存档 =======================
 def latest_predictions(con: sqlite3.Connection) -> pd.DataFrame:
-    """每场、每个 kind 取 prediction_id 最大的那一行（接口 1）。没有 predictions 表（还没出过预测）时返回空表。"""
+    """每个 (比赛、模型、模型版本、预测时点) 只取最新编号；不同模型版本不能互相覆盖。"""
     has = con.execute("select 1 from sqlite_master where type = 'table' and name = 'predictions'").fetchone()
     if not has:
         return pd.DataFrame(columns=["prediction_id", "match_id", "competition", "season", "home_team", "away_team",
@@ -59,9 +64,10 @@ def latest_predictions(con: sqlite3.Connection) -> pd.DataFrame:
                                      "created_at_utc", "p_home", "p_draw", "p_away", "detail"])
     return pd.read_sql("""
         select p.* from predictions p
-        join (select match_id, kind, max(prediction_id) as pid from predictions group by match_id, kind) last
+        join (select match_id, model, model_version, kind, max(prediction_id) as pid from predictions
+              group by match_id, model, model_version, kind) last
           on last.pid = p.prediction_id
-        order by p.match_id, p.kind""", con)
+        order by p.match_id, p.model, p.model_version, p.kind""", con)
 
 
 # ======================= 概率、矩阵的整理 =======================
@@ -122,11 +128,32 @@ def over25_logloss(p_over: float | None, hg: int, ag: int) -> float | None:
         return None
     return float(log_loss_per_match([p_over], [int(hg + ag > 2)])[0])
 # ======================= 一版预测 =======================
+def archive_metadata(kind: str, detail: dict) -> dict:
+    """只解释出预测时已保存的元数据；缺信息写未知，不用今天的设置补算信心或准点状态。"""
+    plan, late = detail.get("计划时点"), detail.get("晚了几分钟")
+    rescheduled = detail.get("改期重出") is True
+    fusion = detail.get("融合")
+    confidence = fusion.get("信心等级") if isinstance(fusion, dict) else None
+    status = "unknown"
+    if kind == "preview":
+        status = "preview"
+    elif rescheduled:
+        status = "rescheduled"
+    elif (isinstance(plan, (int, float)) and not isinstance(plan, bool) and np.isfinite(plan)
+          and isinstance(late, (int, float)) and not isinstance(late, bool) and np.isfinite(late)
+          and plan > 0 and late >= 0 and kind == f"T-{plan:g}"):
+        status = "late" if late > 0 else "on_time"
+    return {"plan_hours": plan, "late_minutes": late, "rescheduled": rescheduled,
+            "archive_status": status, "confidence": confidence}
+
+
 def parse_version(row: pd.Series, tol: float) -> dict:
     """predictions 表的一行 → 复盘要用的一版预测。detail 里的键按接口 1（定时版本另有“计划时点”“比分矩阵”等，预览版没有）。"""
     try:
         detail = json.loads(row["detail"] or "{}")
     except (TypeError, ValueError):
+        detail = {}
+    if not isinstance(detail, dict):
         detail = {}
     model_matrix = clean_matrix(detail.get("模型比分矩阵"), tol)
     fusion_matrix = clean_matrix(detail.get("融合比分矩阵"), tol)
@@ -136,35 +163,66 @@ def parse_version(row: pd.Series, tol: float) -> dict:
         "prediction_id": int(row["prediction_id"]), "kind": row["kind"], "model": row["model"],
         "model_version": row["model_version"], "cutoff_utc": to_utc_text(row["cutoff_utc"]),
         "created_at_utc": row["created_at_utc"], "kickoff_utc_at_prediction": row["kickoff_utc"],
-        "plan_hours": detail.get("计划时点"), "late_minutes": detail.get("晚了几分钟"),
-        "rescheduled": "改期重出" in json.dumps(detail, ensure_ascii=False),
+        **archive_metadata(row["kind"], detail),
         "model_p": clean_probs([row["p_home"], row["p_draw"], row["p_away"]], tol),
         "model_matrix": model_matrix,
         # 存档里有矩阵、但格式不对（不是二维、加起来不是 1）：分数列留空，摘要里提醒
         "matrix_bad": [k for k, m in (("模型比分矩阵", model_matrix), ("融合比分矩阵", fusion_matrix))
                        if detail.get(k) is not None and m is None],
         "fusion_p": fusion_p, "fusion_matrix": fusion_matrix,
-        "fusion_status": (detail.get("融合") or {}).get("状态"),
+        "fusion_status": detail["融合"].get("状态") if isinstance(detail.get("融合"), dict) else None,
         "odds_p": clean_probs(detail.get("赔率概率"), tol),   # 出这一版时的赔率概率（预览页记的“赔率概率”）
     }
 
 
 # ======================= 收盘赔率 =======================
+def all_closings(odds: pd.DataFrame, books: list[str], method: str) -> list[dict]:
+    """把取数层已准许的收盘赔率变成独立标杆，不在这里重复收盘证据的资格判断。
+
+    胜平负和大小 2.5 球分别保留，来源不同也分别保留。没有完整、有效价格的市场不评分。
+    """
+    if odds.empty:
+        return []
+    out, seen = [], {}
+    for row in odds.to_dict("records"):
+        book, market = row.get("bookmaker"), row.get("market")
+        if book not in books or market not in ("1x2", "ou"):
+            continue
+        if market == "ou" and row.get("line") != 2.5:
+            continue
+        cols = ("home", "draw", "away") if market == "1x2" else ("over", "under")
+        try:
+            prices = np.array([row.get(k) for k in cols], dtype=float)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(prices).all() or (prices <= 1).any():
+            continue
+        line = 2.5 if market == "ou" else None
+        identity = (row.get("source"), book, market, row.get("timing"), line)
+        if identity in seen:
+            if not np.array_equal(prices, seen[identity]):
+                raise ValueError("同一独立收盘标杆有互相矛盾的价格，不能任选一条")
+            continue
+        seen[identity] = prices
+        p = devig(prices, method)
+        out.append({"book": book, "bookmaker": book, "benchmark_source": row.get("source"),
+                    "market": market, "timing": row.get("timing"), "line": line, "qualified": row.get("qualified"),
+                    "qualification": row.get("qualification"), "evidence_reason": row.get("reason"),
+                    "p_1x2": p if market == "1x2" else None,
+                    "p_over25": float(p[0]) if market == "ou" else None})
+    return sorted(out, key=lambda c: (books.index(c["book"]), str(c["benchmark_source"]), c["market"]))
+
+
 def pick_closing(odds: pd.DataFrame, books: list[str], method: str) -> dict | None:
     """按 review.close_bookmakers 的顺序，取第一家有完整胜平负收盘赔率的公司，去水后返回
     {"book", "p_1x2", "p_over25"}；同一家有 2.5 球那条线的大小球收盘赔率时 p_over25 是去水后“大”的概率，否则 None。"""
-    for book in books:
-        part = odds[odds["bookmaker"] == book]
-        x = part[part["market"] == "1x2"][["home", "draw", "away"]].dropna()
-        x = x[(x > 1).all(axis=1)]
-        if x.empty:
-            continue
-        p = devig(x.iloc[0].to_numpy(dtype=float), method)
-        ou = part[(part["market"] == "ou") & (part["line"] == 2.5)][["over", "under"]].dropna()
-        ou = ou[(ou > 1).all(axis=1)]
-        p_over = float(devig(ou.iloc[0].to_numpy(dtype=float), method)[0]) if not ou.empty else None
-        return {"book": book, "p_1x2": p, "p_over25": p_over}
-    return None
+    closings = all_closings(odds, books, method)
+    c = next((dict(c) for c in closings if c["market"] == "1x2"), None)
+    if c is not None:
+        ou = next((o for o in closings if o["market"] == "ou" and o["book"] == c["book"]
+                   and o["benchmark_source"] == c["benchmark_source"]), None)
+        c["p_over25"] = ou["p_over25"] if ou else None
+    return c
 
 
 # ======================= 收集：要复盘的比赛 =======================
@@ -173,9 +231,30 @@ class Collected:
     matches: list[dict] = field(default_factory=list)     # 每场一个字典（见 collect）
     skipped: dict = field(default_factory=dict)           # 跳过的原因 → 几场 / 几行
     warnings: list[str] = field(default_factory=list)
+    closing_evidence: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EVIDENCE_COLUMNS))
+    closing_coverage: dict = field(default_factory=dict)
 
     def skip(self, why: str, n: int = 1) -> None:
         self.skipped[why] = self.skipped.get(why, 0) + n
+
+
+def review_closing_coverage(evidence: pd.DataFrame, match_ids, books) -> dict:
+    """复盘只评大小2.5球，其他大小盘口不能填充它的分母；原始候选另存不改。"""
+    scoped = evidence.copy()
+    outside = scoped["market"].eq("ou") & scoped["line"].notna() & ~scoped["line"].eq(2.5)
+    scoped.loc[outside, "qualified"] = False
+    for idx in scoped.index[outside]:
+        scoped.at[idx, "reasons"] = tuple(reason for reason in scoped.at[idx, "reasons"]
+                                          if reason != "registered_source_declared_close") + ("not_ou_2_5",)
+    result = closing_coverage(scoped, match_ids, bookmakers=books, markets=("1x2", "ou"))
+    for group in result["by_bookmaker_market"]:
+        group["line"] = 2.5 if group["market"] == "ou" else None
+    return result
+
+
+def evidence_records(evidence: pd.DataFrame) -> list[dict]:
+    """证据写入JSON时空值是null，不输出NaN；完整原因仍然保留。"""
+    return evidence.astype(object).where(pd.notna(evidence), None).to_dict("records")
 
 
 def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> Collected:
@@ -190,6 +269,7 @@ def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> C
     out = Collected()
     preds = latest_predictions(con)
     if preds.empty:
+        out.closing_coverage = review_closing_coverage(out.closing_evidence, [], list(cfg["close_bookmakers"]))
         return out
     preds["season_role"] = [season_role(int(s), settings) for s in preds["season"]]
     for role, why in (("exam", "期末考试赛季的预测（实时模式不允许「复盘」读，不对账）"),
@@ -222,6 +302,10 @@ def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> C
         kickoff_earliest = s["kickoff_earliest_utc"]
         versions = []
         for _, row in part.iterrows():
+            if any(row[k] != s[k] for k in ("competition", "season", "home_team", "away_team")):
+                out.skip("预测存档与当前比赛身份不一致（不能仅凭match_id对账）")
+                out.warnings.append(f"比赛 {mid} 的 prediction_id {row['prediction_id']} 身份不一致，保留原存档但不评分")
+                continue
             v = parse_version(row, tol)
             if v["cutoff_utc"] >= kickoff_earliest:
                 out.skip("出预测的时间不早于开球（存档有问题，这一版不对账）")
@@ -236,12 +320,16 @@ def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> C
             versions.append(v)
         if not versions:
             continue
+        evidence = pd.DataFrame(columns=EVIDENCE_COLUMNS)
         try:
-            close_odds = fs.closing_odds(mid, now, USAGE, bookmaker=list(cfg["close_bookmakers"]), market=["1x2", "ou"])
+            evidence = fs.closing_evidence([mid], now, USAGE, bookmaker=list(cfg["close_bookmakers"]), market=["1x2", "ou"])
+            close_odds = evidence[evidence["qualified"].eq(True)]
+            closings = all_closings(close_odds, list(cfg["close_bookmakers"]), cfg["close_devig_method"])
             close = pick_closing(close_odds, list(cfg["close_bookmakers"]), cfg["close_devig_method"])
-        except FeatureAccessError as e:
-            close = None
+        except (FeatureAccessError, ValueError) as e:
+            close, closings = None, []
             out.warnings.append(f"比赛 {mid} 收盘赔率取不到：{e}")
+        out.closing_evidence = pd.concat([out.closing_evidence, evidence], ignore_index=True)
         hx, ax = s.get("home_xg"), s.get("away_xg")
         hr, ar = s.get("home_red"), s.get("away_red")
         first = part.iloc[0]
@@ -255,11 +343,17 @@ def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> C
             "home_goals": int(s["home_goals"]), "away_goals": int(s["away_goals"]),
             "result": "H" if s["home_goals"] > s["away_goals"] else "D" if s["home_goals"] == s["away_goals"] else "A",
             "stats_source": s.get("stats_source"),
+            **{k: s.get(k) if pd.notna(s.get(k)) else None for k in
+               ("source_missing", "missing_since_utc", "restored_at_utc", "missing_reason", "last_sources_json")},
             "xg": None if pd.isna(hx) or pd.isna(ax) else (float(hx), float(ax)),
             "red": None if pd.isna(hr) or pd.isna(ar) else (int(hr), int(ar)),
-            "close": close, "versions": versions, "prediction_season": int(first["season"]),
+            "close": close, "all_closings": closings, "versions": versions, "prediction_season": int(first["season"]),
+            "closing_evidence": evidence_records(evidence),
+            "closing_coverage": review_closing_coverage(evidence, [mid], list(cfg["close_bookmakers"])),
         })
     out.matches.sort(key=lambda m: (m["kickoff_earliest_utc"], m["match_id"]))
+    out.closing_coverage = review_closing_coverage(out.closing_evidence, [m["match_id"] for m in out.matches],
+                                                  list(cfg["close_bookmakers"]))
     return out
 
 
@@ -270,26 +364,34 @@ def kind_rank(kind: str, kinds: list[str]) -> int:
 
 
 def score_rows(matches: list[dict], settings: dict) -> pd.DataFrame:
-    """每场：每个 kind 一行“模型”、有融合再一行“融合”，最后一行“收盘赔率”（有收盘赔率时）。列按接口 3。"""
+    """预测行保留模型版本和存档状态；标杆按比赛/来源/公司/市场/时点保留，完全独立于模型行。"""
     kinds = list(settings["review"]["kinds"])
     rows = []
     for m in matches:
         hg, ag = m["home_goals"], m["away_goals"]
         base = {"match_id": m["match_id"], "competition": m["competition"], "season": m["season"],
-                "kickoff_utc": m["kickoff_utc"], "home_goals": hg, "away_goals": ag}
+                "kickoff_utc": m["kickoff_utc"], "home_goals": hg, "away_goals": ag,
+                **{k: m.get(k) for k in ("source_missing", "missing_since_utc", "restored_at_utc", "missing_reason", "last_sources_json")}}
         for v in sorted(m["versions"], key=lambda v: kind_rank(v["kind"], kinds)):
             for source, p, mat in ((SOURCE_MODEL, v["model_p"], v["model_matrix"]),
                                    (SOURCE_FUSION, v["fusion_p"], v["fusion_matrix"])):
                 if p is None:
                     continue
                 rows.append({**base, "prediction_id": v["prediction_id"], "kind": v["kind"], "source": source,
+                             **{k: v.get(k) for k in ("model", "model_version", "cutoff_utc", "created_at_utc",
+                                                      "late_minutes", "rescheduled", "archive_status", "confidence")},
                              "p_home": p[0], "p_draw": p[1], "p_away": p[2], **score_metrics(p, mat, hg, ag)})
-        c = m["close"]
-        if c is not None:
-            met = score_metrics(c["p_1x2"], None, hg, ag)
-            met["logloss_over25"] = over25_logloss(c["p_over25"], hg, ag)
+        # 旧内存调用方只有 close 时仍可读；新版 all_closings 即使为空也不能回退、伪造缺失标杆。
+        closings = m.get("all_closings", [m["close"]] if m.get("close") is not None else [])
+        for c in closings:
+            p = c["p_1x2"]
+            met = score_metrics(p, None, hg, ag) if p is not None else {k: None for k in SCORE_COLUMNS if k.startswith(("logloss_", "brier_", "rps_"))}
+            met["logloss_over25"] = over25_logloss(c.get("p_over25"), hg, ag)
             rows.append({**base, "prediction_id": None, "kind": CLOSE_KIND.format(book=c["book"]), "source": SOURCE_CLOSE,
-                         "p_home": c["p_1x2"][0], "p_draw": c["p_1x2"][1], "p_away": c["p_1x2"][2], **met})
+                         **{k: c.get(k) for k in ("benchmark_source", "market", "timing", "line", "qualified", "qualification", "evidence_reason")},
+                         "bookmaker": c.get("bookmaker", c["book"]),
+                         "p_home": p[0] if p is not None else None,
+                         "p_draw": p[1] if p is not None else None, "p_away": p[2] if p is not None else None, **met})
     df = pd.DataFrame(rows, columns=SCORE_COLUMNS)
     df["prediction_id"] = df["prediction_id"].astype("Int64")   # 收盘赔率行为空，其余是整数（不写成 123.0）
     return df

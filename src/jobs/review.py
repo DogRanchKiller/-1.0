@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,9 +23,9 @@ from src.features import FeatureStore
 from src.features.known_time import to_utc_text
 from src.features.store import open_readonly
 from src.jobs.heartbeat import job_run, state_dir
-from src.review.match_review import attach_labels, build_review, team_names_zh, write_match_files
+from src.review.match_review import attach_labels, build_review, team_names_zh, write_json, write_match_files
 from src.review.reconcile import SOURCE_CLOSE, SOURCE_FUSION, SOURCE_MODEL, collect, score_rows
-from src.review.reports import write_reports
+from src.review.reports import live_metrics, write_reports
 
 
 def write_scores(path: Path, df) -> None:
@@ -47,18 +48,28 @@ def run_review(settings: dict, con, now: datetime | None = None, out_dir: Path |
     generated = to_utc_text(now)
     reviews = [build_review(m, labels.get(m["match_id"]), names, settings, generated) for m in col.matches]
     write_scores(out_dir / "scores.csv", scores)
+    metrics = live_metrics(scores, settings, labels)
+    metrics["closing_coverage"] = col.closing_coverage
+    write_json(out_dir / "live_metrics.json", metrics)
     n_files = write_match_files(out_dir, reviews)
     reports = write_reports(out_dir, reviews, scores, settings, now)
     count = scores["source"].value_counts()
+    error_counts = Counter((item["model"], item["model_version"], item["正式版本"], item["archive_status"], item["误差归类"]["类型"])
+                           for review in reviews for item in review["各模型版本复盘"])
+    errors = [dict(zip(("model", "model_version", "kind", "archive_status", "类型"), identity), 场数=count)
+              for identity, count in sorted(error_counts.items())]
     return {
         "对账场数": len(col.matches),
         "模型行": int(count.get(SOURCE_MODEL, 0)), "融合行": int(count.get(SOURCE_FUSION, 0)),
         "收盘赔率行": int(count.get(SOURCE_CLOSE, 0)),
+        "收盘证据覆盖": col.closing_coverage,
         "单场文件": n_files, "报告": [p.name for p in reports],
         "跳过": col.skipped, "提醒": col.warnings[:20],
         "标签算不出": sum(1 for v in labels.values() if v and "算不出" in v),
         "误差归类": {t: sum(1 for r in reviews if r["误差归类"]["类型"] == t)
                      for t in sorted({r["误差归类"]["类型"] for r in reviews})},
+        "误差归类兼容说明": "旧误差归类只计每场选定的单个参考身份；完整分组以各模型版本误差归类为准。",
+        "各模型版本误差归类": errors,
         "输出文件夹": str(out_dir),
     }
 
@@ -68,8 +79,9 @@ def print_summary(s: dict) -> None:
     print(f"  单场复盘文件 {s['单场文件']} 个，报告 {len(s['报告'])} 份：{'、'.join(s['报告']) or '无'}")
     for why, n in s["跳过"].items():
         print(f"  跳过：{why} —— {n}")
-    if s["误差归类"]:
-        print("  误差归类：" + "、".join(f"{k} {v} 场" for k, v in s["误差归类"].items()))
+    for row in s["各模型版本误差归类"]:
+        print(f"  误差归类 [{row['model']} / {row['model_version']} / {row['kind']} / {row['archive_status']}]："
+              f"{row['类型']} {row['场数']} 场")
     if s["标签算不出"]:
         print(f"  有 {s['标签算不出']} 场标签算不出（原因写在单场文件里）")
     for w in s["提醒"]:

@@ -113,16 +113,18 @@ def attach_labels(fs: FeatureStore, matches: list[dict], settings: dict) -> dict
                 "赛前名次": {"主队": int(r["home_position"]), "客队": int(r["away_position"])},
                 "赛前积分": {"主队": int(r["home_points"]), "客队": int(r["away_points"])},
                 "同分排名没分出来": bool(r["tie_unresolved"]),
+                "home_after_euro": bool(r["home_after_euro"]) if pd.notna(r.get("home_after_euro")) else None,
+                "away_after_euro": bool(r["away_after_euro"]) if pd.notna(r.get("away_after_euro")) else None,
             }
     return out
 
 
 # ======================= 选正式版、误差归类、赔率方向 =======================
 def official_version(versions: list[dict], order: list[str]) -> dict:
-    """正式成绩用哪一版：按 review.official_order 取这场有的第一个 kind（T-1 → T-6 → T-24 → 预览）；
+    """同一模型版本的正式成绩：按 review.official_order 取第一个 kind（T-1 → T-6 → T-24 → 预览）；
     都没有（表里出现了别的 kind）就用 prediction_id 最大的那版。
     第 15 节说“有手动缺阵调整时用调整后的版本”：现在还没有调整版，以后加了 kind 写进 official_order 最前面即可。"""
-    by_kind = {v["kind"]: v for v in versions}
+    by_kind = {v["kind"]: v for v in sorted(versions, key=lambda v: v["prediction_id"])}
     for k in order:
         if k in by_kind:
             return by_kind[k]
@@ -213,8 +215,10 @@ def version_entry(m: dict, v: dict) -> dict:
     """一版预测：概率、分数（模型、融合各一组）。"""
     hg, ag = m["home_goals"], m["away_goals"]
     e = {"版本": v["kind"], "名称": KIND_NAMES.get(v["kind"], v["kind"]), "prediction_id": v["prediction_id"],
-         "模型": v["model"], "模型版本": v["model_version"],
+         "model": v["model"], "model_version": v["model_version"],
+         "模型名称": v["model"], "模型版本": v["model_version"],
          "截止时间_utc": v["cutoff_utc"], "截止时间_北京": bj_text(v["cutoff_utc"]),
+         **{k: v.get(k) for k in ("cutoff_utc", "created_at_utc", "archive_status", "confidence")},
          "计划时点": v["plan_hours"], "晚了几分钟": v["late_minutes"], "改期重出": v["rescheduled"],
          "出预测时的赔率概率": p_list(v["odds_p"]), "融合状态": v["fusion_status"]}
     for name, p, mat in ((SOURCE_MODEL, v["model_p"], v["model_matrix"]), (SOURCE_FUSION, v["fusion_p"], v["fusion_matrix"])):
@@ -226,19 +230,26 @@ def version_entry(m: dict, v: dict) -> dict:
     return e
 
 
-def close_entry(m: dict) -> dict | None:
-    c = m["close"]
+def close_entry(m: dict, c: dict | None = None) -> dict | None:
+    c = c if c is not None else m.get("close")
     if c is None:
         return None
-    sc = score_metrics(c["p_1x2"], None, m["home_goals"], m["away_goals"])
-    sc["logloss_over25"] = over25_logloss(c["p_over25"], m["home_goals"], m["away_goals"])
+    sc = score_metrics(c["p_1x2"], None, m["home_goals"], m["away_goals"]) if c["p_1x2"] is not None else {}
+    sc["logloss_over25"] = over25_logloss(c.get("p_over25"), m["home_goals"], m["away_goals"])
     return {"版本": CLOSE_KIND.format(book=c["book"]), "公司": c["book"], "概率": p_list(c["p_1x2"]),
-            "大2.5球概率": r4(c["p_over25"]), **{k: r4(x) for k, x in sc.items()}}
+            **{k: c.get(k) for k in ("benchmark_source", "bookmaker", "market", "timing", "qualified", "qualification", "evidence_reason")},
+            "line": r4(c.get("line")),
+            "大2.5球概率": r4(c.get("p_over25")), **{k: r4(x) for k, x in sc.items()}}
 
 
-def closest(official: dict, close: dict | None) -> dict:
+def closest(official: dict, close: dict | None, closings: list[dict] | None = None) -> dict:
     """正式那一版的模型、融合，和收盘赔率，谁的胜平负 log loss 最小（最接近结果）。"""
-    cands = [(SOURCE_MODEL, official[SOURCE_MODEL]), (SOURCE_FUSION, official[SOURCE_FUSION]), (SOURCE_CLOSE, close)]
+    cands = [(SOURCE_MODEL, official[SOURCE_MODEL]), (SOURCE_FUSION, official[SOURCE_FUSION])]
+    if closings is None:
+        cands.append((SOURCE_CLOSE, close))
+    else:
+        cands.extend((f"{SOURCE_CLOSE}（{c['公司']} / {c.get('benchmark_source') or '来源未知'} / {c.get('market') or '市场未知'}）", c)
+                     for c in closings)
     cands = [(n, e["logloss_1x2"]) for n, e in cands if e is not None and e.get("logloss_1x2") is not None]
     best = min(cands, key=lambda x: x[1])
     return {"最接近": best[0], "比较的是": [n for n, _ in cands], "胜平负log_loss": {n: x for n, x in cands},
@@ -265,11 +276,29 @@ def build_review(m: dict, labels: dict | None, names_zh: dict, settings: dict, g
     """一场比赛的复盘内容（写进 matches/<match_id>.json，周报月报也用它）。"""
     cfg = settings["review"]
     kinds = list(cfg["kinds"])
-    vs = sorted(m["versions"], key=lambda v: kind_rank(v["kind"], kinds))
+    vs = sorted(m["versions"], key=lambda v: (str(v["model"]), str(v["model_version"]),
+                                             kind_rank(v["kind"], kinds), v["prediction_id"]))
     entries = [version_entry(m, v) for v in vs]
-    off_v = official_version(vs, list(cfg["official_order"]))
+    identities = sorted({(v["model"], v["model_version"]) for v in vs})
+    official_vs = [official_version([v for v in vs if (v["model"], v["model_version"]) == identity],
+                                    list(cfg["official_order"])) for identity in identities]
+    # 旧接口只能放一个正式版本，明确选最新存档身份的正式版；完整结果始终保留在各模型版本复盘。
+    off_v = max(official_vs, key=lambda v: v["prediction_id"])
     off = next(e for e in entries if e["prediction_id"] == off_v["prediction_id"])
     close = close_entry(m)
+    closing_entries = [close_entry(m, c) for c in m.get("all_closings", [m["close"]] if m.get("close") is not None else [])]
+    model_reviews = []
+    for v in official_vs:
+        own_entries = [e for e in entries if (e["model"], e["model_version"]) == (v["model"], v["model_version"])]
+        official = next(e for e in own_entries if e["prediction_id"] == v["prediction_id"])
+        model_reviews.append({"model": v["model"], "model_version": v["model_version"],
+                              "正式版本": v["kind"], "正式prediction_id": v["prediction_id"],
+                              "archive_status": v.get("archive_status", "unknown"), "cutoff_utc": v["cutoff_utc"],
+                              "归类所用单个标杆": None if close is None else {k: close.get(k) for k in ("benchmark_source", "bookmaker", "market", "timing")},
+                              "最接近结果": closest(official, None, closing_entries),
+                              "信息越多越准吗": info_trend(own_entries),
+                              "误差归类": classify_error(m, v, cfg["errors"]),
+                              "赔率方向": odds_direction(v, m["close"], cfg["errors"])})
     err = classify_error(m, off_v, cfg["errors"])
     home = names_zh.get(m["home_team"], m["home_team"])
     away = names_zh.get(m["away_team"], m["away_team"])
@@ -287,12 +316,20 @@ def build_review(m: dict, labels: dict | None, names_zh: dict, settings: dict, g
         "一句话": line,
         "实际": {"比分": [m["home_goals"], m["away_goals"]], "结果": OUTCOMES[res],
                  "xG": None if m["xg"] is None else [r4(x) for x in m["xg"]],
-                 "红牌": None if m["red"] is None else list(m["red"]), "比分数据来源": m["stats_source"]},
+                 "红牌": None if m["red"] is None else list(m["red"]), "比分数据来源": m["stats_source"],
+                 **{k: m.get(k) for k in ("source_missing", "missing_since_utc", "restored_at_utc", "missing_reason", "last_sources_json")},
+                 "来源说明": "来源缺失；赛果为最后已知资料" if m.get("source_missing") in (True, 1) else None},
         "正式版本": off["版本"],
+        "正式prediction_id": off["prediction_id"],
+        "各模型版本复盘": model_reviews,
         "各版本": entries,
         "收盘赔率": close,
+        "收盘标杆": closing_entries,
+        "收盘证据": m.get("closing_evidence", []),
+        "收盘覆盖": m.get("closing_coverage"),
+        "兼容说明": "正式版本、收盘赔率和顶层误差/趋势是单个选定参考；完整成绩请按各模型版本复盘与收盘标杆分别读取。",
         "最接近结果": near,
-        "信息越多越准吗": info_trend(entries),
+        "信息越多越准吗": next(r["信息越多越准吗"] for r in model_reviews if r["正式prediction_id"] == off["prediction_id"]),
         "赔率方向": odds_direction(off_v, m["close"], cfg["errors"]),
         "误差归类": err,
         "自动标签": labels,

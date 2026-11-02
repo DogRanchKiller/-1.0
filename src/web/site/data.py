@@ -1,7 +1,7 @@
 """正式网站要的数据，一次读好（需求文档第 9 节接口 1、3、4）。只读，不出预测、不跑模型、不联网。
 
 从哪里读：
-1. 预测存档 predictions 表（接口 1）：直接读。同一场、同一个版本（kind）有几行时，取 prediction_id 最大的那行。
+1. 预测存档 predictions 表（接口 1）：同一场、同一模型、模型版本、预测时点取 prediction_id 最大的那行。
    detail 里的键：预览版（preview）的“融合概率”“融合”（倾向、信心等级、不确定因素）等；定时版本（T-24 / T-6 / T-1）另有
    “计划时点”“晚了几分钟”“模型比分矩阵”“融合比分矩阵”“首发”。矩阵只读不算：没存矩阵的版本，页面上写“这一版没有存比分矩阵”。
 2. 数据库里的赛程、变盘记录、竞彩赔率：经过取数层（src/features 的 FeatureStore，实时模式），用途「显示」（config/data_usage.yaml）。
@@ -23,9 +23,10 @@ import pandas as pd
 from src.features import FeatureStore
 from src.features.errors import FeatureAccessError
 from src.features.known_time import to_utc_text
+from src.review.reconcile import SCORE_COLUMNS, archive_metadata
 
-# scores.csv 的列（需求文档第 9 节接口 3）
-SCORE_COLUMNS = ["prediction_id", "match_id", "competition", "season", "kickoff_utc", "kind", "source", "home_goals",
+# 老 scores.csv 仍能读；后来新增的身份、证据列缺失时保持未知。
+LEGACY_SCORE_COLUMNS = ["prediction_id", "match_id", "competition", "season", "kickoff_utc", "kind", "source", "home_goals",
                  "away_goals", "p_home", "p_draw", "p_away", "logloss_1x2", "brier_1x2", "rps_1x2", "logloss_score",
                  "logloss_over25", "logloss_btts"]
 
@@ -36,8 +37,9 @@ class SiteData:
     now: datetime
     settings: dict
     matches: dict[int, dict] = field(default_factory=dict)       # 要做单场页的比赛：联赛、主客队、开球时间、状态……
-    preds: dict[int, dict[str, dict]] = field(default_factory=dict)   # match_id → 版本 → 那一行（detail 已解析成字典）
+    preds: dict[int, dict[tuple[str, str, str], dict]] = field(default_factory=dict)  # 比赛 → 模型/版本/时点 → 存档行
     results: dict[int, tuple[int, int]] = field(default_factory=dict)  # 已经能知道的比分 (主, 客)
+    result_notes: dict[int, str] = field(default_factory=dict)     # 赛果来源缺失时保留最后已知资料的提醒
     odds: dict[int, pd.DataFrame] = field(default_factory=dict)   # 开球前的变盘记录（用途「显示」）
     lottery: dict[int, pd.DataFrame] = field(default_factory=dict)
     team_zh: dict[str, str] = field(default_factory=dict)
@@ -62,28 +64,36 @@ class SiteData:
         rows = self.preds.get(mid) or {}
         if not rows:
             return None
-        kind = max(rows, key=lambda k: (str(rows[k]["cutoff_utc"] or ""), rows[k]["prediction_id"]))
-        return kind, rows[kind]
+        row = max(rows.values(), key=lambda r: (str(r["cutoff_utc"] or ""), r["prediction_id"]))
+        return row["kind"], row
 
 
 # ---------- 预测存档 ----------
-def read_predictions(con, kinds: list[str]) -> dict[int, dict[str, dict]]:
-    """每场每个版本取 prediction_id 最大的那行（接口 1）。只要 settings site.versions 里的版本。表还没建时返回空。"""
+def read_predictions(con, kinds: list[str]) -> dict[int, dict[tuple[str, str, str], dict]]:
+    """每场每个模型、模型版本、预测时点取最大 prediction_id；原始存档不改。"""
+    if not kinds:
+        return {}
     q = ",".join("?" * len(kinds))
     sql = f"""select p.* from predictions p join (
-                select match_id, kind, max(prediction_id) as pid from predictions where kind in ({q})
-                group by match_id, kind) last on last.pid = p.prediction_id"""
+                select match_id, model, model_version, kind, max(prediction_id) as pid from predictions where kind in ({q})
+                group by match_id, model, model_version, kind) last on last.pid = p.prediction_id
+                left join matches m on m.match_id = p.match_id
+                where m.match_id is null or (p.competition = m.competition and p.season = m.season
+                                             and p.home_team = m.home_team and p.away_team = m.away_team)"""
     try:
         df = pd.read_sql(sql, con, params=list(kinds))
     except (sqlite3.OperationalError, pd.errors.DatabaseError):
         return {}
-    out: dict[int, dict[str, dict]] = {}
+    out: dict[int, dict[tuple[str, str, str], dict]] = {}
     for r in df.to_dict("records"):
         try:
             r["detail"] = json.loads(r["detail"] or "{}")
         except (TypeError, ValueError):
             r["detail"] = {}                 # detail 坏了也不让整站出错，这一版的细节显示成空
-        out.setdefault(int(r["match_id"]), {})[r["kind"]] = r
+        if not isinstance(r["detail"], dict):
+            r["detail"] = {}
+        r.update(archive_metadata(r["kind"], r["detail"]))
+        out.setdefault(int(r["match_id"]), {})[(r["model"], r["model_version"], r["kind"])] = r
     return out
 
 
@@ -131,10 +141,13 @@ def read_review(folder: Path, data: SiteData) -> None:
     if path.exists():
         try:
             df = pd.read_csv(path)
-            missing = [c for c in SCORE_COLUMNS if c not in df.columns]
+            missing = [c for c in LEGACY_SCORE_COLUMNS if c not in df.columns]
             if missing:
                 data.scores_note = f"scores.csv 缺这几列：{'、'.join(missing)}（格式见需求文档第 9 节接口 3）"
             else:
+                for c in SCORE_COLUMNS:
+                    if c not in df:
+                        df[c] = "unknown" if c == "archive_status" else None
                 df["match_id"] = pd.to_numeric(df["match_id"], errors="coerce")
                 data.scores = df.dropna(subset=["match_id"]).astype({"match_id": int})
         except (OSError, ValueError, pd.errors.ParserError) as err:
@@ -214,6 +227,8 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     if data.scores is not None:
         data.page_ids |= set(data.scores["match_id"]) & set(data.matches)
         data.levels = read_detail_levels(con, data.scores["prediction_id"])
+        saved_levels = data.scores["prediction_id"].map(data.levels)
+        data.scores["confidence"] = data.scores["confidence"].where(data.scores["confidence"].notna(), saved_levels)
 
     # 4.1 只给人看的：中文队名、比赛状态（和预览页 add_display_info 一样直接读，不进模型）
     ids = list(data.matches)
@@ -234,13 +249,18 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     since = max(to_utc_text(start), to_utc_text(pd.Timestamp(live_first))) if live_first else to_utc_text(start)
     try:
         hist = fs.historical_matches(nowt, "复盘", competition=None, data=("比分",), since=since)
-        for r in hist[["match_id", "home_goals", "away_goals"]].dropna().itertuples(index=False):
-            data.results[int(r.match_id)] = (int(r.home_goals), int(r.away_goals))
+        for r in hist.dropna(subset=["home_goals", "away_goals"]).to_dict("records"):
+            mid = int(r["match_id"])
+            data.results[mid] = (int(r["home_goals"]), int(r["away_goals"]))
+            if r.get("source_missing") in (True, 1):
+                data.result_notes[mid] = "来源缺失；赛果为最后已知资料"
     except (FeatureAccessError, ValueError) as err:
         data.notes.append(f"比分暂时取不到：{str(err).splitlines()[0]}")
     if data.scores is not None:
         for r in data.scores.dropna(subset=["home_goals", "away_goals"]).drop_duplicates("match_id").itertuples(index=False):
             data.results.setdefault(int(r.match_id), (int(r.home_goals), int(r.away_goals)))
+            if getattr(r, "source_missing", None) in (True, 1):
+                data.result_notes.setdefault(int(r.match_id), "来源缺失；赛果为最后已知资料")
 
     # 6. 赛程（球队页的“最近踢过的”，含杯赛、欧战；用途「显示」）
     data.schedule = fs.schedule(nowt, "显示", since=now - timedelta(days=cfg["team_days_back"]))

@@ -26,11 +26,24 @@ VERSION_HOURS = {"T-24": 24, "T-6": 6, "T-1": 1}
 VERSION_NAMES = {"T-24": "开球前 24 小时", "T-6": "开球前 6 小时", "T-1": "开球前 1 小时", "preview": "预览版（手动出的）"}
 LEAN_KEYS = ("result", "draw", "over25", "btts", "ah")
 MARKET_NAMES = {"1x2": "胜平负", "ah": "亚盘", "ou": "大小球"}
+ARCHIVE_NAMES = {"preview": "预览", "on_time": "准点", "late": "晚出", "rescheduled": "改期重出", "unknown": "未知"}
 
 
 # ---------- 读存档里的一行（几页共用） ----------
 def version_name(kind: str) -> str:
     return VERSION_NAMES.get(kind, kind)
+
+
+def known_text(value) -> str:
+    return "未知" if value is None or pd.isna(value) or value == "" else str(value)
+
+
+def identity_text(row: dict) -> str:
+    return f"{known_text(row.get('model'))} / {known_text(row.get('model_version'))}"
+
+
+def archive_name(value) -> str:
+    return ARCHIVE_NAMES.get(known_text(value), known_text(value))
 
 
 def fusion(row: dict) -> dict:
@@ -134,13 +147,16 @@ def versions_html(data: SiteData, mid: int) -> str:
     info, rows = data.matches[mid], data.preds.get(mid) or {}
     score = data.results.get(mid)
     out = []
-    for kind in data.settings["site"]["versions"]:
-        r = rows.get(kind)
+    identities = sorted({(r["model"], r["model_version"]) for r in rows.values()}) or [(None, None)]
+    slots = [(model, version, kind) for model, version in identities for kind in data.settings["site"]["versions"]]
+    for model, version, kind in slots:
+        r = rows.get((model, version, kind))
         if r is None:
             plan = planned_time(info, kind)
             why = ("还没到时间" if plan is not None and plan > data.now else "这一版没有出") if kind in VERSION_HOURS \
                 else "没有出预览版"
-            out.append([e(version_name(kind)), f"<span class='muted'>{e(why)}</span>", "", "", "", "", "", ""])
+            out.append([e(known_text(model)), e(known_text(version)), e(version_name(kind)), "—",
+                        f"<span class='muted'>{e(why)}</span>", "", "", "", "", "", "", ""])
             continue
         d = r.get("detail") or {}
         late = d.get("晚了几分钟")
@@ -149,8 +165,11 @@ def versions_html(data: SiteData, mid: int) -> str:
         has_m = "融合比分矩阵" if d.get("融合比分矩阵") is not None else ("模型比分矩阵" if d.get("模型比分矩阵") is not None else None)
         extra = "；".join(x for x in [*uncertain(r), str(d.get("首发") or "")] if x) or "—"
         out.append([
+            e(known_text(model)), e(known_text(version)),
             e(version_name(kind)),
+            e(archive_name(r.get("archive_status"))),
             e(bj_text(r["cutoff_utc"])) + late_txt,
+            e(bj_text(r.get("created_at_utc"))),
             e(probs_text([r["p_home"], r["p_draw"], r["p_away"]])),
             e(probs_text(p)) if src == "融合" else "<span class='muted'>没融合</span>",
             e(level_name(level(r))),
@@ -159,9 +178,9 @@ def versions_html(data: SiteData, mid: int) -> str:
                         "<br><span class='small muted'>没存比分矩阵</span>"),
             hit_html(r, score),
         ])
-    note = ("<p class='small muted'>“出的时间”是北京时间，是真正算出这一版的时间。各版本只用当时已经知道的数据，"
+    note = ("<p class='small muted'>截止时间和存档时间分别列出，均为北京时间。模型名称、模型版本、预测时点与归档状态分别保留。各版本只用当时已经知道的数据，"
             "所以越晚的版本赔率越新；“首发”还没有接进来时写“未含首发”。猜中 = 胜平负里概率最大的那项和赛果一样。</p>")
-    return table(["版本", "出的时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"], out) + note
+    return table(["模型", "模型版本", "预测时点", "归档状态", "数据截止时间", "存档时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"], out) + note
 
 
 # ---------- 比分概率、各玩法（只从存的矩阵算） ----------
@@ -233,14 +252,16 @@ def scores_html(data: SiteData, mid: int) -> str:
     rows = data.preds.get(mid) or {}
     if not rows:
         return placeholder("这场还没有预测")
-    latest = data.latest(mid)[0]
-    order = sorted(rows, key=lambda k: (str(rows[k]["cutoff_utc"] or ""), rows[k]["prediction_id"]), reverse=True)
+    latest_pid = data.latest(mid)[1]["prediction_id"]
+    order = sorted(rows.values(), key=lambda r: (str(r["cutoff_utc"] or ""), r["prediction_id"]), reverse=True)
     parts = []
-    for kind in order:
-        r = rows[kind]
+    for r in order:
+        kind = r["kind"]
+        title = f"{identity_text(r)} · {version_name(kind)} · {archive_name(r.get('archive_status'))}"
+        is_latest = r["prediction_id"] == latest_pid
         mats, why = version_matrices(r, cfg["matrix_sum_tol"])
         if not mats:
-            parts.append(details(f"{version_name(kind)}的比分概率", placeholder(why), open_=kind == latest))
+            parts.append(details(f"{title}的比分概率", placeholder(why), open_=is_latest))
             continue
         maps = []
         for name, m in mats:
@@ -249,7 +270,7 @@ def scores_html(data: SiteData, mid: int) -> str:
                         f"{heatmap_svg(m, cfg['heatmap_goals'], f'{version_name(kind)} {name}的比分概率')}"
                         f"<p class='small'>最可能的 {cfg['top_scores']} 个比分：{e(tops)}</p></div>")
         inner = f"<div class='grid2'>{''.join(maps)}</div>" + markets_html(mats, fusion(r), cfg)
-        parts.append(details(f"{version_name(kind)}的比分概率和各玩法", inner, open_=kind == latest))
+        parts.append(details(f"{title}的比分概率和各玩法", inner, open_=is_latest))
     note = (f"<p class='small muted'>热力图：行是主队进几球、列是客队进几球，格子里是百分比，越亮越可能；"
             f"{cfg['heatmap_goals'] + 1}+ 那一格是 {cfg['heatmap_goals'] + 1} 球及以上加在一起。</p>")
     return "".join(parts) + note
@@ -387,13 +408,19 @@ def review_html(data: SiteData, mid: int) -> str:
         if not s.empty:
             rows = []
             for r in s.to_dict("records"):
-                rows.append([e(version_name(str(r["kind"])) if pd.notna(r["kind"]) else "—"), e(r["source"]),
-                             e(probs_text([r["p_home"], r["p_draw"], r["p_away"]])),
+                close = r["source"] == "收盘赔率"
+                rows.append(["—" if close else e(known_text(r.get("model"))), "—" if close else e(known_text(r.get("model_version"))),
+                             e(version_name(str(r["kind"])) if pd.notna(r["kind"]) else "不分版本"), e(r["source"]),
+                             "—" if close else e(archive_name(r.get("archive_status"))),
+                             e(" / ".join(known_text(r.get(k)) for k in ("benchmark_source", "bookmaker", "market", "timing"))) if close else "—",
+                             e(probs_text([r["p_home"], r["p_draw"], r["p_away"]])) if pd.notna(r["p_home"]) else "—",
                              *(e(f"{r[c]:.3f}" if pd.notna(r[c]) else "—")
                                for c in ("logloss_1x2", "brier_1x2", "rps_1x2", "logloss_score", "logloss_over25", "logloss_btts"))])
-            parts.append(table(["版本", "概率来自", "胜平负概率", "胜平负 log loss", "Brier", "RPS", "比分 log loss",
+            parts.append(table(["模型", "模型版本", "预测时点", "概率来自", "归档状态", "标杆来源 / 公司 / 玩法 / 时点", "胜平负概率", "胜平负 log loss", "Brier", "RPS", "比分 log loss",
                                 "大小 2.5 log loss", "双方进球 log loss"], rows))
-            parts.append("<p class='small muted'>log loss、Brier、RPS 都是越小越准（第 7 节）。“收盘赔率”一行是拿开球那一刻的赔率当对照。</p>")
+            parts.append("<p class='small muted'>log loss、Brier、RPS 都是越小越准。收盘标杆按来源、公司、玩法、时点独立保存；来源的收盘字段不代表恰好在开球瞬间采集。</p>")
+    if mid in data.result_notes:
+        parts.insert(0, f"<p class='note'>{e(data.result_notes[mid])}</p>")
     rv = data.reviews.get(mid)
     if rv is not None:
         parts.append(f"<div class='card pad'>{json_html(rv)}</div>")
@@ -418,6 +445,8 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
     score = score_text(data, mid)
     state = (f"<span class='score'>赛果 {e(score)}</span>" if score
              else (f"<span class='tag warn'>{e(tag)}</span>" if tag else "<span class='tag'>还没踢</span>"))
+    if mid in data.result_notes:
+        state += f" <span class='tag warn'>{e(data.result_notes[mid])}</span>"
     head = (f"<h1>{teams.link(home, data.zh(home), pre)} <span class='accent'>对</span> {teams.link(away, data.zh(away), pre)}</h1>"
             f"<p class='muted'>{e(data.comp(info['competition']))} {e(season_label(info['season']))} 赛季 · "
             f"{e(kickoff_text(info))}（北京时间） · {state}</p>")
@@ -428,7 +457,7 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         kind, row = latest
         pts = "".join(f"<li>{e(t)}</li>" for t in key_points(row))
         summary = (f"<h2>结论</h2><div class='card pad'><p class='small muted'>最新一版：{e(version_name(kind))}，"
-                   f"{e(bj_text(row['cutoff_utc']))} 出的</p><p>{conclusion_html(row, with_leans=False)}</p>"
+                   f"{e(identity_text(row))}，{e(archive_name(row.get('archive_status')))}，{e(bj_text(row['cutoff_utc']))} 截止</p><p>{conclusion_html(row, with_leans=False)}</p>"
                    f"<ul class='points'>{pts}</ul>{f'<p>{hit_html(row, data.results.get(mid))}</p>' if score else ''}</div>")
     has_review = data.reviews.get(mid) is not None or (
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))

@@ -10,12 +10,12 @@ import numpy as np
 import pandas as pd
 
 from src.features.known_time import to_utc_text
-from src.web.site.common import (LEVEL_NAMES, NOT_ADVICE, OUTCOMES, STATUS_TAGS, TeamFiles, bj_text, day_title, details,
-                                 e, kickoff_text, level_name, match_href, page, pct0, placeholder, table)
+from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics
+from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bj_text, day_title, details,
+                                 e, kickoff_text, level_name, match_href, page, placeholder, table)
 from src.web.site.data import SiteData
-from src.web.site.match import conclusion_html, final_probs, hit_html, score_text, side_of, version_name
-
-SOURCES = ("融合", "模型", "收盘赔率")   # 战绩页里几种概率的先后
+from src.web.site.match import (archive_name, conclusion_html, hit_html, identity_text, known_text,
+                                score_text, side_of, version_name)
 
 
 def match_link(data: SiteData, mid: int, prefix: str) -> str:
@@ -30,7 +30,8 @@ def match_link(data: SiteData, mid: int, prefix: str) -> str:
 def state_html(data: SiteData, mid: int) -> str:
     s = score_text(data, mid)
     if s:
-        return f"<span class='score'>{e(s)}</span>"
+        note = f" <span class='tag warn'>{e(data.result_notes[mid])}</span>" if mid in data.result_notes else ""
+        return f"<span class='score'>{e(s)}</span>{note}"
     tag = STATUS_TAGS.get(data.matches[mid].get("status"))
     return f"<span class='tag warn'>{e(tag)}</span>" if tag else ""
 
@@ -40,7 +41,8 @@ def latest_cell(data: SiteData, mid: int) -> str:
     if lt is None:
         return "<span class='muted'>还没有预测</span>"
     kind, row = lt
-    return f"{conclusion_html(row)}<br><span class='small muted'>{e(version_name(kind))}，{e(bj_text(row['cutoff_utc']))} 出的</span>"
+    return (f"{conclusion_html(row)}<br><span class='small muted'>{e(identity_text(row))}，{e(version_name(kind))}，"
+            f"{e(archive_name(row.get('archive_status')))}，{e(bj_text(row['cutoff_utc']))} 截止</span>")
 
 
 # ---------- 首页 ----------
@@ -106,7 +108,7 @@ def team_record(data: SiteData, team: str) -> list[list[str]]:
     for mid in sorted(mids, key=lambda i: data.matches[i]["kickoff_earliest_utc"], reverse=True):
         kind, row = data.latest(mid)
         rows.append([e(kickoff_text(data.matches[mid])), f"<td class='match'>{match_link(data, mid, '../')}</td>",
-                     state_html(data, mid), conclusion_html(row), hit_html(row, data.results[mid])])
+                     state_html(data, mid), latest_cell(data, mid), hit_html(row, data.results[mid])])
     return rows
 
 
@@ -128,6 +130,8 @@ def render_team(data: SiteData, team: str, teams: TeamFiles) -> str:
             if s is not None:
                 me, op = (s[0], s[1]) if home else (s[1], s[0])
                 res = f"<span class='score'>{s[0]}–{s[1]}</span> " + ("胜" if me > op else "平" if me == op else "负")
+                if mid in data.result_notes:
+                    res += f" <span class='tag warn'>{e(data.result_notes[mid])}</span>"
             name = f"{'主' if home else '客'} 对 {data.zh(opp)}"
             link = f"<a class='match' href='{match_href(mid, pre)}'>{e(name)}</a>" if mid in data.page_ids else e(name)
             info = {"kickoff_utc": r["kickoff_utc"] if isinstance(r["kickoff_utc"], str) else None,
@@ -154,18 +158,6 @@ def render_team(data: SiteData, team: str, teams: TeamFiles) -> str:
 
 
 # ---------- 战绩页 ----------
-def _hit_rate(df: pd.DataFrame) -> float:
-    """胜平负概率最大的那项和赛果一样的比例。"""
-    p = df[["p_home", "p_draw", "p_away"]].to_numpy(dtype=float)
-    actual = np.where(df["home_goals"] > df["away_goals"], 0, np.where(df["home_goals"] == df["away_goals"], 1, 2))
-    return float((p.argmax(axis=1) == actual).mean())
-
-
-def _mean(x: pd.Series) -> str:
-    x = pd.to_numeric(x, errors="coerce").dropna()
-    return f"{x.mean():.3f}" if len(x) else "—"
-
-
 def render_record(data: SiteData, out_dir: Path) -> str:
     """总战绩，从 data/review/scores.csv 汇总（K2 每次全部重算）。"""
     cfg = data.settings["site"]
@@ -173,26 +165,77 @@ def render_record(data: SiteData, out_dir: Path) -> str:
         why = data.scores_note or "还没有复盘数据"
         body = f"<h1>战绩</h1>{placeholder(why)}" + (placeholder("还没有复盘数据") if data.scores_note else "")
         return page("战绩 - 足球预测", body, "", data.now, cfg["refresh_minutes"])
-    s = data.scores.dropna(subset=["home_goals", "away_goals", "p_home", "p_draw", "p_away"]).copy()
-    s["kind"] = s["kind"].fillna("")          # 收盘赔率那几行不分版本（kind 是空的），分组时不能丢
-    order = {k: i for i, k in enumerate(cfg["versions"])}
-    srank = {k: i for i, k in enumerate(SOURCES)}
-    rows = []
-    for (kind, src), g in sorted(s.groupby(["kind", "source"]), key=lambda x: (order.get(x[0][0], 99), srank.get(x[0][1], 99))):
-        rows.append([e(version_name(kind) if kind else "不分版本"), e(src), str(g["match_id"].nunique()), e(pct0(_hit_rate(g))),
-                     *(e(_mean(g[c])) for c in ("logloss_1x2", "brier_1x2", "rps_1x2", "logloss_score", "logloss_over25", "logloss_btts"))])
-    summary = (table(["版本", "概率来自", "场数", "胜平负猜中", "胜平负 log loss", "Brier", "RPS", "比分 log loss",
-                      "大小 2.5 log loss", "双方进球 log loss"], rows) if rows else placeholder("还没有踢完、对过账的比赛"))
-    # 按信心等级：融合后的概率，按出那一版时的信心等级分组
-    f = s[s["source"] == "融合"].copy()
-    f["level"] = [data.levels.get(int(p)) if pd.notna(p) else None for p in f["prediction_id"]]
-    lv_rows = []
-    for lv in sorted(LEVEL_NAMES, reverse=True):
-        g = f[f["level"] == lv]
-        if len(g):
-            lv_rows.append([e(level_name(lv)), str(len(g)), e(pct0(_hit_rate(g))), e(_mean(g["logloss_1x2"]))])
-    by_level = (table(["信心等级", "几行（场 × 版本）", "胜平负猜中", "胜平负 log loss"], lv_rows) if lv_rows
-                else placeholder("还没有带信心等级的融合预测"))
+    s = data.scores.copy()
+    metrics = live_metrics(s, data.settings, {mid: r.get("自动标签") for mid, r in data.reviews.items()})
+    columns = ("logloss_1x2", "brier_1x2", "rps_1x2", "logloss_score", "logloss_over25", "logloss_btts")
+    group_headers = ["模型", "模型版本", "预测时点", "概率来源", "归档状态"]
+
+    def number(value):
+        return "—" if value is None else f"{value:.3f}"
+
+    def identity(group):
+        cells = group_cells(group)
+        cells[-1] = archive_name(cells[-1])
+        return [e(x) for x in cells]
+
+    def summary_table(items, extra=()):
+        rows = []
+        for item in items:
+            cells = identity(item["group"])
+            for col in extra:
+                value = item["group"][col]
+                cells.append(e((level_name(value) if value in (1, 2, 3) else "未知") if col == "confidence"
+                               else extra_text(col, value)))
+            rows.append(cells + [str(item["n_matches"])]
+                        + [e(number(item["metrics"][c]["mean"])) for c in columns] + [e(item["note"])])
+        return table([*group_headers, *[EXTRA_NAMES[x] for x in extra], "场数", "胜平负 log loss", "Brier", "RPS", "比分 log loss",
+                      "大小 2.5 log loss", "双方进球 log loss", "证据说明"], rows) if rows else placeholder("无匹配证据")
+
+    summary = summary_table(metrics["groups"])
+    by_level = summary_table(metrics["confidence"], ("confidence",))
+    pair_rows = []
+    for item in metrics["comparisons"]:
+        benchmark = item["benchmark"]
+        for name, values in item["metrics"].items():
+            pair_rows.append(identity(item["group"]) + [e(benchmark[k]) for k in ("benchmark_source", "bookmaker", "market", "timing")]
+                             + [e(name), str(item["n_model"]), str(item["n_benchmark"]),
+                                str(item["n_model"] - values["n_matches"]), str(values["n_matches"]), e(number(values["model_mean"])),
+                                e(number(values["benchmark_mean"])), e(number(values["mean_delta"])), e(item["note"])])
+    pairs = table([*group_headers, "标杆来源", "公司", "玩法", "标杆时点", "指标", "模型场数", "标杆覆盖", "缺失场数", "同场数", "模型均值", "标杆均值", "差值", "证据说明"], pair_rows)
+    mids = sorted(s.loc[s["source"].isin(("模型", "融合")), "match_id"].unique())
+    coverage = coverage_for_reviews([{**review, "match_id": mid} for mid, review in data.reviews.items()], data.settings, mids)
+    coverage_table = table(["公司", "玩法", "复盘场数", "标杆覆盖", "缺失场数", "覆盖率", "缺失原因"],
+                           [[e(str(value)) for value in row] for row in coverage_cells(coverage)])
+    # 独立标杆保留原样；旧 CSV 没有来源证据时明确未知，不纳入合格收盘的同场比较。
+    benchmark_rows = []
+    for row in s[s["source"] == "收盘赔率"].to_dict("records"):
+        benchmark_rows.append([str(row["match_id"]), "收盘赔率（不分版本）"]
+                              + [e(known_text(row.get(c))) for c in ("benchmark_source", "bookmaker", "market", "timing")]
+                              + [e(number(row[c])) if pd.notna(row[c]) else "—" for c in columns])
+    benchmarks = table(["比赛", "来源", "数据来源", "公司", "玩法", "时点", "胜平负 log loss", "Brier", "RPS",
+                         "比分 log loss", "大小 2.5 log loss", "双方进球 log loss"], benchmark_rows) if benchmark_rows else placeholder("没有合格收盘标杆")
+    calibration_rows, bin_rows = [], []
+    for item in metrics["calibration"]:
+        for outcome in item["outcomes"]:
+            calibration_rows.append(identity(item["group"]) + [e(outcome["outcome"]), str(item["n_matches"]), e(number(outcome["ece"]))])
+            for bin_ in outcome["bins"]:
+                bin_rows.append(identity(item["group"]) + [e(outcome["outcome"]), f"{bin_['bin_low']:.0%}–{bin_['bin_high']:.0%}",
+                                str(bin_["n"]), e(number(bin_["mean_pred"])), e(number(bin_["observed"]))])
+    calibration = table([*group_headers, "结果", "场数", "校准误差 ECE"], calibration_rows)
+    calibration += details("按预测概率分箱（空箱保留为空）", table([*group_headers, "结果", "概率区间", "场数", "平均预测概率", "实际发生比例"], bin_rows))
+    confidence_rows, confidence_bins = [], []
+    for item in metrics["confidence"]:
+        value = item["group"]["confidence"]
+        label = level_name(value) if value in (1, 2, 3) else "未知"
+        for outcome in item["calibration"]["outcomes"]:
+            cells = identity(item["group"]) + [e(label), e(outcome["outcome"])]
+            confidence_rows.append(cells + [str(item["calibration"]["n_matches"]), e(number(outcome["ece"]))])
+            for bin_ in outcome["bins"]:
+                confidence_bins.append(cells + [f"{bin_['bin_low']:.0%}–{bin_['bin_high']:.0%}", str(bin_["n"]),
+                                                 e(number(bin_["mean_pred"])), e(number(bin_["observed"]))])
+    confidence_calibration = table([*group_headers, "保存的信心等级", "结果", "场数", "校准误差 ECE"], confidence_rows)
+    confidence_calibration += details("信心等级内的概率分箱", table(
+        [*group_headers, "保存的信心等级", "结果", "概率区间", "场数", "平均预测概率", "实际发生比例"], confidence_bins))
     # 最近踢完的几场
     recent_rows = []
     ids = (s.sort_values("kickoff_utc", ascending=False)["match_id"].drop_duplicates().head(30))
@@ -201,14 +244,20 @@ def render_record(data: SiteData, out_dir: Path) -> str:
         r0 = g.iloc[0]
         name = (match_link(data, int(mid), "") if int(mid) in data.matches else e(str(mid)))
         hits = []
-        for kind in cfg["versions"]:
-            k = g[(g["kind"] == kind) & (g["source"] == "融合")]
-            k = k if len(k) else g[(g["kind"] == kind) & (g["source"] == "模型")]
-            if len(k):
-                ok = _hit_rate(k.iloc[:1]) == 1.0
-                hits.append(f"{e(kind)} <span class='{'hit' if ok else 'miss'}'>{'中' if ok else '没中'}</span>")
+        model = g[g["source"].isin(("模型", "融合"))].dropna(subset=["p_home", "p_draw", "p_away", "home_goals", "away_goals"])
+        for _, group in model.groupby(["model", "model_version", "kind", "archive_status"], dropna=False, sort=False):
+            fused = group[group["source"] == "融合"]
+            selected = (fused if len(fused) else group[group["source"] == "模型"])
+            for _, row in selected.iterrows():
+                ok = int(np.argmax([row["p_home"], row["p_draw"], row["p_away"]])) == side_of((row["home_goals"], row["away_goals"]))
+                label = f"{identity_text(row)} · {row['kind']} · {archive_name(row.get('archive_status'))}"
+                hits.append(f"{e(label)} <span class='{'hit' if ok else 'miss'}'>{'中' if ok else '没中'}</span>")
+        result = (f"<span class='score'>{int(r0['home_goals'])}–{int(r0['away_goals'])}</span>"
+                  if pd.notna(r0["home_goals"]) and pd.notna(r0["away_goals"]) else "—")
+        if int(mid) in data.result_notes:
+            result += f" <span class='tag warn'>{e(data.result_notes[int(mid)])}</span>"
         recent_rows.append([e(bj_text(r0["kickoff_utc"])), e(data.comp(str(r0["competition"]))), f"<td class='match'>{name}</td>",
-                            f"<span class='score'>{int(r0['home_goals'])}–{int(r0['away_goals'])}</span>", "　".join(hits) or "—"])
+                            result, "　".join(hits) or "—"])
     recent = table(["开球", "联赛", "比赛", "比分", "各版本胜平负猜中"], recent_rows) if recent_rows else ""
     # 周报、月报：链接到 data/review/reports/ 里的文件（相对路径，网站文件夹和复盘文件夹的相对位置不变就能点）
     rep = ""
@@ -224,7 +273,13 @@ def render_record(data: SiteData, out_dir: Path) -> str:
                + details(f"最新一份：{latest.name}", f"<pre class='small' style='white-space:pre-wrap'>{e(text)}</pre>"))
     body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
             f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
-            f"log loss、Brier、RPS 都是越小越准；“收盘赔率”是拿开球那一刻的赔率当对照，模型和融合能接近它就不错了。</p>"
-            f"<h2>总的</h2>{summary}<h2>按信心等级</h2>{by_level}"
+            f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
+            f"收盘字段来自有证据的来源声明，不表示恰好在开球瞬间采集；最后一次观察到的赛前价格单独保留。零匹配表示无匹配证据。</p>"
+            f"<h2>分组成绩</h2>{summary}<h2>独立收盘标杆</h2>{benchmarks}<h2>逐家公司同场比较</h2>{pairs}"
+            f"<h2>收盘证据覆盖</h2><p class='small muted'>分母为当前复盘比赛集合，各公司、玩法独立统计；缺失原因可以重叠。</p>{coverage_table}"
+            f"<h2>按保存的信心等级</h2>{by_level}<h2>概率校准</h2>{calibration}"
+            f"<h2>按信心等级校准</h2>{confidence_calibration}"
+            f"<h2>按联赛</h2>{summary_table(metrics['competitions'], ('competition',))}"
+            f"<h2>按比赛标签（未知单列）</h2>{summary_table(metrics['tags'], ('tag', 'tag_value'))}"
             + (f"<h2>最近踢完的</h2>{recent}" if recent else "") + rep)
     return page("战绩 - 足球预测", body, "", data.now, cfg["refresh_minutes"])
