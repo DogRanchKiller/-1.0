@@ -243,6 +243,38 @@ def test_empty_import_protects_only_predicted_matches(con, importer):
     assert con.execute("select source_missing from match_source_state where match_id=?", (mid,)).fetchone() == (1,)
 
 
+@pytest.mark.parametrize("orphan_id", [1, 999])
+def test_new_matches_never_reuse_orphan_prediction_ids(con, importer, orphan_id):
+    from src.clean.source_lifecycle import reconcile_source_lifecycle
+
+    # 高编号用例让现有最大编号刚好比孤立预测小一，复现 SQLite 自动分配下一编号的碰撞。
+    existing_id = orphan_id - 1 if orphan_id > 1 else None
+    if existing_id is not None:
+        con.execute("insert into matches (match_id, competition, season, home_team, away_team, match_date,"
+                    " kickoff_utc, status, round) values (?, ?, 2026, 'B', 'C', '2026-11-01',"
+                    " '2026-11-01 15:00', 'finished', ?)",
+                    (existing_id, importer.competition, "F" if importer.name == "wikipedia" else ""))
+    con.execute("insert into predictions (match_id, competition, season, home_team, away_team, match_date,"
+                " kind, model, model_version, cutoff_utc, created_at_utc, p_home, p_draw, p_away, detail)"
+                " values (?, ?, 2026, 'A', 'B', '2026-11-01', 'preview', 'old-model', 'old-v1',"
+                " '2026-10-31 15:00', '2026-10-31 15:01', 0.5, 0.3, 0.2, ?)",
+                (orphan_id, importer.competition, '{"frozen_input":"orphan-original"}'))
+    con.commit()
+    original_predictions = records(con, "predictions")
+
+    # 即使新行的自然信息恰好与旧存档一致，也不能猜它就是旧比赛而替预测复用编号。
+    importer.write(con, [PROTECTED, CONTROL])
+    assert records(con, "matches", orphan_id) == []
+    assert importer.mid(con) > orphan_id
+    if existing_id is not None:
+        assert importer.mid(con, "B", "C") == existing_id
+    assert records(con, "predictions") == original_predictions
+    assert records(con, "match_sources", orphan_id) == []
+    assert records(con, "match_source_state", orphan_id) == []
+    assert reconcile_source_lifecycle(con, {})["unmatched_predictions"] == 1
+    assert con.execute("pragma foreign_key_check").fetchall() == []
+
+
 def test_lifecycle_transitions_keep_episode_time_and_do_not_guess_old_orphans(con):
     from src.clean.source_lifecycle import reconcile_source_lifecycle, snapshot_prediction_sources
 

@@ -46,7 +46,7 @@ from src.clean.dongqiudi_match import decide, load_db_matches, load_dqd_seasons,
 from src.clean.dongqiudi_reader import (DETAIL_STATS, MatchDetail, SeasonGame, detail_columns, parse_fixtures,
                                         parse_match_detail, parse_odds, read_json, read_text, resolve_ts)
 from src.clean.schema import create_tables
-from src.clean.source_lifecycle import (delete_replaced_results, reconcile_source_lifecycle,
+from src.clean.source_lifecycle import (delete_replaced_results, new_match_ids, reconcile_source_lifecycle,
                                         snapshot_prediction_sources)
 from src.collect.dongqiudi import current_season
 from src.common.config import PROJECT_ROOT, load_settings, resolve_path
@@ -500,6 +500,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
                               [(zh, en) for en, zh in zh_names.items()])
         counts["填了中文名的球队"] = cur.rowcount
         ids, sources, stats = {}, [], []
+        new_ids = new_match_ids(con)
         for ln in links:
             c = ln.cand
             if ln.match_id is None and ln.result != "新增（当前赛季）":
@@ -510,12 +511,12 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
                 mdate, ko, status, prec = fixture_fields(c.seen.fx, back_days, tz)
                 home, away = mapping[c.home_zh], mapping[c.away_zh]
                 con.execute(
-                    "insert into matches (competition, season, home_team, away_team, match_date, kickoff_utc, status,"
-                    " round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, '', 0, ?)"
+                    "insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc, status,"
+                    " round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?)"
                     " on conflict(competition, season, home_team, away_team, round, leg) do update set"
                     " match_date = excluded.match_date, kickoff_utc = excluded.kickoff_utc,"
                     " status = excluded.status, date_precision = excluded.date_precision",
-                    (c.league, c.season, home, away, mdate, ko, status, prec))
+                    (next(new_ids), c.league, c.season, home, away, mdate, ko, status, prec))
                 mid = con.execute("select match_id from matches where competition = ? and season = ? and home_team = ?"
                                   " and away_team = ? and round = '' and leg = 0",
                                   (c.league, c.season, home, away)).fetchone()[0]

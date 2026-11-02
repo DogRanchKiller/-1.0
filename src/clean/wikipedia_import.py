@@ -41,7 +41,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 
 from src.clean.football_data_import import load_teams
 from src.clean.schema import create_tables
-from src.clean.source_lifecycle import (delete_replaced_results, reconcile_source_lifecycle,
+from src.clean.source_lifecycle import (delete_replaced_results, new_match_ids, reconcile_source_lifecycle,
                                         snapshot_prediction_sources)
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
@@ -1478,14 +1478,15 @@ def write_database(con: sqlite3.Connection, rows: list[Row], team_map: TeamMap, 
         names.update(team_map.alias)
         con.executemany("insert or replace into team_names (source, name, team_id) values (?, ?, ?)",
                         [(SOURCE, n, t) for n, t in names.items() if t in team_map.teams or t in foreign])
+        new_ids = new_match_ids(con)
         con.executemany(
-            "insert into matches (competition, season, home_team, away_team, match_date, kickoff_utc, status, "
-            "round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc, status, "
+            "round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "on conflict(competition, season, home_team, away_team, round, leg) do update set "
             "match_date = excluded.match_date, kickoff_utc = excluded.kickoff_utc, status = excluded.status, "
             "date_precision = excluded.date_precision",
-            [(r.competition, r.season, r.home_team, r.away_team, r.match_date, r.kickoff_utc, r.status,
-              r.round, r.leg, r.date_precision) for r in rows])
+            ((next(new_ids), r.competition, r.season, r.home_team, r.away_team, r.match_date, r.kickoff_utc, r.status,
+              r.round, r.leg, r.date_precision) for r in rows))
         codes = sorted(codes if codes is not None else comps)
         ph = ",".join("?" * len(codes))
         id_of = {tuple(k): mid for *k, mid in con.execute(

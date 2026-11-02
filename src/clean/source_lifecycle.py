@@ -17,6 +17,23 @@ UNPREDICTED_MISSING = ("select match_id from matches"
 RESULT_TABLES = ("match_stats", "cup_details")
 
 
+def new_match_ids(con: sqlite3.Connection):
+    """在调用者的写事务内分配新编号，同时避开旧孤立预测占用过的编号。
+
+    SQLite 的普通整数主键可能复用已删掉的最大编号。新编号必须高于当前比赛和所有历史
+    预测引用的编号；不能据自然信息把孤立预测接到新插入的比赛。已有自然键触发更新时，
+    导入器仍保留原 match_id，本次候选编号只被跳过。这里不写序列表、不另开或提交事务。
+    """
+    highest = con.execute(
+        "select max(mid) from (select coalesce(max(match_id), 0) as mid from matches"
+        " union all select coalesce(max(match_id), 0) as mid from predictions)").fetchone()[0]
+    candidate = int(highest) + 1
+    while candidate <= 2**63 - 1:
+        yield candidate
+        candidate += 1
+    raise OverflowError("比赛编号已超出 SQLite 整数范围，不能冒险复用历史预测的编号")
+
+
 def snapshot_prediction_sources(con: sqlite3.Connection) -> dict[int, list[dict]]:
     """换掉来源前保存预测场的出处，只在确实发生缺源时写进状态表。"""
     previous: dict[int, list[dict]] = {}
