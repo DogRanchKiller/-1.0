@@ -210,9 +210,18 @@ class FeatureStore:
             where.append("k.kickoff_earliest_utc >= ?")
             params.append(to_utc_text(since))
         stat_sql, join_sql, join_params = self._stats_joins(groups, source)
+        # 当前文件里暂时缺席，不等于历史比赛和已知比分消失。只透传来源状态作资料提示，
+        # 不把这个“现在才知道”的状态放进历史比赛的筛选条件，避免改变已冻结的训练样本。
+        state_cols = {r[1] for r in self.conn.execute("pragma table_info(match_source_state)")}
+        state_names = ["source_missing", "missing_since_utc", "restored_at_utc", "missing_reason", "last_sources_json"]
+        state_sql = ", " + ", ".join(
+            f"ss.{name} as {name}" if name in state_cols and "match_id" in state_cols
+            else f"null as {name}" for name in state_names)
+        if "match_id" in state_cols:
+            join_sql += " left join match_source_state ss on ss.match_id = m.match_id"
         order = "desc" if newest_first_limit else "asc"
         sql = f"""
-            select m.*, k.season_role, k.kickoff_earliest_utc{stat_sql},
+            select m.*, k.season_role, k.kickoff_earliest_utc{stat_sql}{state_sql},
                    k.result_known_utc as known_at_utc
             from matches m
             join temp.{self._kt} k using (match_id){join_sql}
@@ -404,6 +413,74 @@ class FeatureStore:
             where o.match_id = ? and o.timing = 'close' and k.close_known_utc <= ? {''.join(' and ' + w for w in where)}
             order by o.bookmaker, o.market"""
         return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff, *params])
+
+    def closing_evidence(self, match_ids, cutoff, usage: str = "复盘",
+                         bookmaker=None, market=None) -> pd.DataFrame:
+        """审查明确一组比赛的收盘证据；只有 qualified=True 的行可供收盘标杆打分。
+
+        不给玩法时只检查胜平负。缺失和不合格候选保留原因，以免把没有收盘记录当成零分。
+        """
+        from src.review.closing_evidence import collect_closing_evidence
+        return collect_closing_evidence(self, match_ids, cutoff, usage,
+                                        bookmakers=bookmaker, markets=market)
+
+    def closing_evidence_candidates(self, match_ids, cutoff, usage: str = "复盘",
+                                    bookmaker=None, market=None) -> pd.DataFrame:
+        """给收盘证据审查读取候选及来源凭据，不能直接当作可打分的收盘赔率。
+
+        每一场（包括没有赔率的场次）先过本场收盘用途、赛季、模式门禁。价格是否真是收盘、
+        下载是否早于复盘截止时间，由 src.review.closing_evidence 判定；本接口保留不合格候选，
+        是为了说明“为什么缺”，调用方必须使用 qualified=True 的审查结果才能打分。
+        不调用 odds_changes，也不改它原有的历史变盘时间规则；这里采用更严格的本地证据时间。
+        旧库缺少可选表时在 attrs 记录原因，不为只读连接建表、不迁移正式库。
+        """
+        cutoff = to_utc_text(cutoff)
+        mids = list(dict.fromkeys(int(mid) for mid in match_ids))
+        self.usage.check("收盘赔率", THIS, usage)
+        for mid in mids:
+            self._target(mid, cutoff, usage, ["收盘赔率"])
+        where, params = self._odds_filters(bookmaker, market)
+        schemas = {table: {r[1] for r in self.conn.execute(f"pragma table_info({table})")}
+                   for table in ("odds", "odds_changes", "match_sources")}
+        missing = [table for table, cols in schemas.items() if not cols]
+        frames, contexts = [], []
+        # 控制参数数量，批量复盘也兼容 SQLite 默认的参数上限。
+        for start in range(0, len(mids), 500):
+            batch = mids[start:start + 500]
+            marks = ",".join("?" * len(batch))
+            contexts.append(pd.read_sql(
+                f"select m.match_id, m.kickoff_utc, k.kickoff_earliest_utc, k.close_known_utc "
+                f"from matches m join temp.{self._kt} k using (match_id) where m.match_id in ({marks})",
+                self.conn, params=batch))
+            tail = f" where o.match_id in ({marks})" + "".join(" and " + w for w in where)
+            if schemas["odds"]:
+                odds = pd.read_sql(f"select {ODDS_COLUMNS} from odds o{tail}", self.conn,
+                                   params=[*batch, *params])
+                if schemas["match_sources"]:
+                    provenance = pd.read_sql(
+                        f"select match_id, source, source_key, raw_file, fetched_at_utc "
+                        f"from match_sources where match_id in ({marks})", self.conn, params=batch)
+                    provenance["provenance_count"] = provenance.groupby(["match_id", "source"])["source_key"].transform("size")
+                    odds = odds.merge(provenance, how="left", on=["match_id", "source"])
+                else:
+                    odds["provenance_count"] = 0
+                odds["candidate_table"] = "odds"
+                frames.append(odds)
+            if schemas["odds_changes"]:
+                changes = pd.read_sql(
+                    "select o.rowid as candidate_id, o.match_id, o.source, o.bookmaker, o.bookmaker_raw, "
+                    "o.market, o.line, o.home, o.draw, o.away, o.over, o.under, o.changed_at_utc, "
+                    f"o.fetched_at_utc, o.raw_file from odds_changes o{tail}", self.conn,
+                    params=[*batch, *params])
+                changes["timing"] = "change"
+                changes["candidate_table"] = "odds_changes"
+                frames.append(changes)
+        context = pd.concat(contexts, ignore_index=True) if contexts else pd.DataFrame(
+            columns=["match_id", "kickoff_utc", "kickoff_earliest_utc", "close_known_utc"])
+        result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["match_id"])
+        result = result.merge(context, how="left", on="match_id")
+        result.attrs.update(missing_tables=missing, match_context=context.to_dict("records"), cutoff_utc=cutoff)
+        return result
 
     def odds_changes(self, match_id: int, cutoff, usage: str, bookmaker=None, market=None) -> pd.DataFrame:
         """本场的变盘记录（odds_changes 表，懂球帝），截止时间之前已经变过的每一组价格，按时间从早到晚排。
