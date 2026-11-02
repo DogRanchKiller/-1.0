@@ -395,3 +395,51 @@ def test_report_and_record_show_each_metric_effective_denominator(tmp_path):
     for text in (report, record):
         assert "有效1/2" in text
         assert "有效0/2" in text
+
+
+def test_json_only_conflict_is_reported_on_index_match_and_record(archive, tmp_path):
+    populate_results(archive)
+    settings = load_settings()
+    settings["site"]["review_dir"] = str(tmp_path)
+    path = tmp_path / "matches" / "1.json"
+    match_review.write_json(path, {"match_id": 1, "联赛": "E0", "season": 2026, "主队": "B", "客队": "A"})
+    before = path.read_bytes()
+    data = site_data.load(archive, settings, pd.Timestamp("2026-11-02", tz="UTC"))
+    assert data.scores is None and 1 not in data.reviews
+    teams = TeamFiles(["A", "B"])
+    for html in (pages.render_index(data, teams), match_page.render(data, 1, teams), pages.render_record(data, tmp_path)):
+        assert "身份冲突" in html and "重新生成" in html
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("payload", [[], None])
+def test_non_object_review_json_is_explained_without_crashing_or_rewriting(archive, tmp_path, payload):
+    populate_results(archive)
+    settings = load_settings()
+    settings["site"]["review_dir"] = str(tmp_path)
+    path = tmp_path / "matches" / "1.json"
+    match_review.write_json(path, payload)
+    before = path.read_bytes()
+    data = site_data.load(archive, settings, pd.Timestamp("2026-11-02", tz="UTC"))
+    assert 1 not in data.reviews
+    teams = TeamFiles(["A", "B"])
+    for html in (pages.render_index(data, teams), match_page.render(data, 1, teams), pages.render_record(data, tmp_path)):
+        assert "复盘格式" in html
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("unknown", ["未知", "unknown"])
+def test_explicit_unknown_review_identity_is_not_a_known_conflict(archive, tmp_path, unknown):
+    populate_results(archive)
+    settings = load_settings()
+    settings["site"]["review_dir"] = str(tmp_path)
+    payload = {"match_id": unknown, "联赛": unknown, "season": unknown, "主队": unknown, "客队": unknown}
+    path = tmp_path / "matches" / "1.json"
+    match_review.write_json(path, payload)
+    before = path.read_bytes()
+    data = site_data.load(archive, settings, pd.Timestamp("2026-11-02", tz="UTC"))
+    assert data.reviews[1] == payload and 1 not in data.review_notes
+    teams = TeamFiles(["A", "B"])
+    for html in (pages.render_index(data, teams), match_page.render(data, 1, teams), pages.render_record(data, tmp_path)):
+        assert "身份冲突" not in html
+    assert path.read_bytes() == before

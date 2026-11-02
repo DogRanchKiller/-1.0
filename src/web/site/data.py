@@ -155,7 +155,14 @@ def read_review(folder: Path, data: SiteData) -> None:
             data.scores_note = f"scores.csv 读不了：{err}"
     for p in sorted((folder / "matches").glob("*.json")) if (folder / "matches").exists() else []:
         try:
-            data.reviews[int(p.stem)] = json.loads(p.read_text(encoding="utf-8"))
+            mid = int(p.stem)
+            review = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(review, dict):
+                note = f"比赛 {mid} 的复盘格式不是对象，已跳过本次展示；磁盘文件保留，等待重新生成复盘。"
+                data.review_notes[mid] = note
+                data.notes.append(note)
+                continue
+            data.reviews[mid] = review
         except (OSError, ValueError):
             data.notes.append(f"单场复盘 {p.name} 读不了，跳过")
     if (folder / "reports").exists():
@@ -184,11 +191,15 @@ def quarantine_review_conflicts(con, data: SiteData) -> None:
                         for row in rows})
 
     def differs(saved: dict, expected: dict) -> bool:
+        def unknown(value):
+            return value is None or pd.isna(value) or (isinstance(value, str)
+                                                       and value.strip().casefold() in ("", "未知", "unknown"))
+
         for key, value in saved.items():
-            if key not in expected or value is None or pd.isna(value) or value == "":
+            if key not in expected or unknown(value):
                 continue
             target = expected[key]
-            if target is None or pd.isna(target) or target == "":
+            if unknown(target):
                 continue
             if key in ("match_id", "season"):
                 try:

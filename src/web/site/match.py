@@ -461,7 +461,7 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         summary = (f"<h2>结论</h2><div class='card pad'><p class='small muted'>最新一版：{e(version_name(kind))}，"
                    f"{e(identity_text(row))}，{e(archive_name(row.get('archive_status')))}，{e(bj_text(row['cutoff_utc']))} 截止</p><p>{conclusion_html(row, with_leans=False)}</p>"
                    f"<ul class='points'>{pts}</ul>{f'<p>{hit_html(row, data.results.get(mid))}</p>' if score else ''}</div>")
-    has_review = data.reviews.get(mid) is not None or (
+    has_review = mid in data.review_notes or data.reviews.get(mid) is not None or (
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))
     body = "".join([
         head, summary, f"<div class='note'>{NOT_ADVICE}</div>",

@@ -161,9 +161,10 @@ def render_team(data: SiteData, team: str, teams: TeamFiles) -> str:
 def render_record(data: SiteData, out_dir: Path) -> str:
     """总战绩，从 data/review/scores.csv 汇总（K2 每次全部重算）。"""
     cfg = data.settings["site"]
+    review_notes = "".join(f"<p class='note'>{e(note)}</p>" for note in data.review_notes.values())
     if data.scores is None:
         why = data.scores_note or "还没有复盘数据"
-        body = f"<h1>战绩</h1>{placeholder(why)}" + (placeholder("还没有复盘数据") if data.scores_note else "")
+        body = f"<h1>战绩</h1>{review_notes}{placeholder(why)}" + (placeholder("还没有复盘数据") if data.scores_note else "")
         return page("战绩 - 足球预测", body, "", data.now, cfg["refresh_minutes"])
     s = data.scores.copy()
     metrics = live_metrics(s, data.settings, {mid: r.get("自动标签") for mid, r in data.reviews.items()})
@@ -272,7 +273,7 @@ def render_record(data: SiteData, out_dir: Path) -> str:
         rep = (f"<h2>周报、月报</h2><ul class='points'>{links}</ul>"
                + details(f"最新一份：{latest.name}", f"<pre class='small' style='white-space:pre-wrap'>{e(text)}</pre>"))
     body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
-            + "".join(f"<p class='note'>{e(note)}</p>" for note in data.review_notes.values())
+            + review_notes
             + f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
             f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
             f"收盘字段来自有证据的来源声明，不表示恰好在开球瞬间采集；最后一次观察到的赛前价格单独保留。零匹配表示无匹配证据。</p>"
