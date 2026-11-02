@@ -718,3 +718,18 @@ euro:
   residual_days: 90                # 残差研究：看过去几天内的欧战；另外各看一遍 45、180 天
   residual_days_extra: [45, 180]
   dyn_model: dyn_q1e5_b01         # 欧战实力表用哪一组 dyn 的联赛评分（步骤 5 选出的）
+
+# 新闻资料库（第 9 阶段，需求文档 7.1）。这次只从本地文件导入，不联网、不抓任何网站
+news:
+  inbox_dir: data/news_inbox      # 导入程序读这里的 news_*.jsonl（新闻条目）和 news_facts_*.jsonl（结构化信息）；data/ 不进 Git
+  raw_subdir: news                # 导入的文件原样压缩，存到 paths.raw 下的这个文件夹
+  report: 新闻导入.md             # 导入报告，放在 paths.reports 里
+  fetched_future_tolerance_minutes: 10   # 抓到时间 / 录入时间比现在晚超过这么多分钟就拒绝（多半是时钟或时区写错）
+  fact_types: [coach_change, long_injury]   # 结构化信息的种类：主帅更换、核心长期伤缺。要加新种类先改需求文档 7.1 和数据字典
+  min_team_name_chars: 2          # 标题里认球队：中文名至少几个字
+  min_team_name_chars_ascii: 4    # 标题里认球队：英文名至少几个字母（太短的缩写会认错）
+  # 允许抓 / 导入的来源，由你决定后一行一个，例如：
+  #   某某社: {status: 允许, note: robots.txt 和使用条款的核对结果}
+  # 新闻及引用它的结构化信息只收“允许”的来源；规则产物必须引用已导入新闻。现在一个都没有登记
+  # 唯一无新闻来源的例外是 method=人工 的手动结构化信息，仍检查球队、种类和录入时间
+  sources: {}
