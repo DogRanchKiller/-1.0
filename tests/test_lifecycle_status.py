@@ -1,4 +1,6 @@
 """验收状态不能把空样本、尚未到点或坏证据显示成全周期通过。"""
+import pytest
+
 from src.jobs import status_page as sp
 
 
@@ -47,3 +49,50 @@ def test_completed_archives_and_scores_still_do_not_claim_accuracy_or_lineups():
     assert check.level == "ok"
     assert "已评分 5" in check.text
     assert "准确率" not in check.text and "首发已" not in check.text
+
+
+def test_one_completed_match_does_not_make_the_other_pending_matches_pass():
+    check = sp.lifecycle_check(report(archived_complete_count=1, scored_complete_count=1,
+                                      complete_on_time_count=1))
+    assert check.level == "unknown"
+
+
+def test_missed_window_and_source_loss_need_attention():
+    for key in ("missed_slot_count", "source_missing_count"):
+        assert sp.lifecycle_check(report(**{key: 1})).level == "warn"
+
+
+@pytest.mark.parametrize("payload", [None, [], "bad", {"summary": []}, {"summary": "bad"}])
+def test_bad_report_shape_is_unavailable_not_an_exception(payload):
+    assert sp.lifecycle_check(payload).level == "unknown"
+
+
+@pytest.mark.parametrize("key", ["missed_slot_count", "source_missing_count", "closing_complete_count", "due_slot_count"])
+@pytest.mark.parametrize("value", ["1", -1, True, None, []])
+def test_optional_count_when_present_must_be_a_nonnegative_integer(key, value):
+    assert sp.lifecycle_check(report(**{key: value})).level == "unknown"
+
+
+@pytest.mark.parametrize("warnings", ["读取失败", {"error": "失败"}, [None], [1], False])
+def test_bad_warning_shape_is_unavailable_not_green(warnings):
+    payload = report()
+    payload["warnings"] = warnings
+    assert sp.lifecycle_check(payload).level == "unknown"
+
+
+def test_archived_late_match_with_no_pending_slots_is_not_an_inconsistent_count():
+    payload = report(match_count=1, recorded_slot_count=3, late_slot_count=3,
+                     pending_slot_count=0, archived_complete_count=1, scored_complete_count=1)
+    check = sp.lifecycle_check(payload)
+    assert check.level == "unknown" and "计数关系异常" not in check.text
+    assert "已评分 1" in check.text and "未完成" in check.text
+
+
+@pytest.mark.parametrize("changes", [
+    {"complete_on_time_count": 6}, {"archived_complete_count": 6},
+    {"scored_complete_count": 1}, {"late_slot_count": 6},
+    {"recorded_slot_count": 16}, {"pending_slot_count": 16},
+    {"recorded_slot_count": 10, "pending_slot_count": 10},
+])
+def test_impossible_count_relationships_cannot_pass(changes):
+    assert sp.lifecycle_check(report(**changes)).level == "warn"

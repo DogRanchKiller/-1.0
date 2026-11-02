@@ -501,16 +501,41 @@ def new_alerts(checks: list[Check], state_file: Path) -> list[Check]:
 # ---------- 主程序 ----------
 def lifecycle_check(report: dict) -> Check:
     """逐场事实和任务心跳分别看；还没有全周期样本时不写成验收通过。"""
-    counts = report.get("summary") or {}
+    unavailable = Check("prediction_lifecycle", "逐场流程验收", "unknown", "验收汇总不可用，不能确认流程完整。")
+    if not isinstance(report, dict) or not isinstance(report.get("summary"), dict):
+        return unavailable
+    counts = report["summary"]
     fields = ("match_count", "recorded_slot_count", "late_slot_count", "pending_slot_count",
               "overdue_slot_count", "invalid_slot_count", "archived_complete_count",
               "scored_complete_count", "complete_on_time_count")
-    if any(type(counts.get(k)) is not int or counts[k] < 0 for k in fields):
-        return Check("prediction_lifecycle", "逐场流程验收", "unknown", "验收汇总不可用，不能确认流程完整。")
-    warnings = report.get("warnings") or []
+    optional = ("missed_slot_count", "source_missing_count", "closing_complete_count", "due_slot_count")
+    if any(type(counts.get(k)) is not int or counts[k] < 0 for k in fields + tuple(k for k in optional if k in counts)):
+        return unavailable
+    warnings = report.get("warnings", [])
+    if not isinstance(warnings, list) or any(not isinstance(w, str) for w in warnings):
+        return unavailable
+    warning_text = " 证据提示：" + "；".join(warnings) if warnings else ""
     bad = (counts["overdue_slot_count"] + counts["invalid_slot_count"]
            + counts.get("missed_slot_count", 0) + counts.get("source_missing_count", 0))
-    level = "warn" if bad or warnings else "ok" if counts["complete_on_time_count"] else "unknown"
+    finished = counts["complete_on_time_count"]
+    total = counts["match_count"]
+    # 时点数和比赛数是两个分母。迟到的三时点都已保存，也可能没有待执行时点、尚无全周期通过。
+    # 无效存档数可与已有有效存档重叠，不能把两者相加当作互斥分类。
+    ordered = 0 <= finished <= counts["scored_complete_count"] <= counts["archived_complete_count"] <= total
+    slots = ("recorded_slot_count", "pending_slot_count", "overdue_slot_count", "invalid_slot_count",
+             "missed_slot_count", "due_slot_count")
+    occupied = sum(counts.get(k, 0) for k in
+                   ("recorded_slot_count", "pending_slot_count", "overdue_slot_count", "missed_slot_count"))
+    valid_counts = (ordered and counts["late_slot_count"] <= counts["recorded_slot_count"]
+                    and all(counts.get(k, 0) <= 3 * total for k in slots)
+                    and occupied <= 3 * total
+                    and 3 * counts["archived_complete_count"] <= counts["recorded_slot_count"]
+                    and counts.get("source_missing_count", 0) <= total
+                    and finished <= counts.get("closing_complete_count", total) <= total)
+    if not valid_counts:
+        return Check("prediction_lifecycle", "逐场流程验收", "warn", "验收汇总计数关系异常，不能确认流程完整。" + warning_text)
+    all_complete = bool(counts["match_count"]) and finished == counts["match_count"]
+    level = "warn" if bad or warnings else "ok" if all_complete else "unknown"
     if not counts["match_count"]:
         text = "当前范围没有可验收比赛；全周期未完成，不能从空样本得出通过结论。"
     else:
@@ -519,13 +544,12 @@ def lifecycle_check(report: dict) -> Check:
                 f"逾期 {counts['overdue_slot_count']}、错过窗口 {counts.get('missed_slot_count', 0)}、"
                 f"无效 {counts['invalid_slot_count']}。三时点留档齐全 {counts['archived_complete_count']} 场，"
                 f"已评分 {counts['scored_complete_count']} 场；")
-        if counts["complete_on_time_count"]:
-            text += f"严格准点且评分/收盘齐全 {counts['complete_on_time_count']} 场。"
+        if all_complete:
+            text += f"严格准点且评分/收盘齐全 {finished} 场。"
         else:
-            text += "严格准点且评分/收盘齐全的全周期未完成。"
+            text += f"严格准点且评分/收盘齐全 {finished} 场；范围内仍有比赛未完成，全周期验收未完成。"
         text += "首发链路另行验收；逐场证据见网站“流程验收”页。"
-    if warnings:
-        text += " 证据提示：" + "；".join(str(w) for w in warnings)
+    text += warning_text
     return Check("prediction_lifecycle", "逐场流程验收", level, text)
 
 
