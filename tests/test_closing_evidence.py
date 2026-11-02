@@ -300,6 +300,7 @@ def test_public_store_entry_keeps_prediction_usage_gate_without_records(con):
 
 @pytest.mark.parametrize("with_marker", [False, True])
 def test_source_missing_metadata_is_optional_and_does_not_erase_known_results(con, with_marker):
+    con.execute("drop table if exists match_source_state")
     con.execute("insert into match_stats (match_id, source, home_goals, away_goals, result) "
                 "values (1, 'football-data', 2, 1, 'H')")
     if with_marker:
