@@ -302,3 +302,44 @@ def test_identical_benchmark_duplicates_are_not_repeated():
     odds = closing_odds().iloc[:1]
     closings = reconcile.all_closings(pd.concat([odds, odds]), ["平博 Pinnacle"], "proportional")
     assert len(closings) == 1
+
+
+def test_conflicting_benchmark_is_excluded_from_scores_and_coverage_without_hiding_other_books(archive, monkeypatch):
+    populate_results(archive)
+    settings = load_settings()
+    fs = FeatureStore(archive, "实时", settings)
+    original = fs.closing_evidence
+
+    def duplicated(*args, **kwargs):
+        evidence = original(*args, **kwargs)
+        row = evidence[(evidence["bookmaker"] == "平博 Pinnacle") & (evidence["market"] == "1x2")].copy()
+        row["home"] = 3.0
+        return pd.concat([evidence, row], ignore_index=True)
+
+    monkeypatch.setattr(fs, "closing_evidence", duplicated)
+    col = reconcile.collect(archive, fs, settings, "2026-11-02 00:00:00")
+    scores = reconcile.score_rows(col.matches, settings)
+    closings = scores[scores["source"] == reconcile.SOURCE_CLOSE]
+    assert set(zip(closings["bookmaker"], closings["market"])) == {("多家平均", "1x2"), ("平博 Pinnacle", "ou")}
+    groups = {(row["bookmaker"], row["market"]): row for row in col.closing_coverage["by_bookmaker_market"]}
+    assert groups[("平博 Pinnacle", "1x2")]["qualified_match_count"] == 0
+    assert groups[("多家平均", "1x2")]["qualified_match_count"] == 1
+    assert groups[("平博 Pinnacle", "ou")]["qualified_match_count"] == 1
+    assert groups[("平博 Pinnacle", "1x2")]["absence_reasons"]["conflicting_close_prices"] == 1
+    rejected = [row for row in col.matches[0]["closing_evidence"]
+                if row["bookmaker"] == "平博 Pinnacle" and row["market"] == "1x2"]
+    assert len(rejected) == 2 and all(row["qualified"] is False and row["qualification"] == "excluded" for row in rejected)
+
+
+def test_current_restored_source_state_overrides_old_missing_marker_in_scores(archive, tmp_path):
+    populate_results(archive)
+    archive.execute("create table if not exists match_source_state(match_id integer primary key, source_missing integer, "
+                    "missing_since_utc text, restored_at_utc text, missing_reason text, last_sources_json text)")
+    archive.execute("insert into match_source_state values (1, 1, '2026-11-01 20:00:00', null, 'removed', '[]')")
+    settings = load_settings()
+    settings["site"]["review_dir"] = str(tmp_path)
+    now = pd.Timestamp("2026-11-02", tz="UTC")
+    run_review(settings, archive, now, tmp_path)
+    archive.execute("update match_source_state set source_missing=0, restored_at_utc='2026-11-01 23:00:00' where match_id=1")
+    data = site_data.load(archive, settings, now)
+    assert 1 not in data.result_notes

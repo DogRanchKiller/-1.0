@@ -247,11 +247,14 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     live_first = con.execute("select min(coalesce(kickoff_utc, match_date)) from matches where season >= ?",
                              (int(settings["seasons"]["live_first"]),)).fetchone()[0]
     since = max(to_utc_text(start), to_utc_text(pd.Timestamp(live_first))) if live_first else to_utc_text(start)
+    current_source_states = {}
     try:
         hist = fs.historical_matches(nowt, "复盘", competition=None, data=("比分",), since=since)
         for r in hist.dropna(subset=["home_goals", "away_goals"]).to_dict("records"):
             mid = int(r["match_id"])
             data.results[mid] = (int(r["home_goals"]), int(r["away_goals"]))
+            if pd.notna(r.get("source_missing")):
+                current_source_states[mid] = r["source_missing"]
             if r.get("source_missing") in (True, 1):
                 data.result_notes[mid] = "来源缺失；赛果为最后已知资料"
     except (FeatureAccessError, ValueError) as err:
@@ -259,7 +262,7 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     if data.scores is not None:
         for r in data.scores.dropna(subset=["home_goals", "away_goals"]).drop_duplicates("match_id").itertuples(index=False):
             data.results.setdefault(int(r.match_id), (int(r.home_goals), int(r.away_goals)))
-            if getattr(r, "source_missing", None) in (True, 1):
+            if int(r.match_id) not in current_source_states and getattr(r, "source_missing", None) in (True, 1):
                 data.result_notes.setdefault(int(r.match_id), "来源缺失；赛果为最后已知资料")
 
     # 6. 赛程（球队页的“最近踢过的”，含杯赛、欧战；用途「显示」）

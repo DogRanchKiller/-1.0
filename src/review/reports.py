@@ -28,6 +28,7 @@ COVERAGE_REASONS = {"no_record": "没有候选记录", "missing_review_evidence"
                     "missing_provenance": "缺少来源凭据", "ambiguous_provenance": "来源凭据不唯一",
                     "missing_raw_file": "缺少原始文件路径", "missing_fetched_at_utc": "缺少下载时间",
                     "missing_source_key": "缺少来源比赛编号", "invalid_odds": "赔率不完整或无效",
+                    "conflicting_close_prices": "同一标杆的收盘价格冲突",
                     "unregistered_close_source": "来源未登记收盘语义", "not_yet_closed": "尚未到收盘时点",
                     "in_play": "开球后的价格", "not_observed_pregame": "未在赛前观察到"}
 

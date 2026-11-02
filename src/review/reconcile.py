@@ -257,6 +257,30 @@ def evidence_records(evidence: pd.DataFrame) -> list[dict]:
     return evidence.astype(object).where(pd.notna(evidence), None).to_dict("records")
 
 
+def exclude_conflicting_closes(evidence: pd.DataFrame) -> pd.DataFrame:
+    """单个标杆身份出现矛盾价格时排除该身份，评分和覆盖共同使用同一份审查结果。
+
+    当前表的唯一键通常阻止重复；旧库或异常候选仍须防守。不能任取一条，也不能
+    因为一家公司出错而连带丢掉另一家公司或其它玩法。原始价格保留供诊断。
+    """
+    evidence = evidence.copy()
+    qualified = evidence[evidence["qualified"].eq(True)].copy()
+    qualified["comparison_line"] = qualified["line"].where(qualified["market"].eq("ou"), None)
+    keys = ["match_id", "source", "bookmaker", "market", "timing", "comparison_line"]
+    for _, group in qualified.groupby(keys, dropna=False, sort=False):
+        columns = ["home", "draw", "away"] if group.iloc[0]["market"] == "1x2" else ["over", "under"]
+        if len(group[columns].drop_duplicates()) <= 1:
+            continue
+        evidence.loc[group.index, "qualified"] = False
+        evidence.loc[group.index, "qualification"] = "excluded"
+        evidence.loc[group.index, "reason"] = "conflicting_close_prices"
+        evidence.loc[group.index, "evidence_note"] = "同一来源、公司、玩法、时点的收盘价格互相矛盾；该身份不评分、不计合格覆盖。"
+        for idx in group.index:
+            evidence.at[idx, "reasons"] = tuple(reason for reason in evidence.at[idx, "reasons"]
+                                                if reason != "registered_source_declared_close") + ("conflicting_close_prices",)
+    return evidence
+
+
 def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> Collected:
     """找出“已经踢完、有预测”的比赛，把每场要的东西都准备好（比分、xG、红牌、收盘赔率、各版本预测、开球时间）。
 
@@ -323,6 +347,7 @@ def collect(con: sqlite3.Connection, fs: FeatureStore, settings: dict, now) -> C
         evidence = pd.DataFrame(columns=EVIDENCE_COLUMNS)
         try:
             evidence = fs.closing_evidence([mid], now, USAGE, bookmaker=list(cfg["close_bookmakers"]), market=["1x2", "ou"])
+            evidence = exclude_conflicting_closes(evidence)
             close_odds = evidence[evidence["qualified"].eq(True)]
             closings = all_closings(close_odds, list(cfg["close_bookmakers"]), cfg["close_devig_method"])
             close = pick_closing(close_odds, list(cfg["close_bookmakers"]), cfg["close_devig_method"])
