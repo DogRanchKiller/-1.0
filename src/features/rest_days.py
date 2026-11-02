@@ -93,3 +93,26 @@ class RestDays:
         out["home_rest_days"], out["home_after_euro"] = vals[:, 0], vals[:, 1]
         out["away_rest_days"], out["away_after_euro"] = vals[:, 2], vals[:, 3]
         return out
+
+
+# ---------- 赛季制度不同的联赛（第 11 阶段，日职、中超） ----------
+
+def calendar_year_codes(settings: dict) -> set[str]:
+    """一年一个赛季的联赛代码（settings 的 backtest.calendar_year_groups，日职、中超）。"""
+    groups = settings["backtest"].get("calendar_year_groups") or []
+    return {c for g in groups for c in settings["leagues"].get(g, {})}
+
+
+def other_season_system(settings: dict, competitions) -> list[str]:
+    """和这次回测的联赛不是同一种赛季制度的联赛代码（取休息天数、欧战后标签的赛程时排除）。
+
+    跨年赛季（五大联赛等）排除日职、中超；日职、中超排除跨年赛季的联赛。杯赛、欧战不排除。
+    回测（src/evaluate/backtest.py）和复盘的欧战后标签（src/review/labels.py）都用它。
+    两边的球队不会互相比赛，排除了休息天数也不变；不排除的话，五大联赛 2023/24 赛季的截止时间到 2024 年 5 月，
+    会取到 2 月就开赛的日职、中超 2024 赛季（考试赛季）的赛程，开发模式直接报错。
+    """
+    cal = calendar_year_codes(settings)
+    leagues = {c for g in settings["leagues"].values() for c in g}
+    if any(c in cal for c in competitions):
+        return sorted(leagues - cal)
+    return sorted(cal)

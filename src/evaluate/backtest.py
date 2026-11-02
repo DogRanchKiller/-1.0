@@ -53,7 +53,7 @@ from src.evaluate import metrics
 from src.features import FeatureStore, LookAheadError, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
 from src.features.market_odds import attach_odds_features, history_odds_features
-from src.features.rest_days import RestDays
+from src.features.rest_days import RestDays, calendar_year_codes, other_season_system  # noqa: F401（calendar_year_codes 给别的模块从这里导入）
 from src.models.base import Model, check_result_probs
 
 BENCHMARK = "pinnacle_close"   # 标杆 1 在结果表里的模型名：平博收盘
@@ -98,26 +98,6 @@ class BacktestResult:
 
 
 # ======================= 第 1 步：要预测哪些比赛 =======================
-def calendar_year_codes(settings: dict) -> set[str]:
-    """一年一个赛季的联赛代码（settings 的 backtest.calendar_year_groups，日职、中超）。"""
-    groups = settings["backtest"].get("calendar_year_groups") or []
-    return {c for g in groups for c in settings["leagues"].get(g, {})}
-
-
-def other_season_system(settings: dict, competitions) -> list[str]:
-    """和这次回测的联赛不是同一种赛季制度的联赛代码（取休息天数的赛程时排除）。
-
-    跨年赛季（五大联赛等）的回测排除日职、中超；日职、中超的回测排除跨年赛季的联赛。杯赛、欧战不排除。
-    两边的球队不会互相比赛，排除了休息天数也不变；不排除的话，五大联赛 2023/24 赛季的截止时间到 2024 年 5 月，
-    会取到 2 月就开赛的日职、中超 2024 赛季（考试赛季）的赛程，开发模式直接报错。
-    """
-    cal = calendar_year_codes(settings)
-    leagues = {c for g in settings["leagues"].values() for c in g}
-    if any(c in cal for c in competitions):
-        return sorted(leagues - cal)
-    return sorted(cal)
-
-
 def season_targets(fs: FeatureStore, competitions: list[str], first: int, last: int) -> pd.DataFrame:
     """first–last 赛季（含两头）这些联赛的全部比赛，当作预测目标。
 

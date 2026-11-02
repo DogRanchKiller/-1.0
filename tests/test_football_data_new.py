@@ -316,3 +316,14 @@ def test_rest_day_schedule_skips_other_season_system(settings):
     assert set(got["competition"]) == {"E0"}
     other = other_season_system(settings, ["JPN"])               # 日职回测：排除跨年赛季的联赛，不排除自己
     assert "E0" in other and "JPN" not in other and "CHN" not in other
+
+
+def test_after_euro_labels_skip_other_season_system(settings):
+    """复盘标签的“欧战后”：数据库里有日职 2024（考试赛季）时，算英超 2023/24 的标签（截止时间到 2024 年 5 月）不报错。
+    以前取赛程不排除日职、中超，整批重算标签会在第一个联赛的 2023 赛季报 SeasonLockedError。"""
+    from src.review.labels import after_euro_flags
+    fs = window_store(settings)
+    sched = pd.DataFrame([{"match_id": 10, "competition": "E0", "season": 2023, "home_team": "F", "away_team": "G",
+                           "match_date": "2023-08-12", "kickoff_earliest_utc": "2023-08-12 10:00:00",
+                           "cutoff_utc": "2024-05-01 00:00:00"}])
+    assert after_euro_flags(fs, sched, settings) == {10: (False, False)}
