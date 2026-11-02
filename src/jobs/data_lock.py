@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import errno
 import math
 import os
+import re
 import time
 
 from src.common.config import load_settings, resolve_path
@@ -29,8 +30,8 @@ def _unlock(handle):
 
 
 @contextmanager
-def data_write_lock(settings):
-    """同一数据库的采集/导入串行；等待超时抛错，外层心跳如实记录失败。
+def _file_lock(settings, suffix):
+    """同一数据库的指定锁互斥；等待超时抛错。
 
     文件保留在数据库旁，仅作为锁的载体。不能删除它或按mtime判断残留，
     否则两个进程可能锁到不同的文件。不同配置只要指向同一库，就共享同一把锁。
@@ -41,7 +42,7 @@ def data_write_lock(settings):
     if not math.isfinite(timeout) or timeout < 0 or not math.isfinite(poll) or poll <= 0:
         raise ValueError("数据更新锁的等待时间须非负，轮询间隔须为正有限数")
     database = resolve_path(settings["paths"]["database"]).resolve()
-    path = database.with_name(database.name + ".refresh.lock")
+    path = database.with_name(database.name + suffix)
     path.parent.mkdir(parents=True, exist_ok=True)
     # a+b不会截断已被其他进程使用的锁文件；Windows允许锁定文件末尾之后的字节。
     with path.open("a+b") as handle:
@@ -55,9 +56,21 @@ def data_write_lock(settings):
                     raise
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("其他数据来源仍在更新；本次未开始采集或导入") from exc
+                    raise TimeoutError("数据更新锁仍被占用；本次未执行锁内操作") from exc
                 time.sleep(min(poll, remaining))
         try:
             yield
         finally:
             _unlock(handle)
+
+
+def data_write_lock(settings):
+    """只在写入比赛/来源事务时共享；网络等待不能阻塞其他来源的采集。"""
+    return _file_lock(settings, ".refresh.lock")
+
+
+def source_refresh_lock(settings, source):
+    """单来源从采集至导入独占；放在心跳外，重复手工启动不能覆盖在跑任务的心跳。"""
+    if not isinstance(source, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", source):
+        raise ValueError("来源锁名称只能使用字母、数字、下划线和短横线")
+    return _file_lock(settings, f".refresh.{source}.lock")

@@ -41,6 +41,7 @@ foreach ($refreshPlan in $refreshPlans) {
     if ($existingTask) {
         $existingActions = @($existingTask.Actions)
         if ($existingActions.Count -ne 1 -or $existingActions[0].WorkingDirectory -ne $refreshRoot -or
+            $existingActions[0].Execute -ne $refreshPlan.executable -or
             $existingActions[0].Arguments -ne $refreshPlan.arguments) {
             throw "同名任务内容不同，未覆盖登记：$($refreshPlan.task_name)"
         }

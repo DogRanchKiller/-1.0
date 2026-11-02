@@ -12,7 +12,7 @@ from src.clean.dongqiudi_import import run as import_raw
 from src.collect.dongqiudi import Collector, setup_logging
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
-from src.jobs.data_lock import data_write_lock
+from src.jobs.data_lock import data_write_lock, source_refresh_lock
 from src.jobs.heartbeat import job_run, state_dir
 
 log = logging.getLogger("dongqiudi")
@@ -35,7 +35,7 @@ class RefreshCollector(Collector):
 def run_refresh(settings: dict | None = None) -> dict:
     """完整更新一次。测试传入临时设置，并替换采集器、导入函数；不读取任何密钥。"""
     settings = settings or load_settings()
-    with job_run("refresh_data", state_dir(settings)) as run, data_write_lock(settings):
+    with source_refresh_lock(settings, "dongqiudi"), job_run("refresh_data", state_dir(settings)) as run:
         run.summary["阶段"] = "采集"
         con = connect(resolve_path(settings["paths"]["database"]))
         collector = None
@@ -48,7 +48,8 @@ def run_refresh(settings: dict | None = None) -> dict:
                 # 异常时也留下请求数量，便于区别“没变化”和“根本没抓成功”。
                 run.summary["采集请求"] = dict(collector.counts)
             run.summary["阶段"] = "导入"
-            result = import_raw(con, raw, resolve_path(settings["paths"]["reports"]), settings)
+            with data_write_lock(settings):
+                result = import_raw(con, raw, resolve_path(settings["paths"]["reports"]), settings)
             run.summary["写入"] = result["counts"]
             run.summary["阶段"] = "完成"
         finally:

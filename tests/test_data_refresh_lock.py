@@ -63,6 +63,22 @@ def test_terminated_owner_does_not_leave_a_permanent_lock(tmp_path):
         pass
 
 
+def test_source_job_lock_blocks_duplicate_job_but_not_other_source(tmp_path):
+    from src.jobs.data_lock import data_write_lock, source_refresh_lock
+
+    settings = settings_for(tmp_path)
+    code = ("from src.jobs.data_lock import source_refresh_lock\n"
+            f"with source_refresh_lock({settings!r}, 'cups'):\n    print('acquired')")
+    with source_refresh_lock(settings, "cups"):
+        with data_write_lock(settings):
+            pass
+        failed = subprocess.run([sys.executable, "-X", "utf8", "-c", code],
+                                capture_output=True, text=True, timeout=15)
+        assert failed.returncode != 0 and 'TimeoutError' in failed.stderr
+        with source_refresh_lock(settings, "football"):
+            pass
+
+
 @pytest.mark.parametrize("key,value", [("lock_timeout_seconds", -1),
     ("lock_timeout_seconds", float("nan")), ("lock_poll_seconds", 0)])
 def test_invalid_lock_settings_are_rejected(tmp_path, key, value):
