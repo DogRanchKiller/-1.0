@@ -8,6 +8,7 @@
 #     Unregister-ScheduledTask -TaskName 足球预测_定时预测 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_赛后复盘 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_生成网站 -Confirm:$false
+#     Unregister-ScheduledTask -TaskName 足球预测_网站服务 -Confirm:$false
 
 param([switch]$SkipNotify)
 
@@ -75,6 +76,30 @@ if (-not $SkipNotify) {
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName "足球预测_推送" -Action $action -Trigger $trigger -Settings $settings `
         -Description "每 15 分钟把新出的预测和定时任务故障写进发件箱，设置了口令就推到微信" -Force | Out-Null
+}
+
+# 局域网网站服务（W1）：带登录的网站服务器 src.web.serve，让同一个 Wi-Fi 的手机能看网站（需求文档第 8 节“局域网网站”）。
+# - 你登录 Windows 时启动；另外每 10 分钟检查一次：还在运行就什么都不做（IgnoreNew），停了就重新启动。
+# - 隐藏窗口（pythonw）；不限运行时长；失败 1 分钟后自动重启，最多 3 次；用电池时也运行。
+# - 不会开两个：端口已经被自己占着就直接退出（返回 0），被别的程序占着返回 2（写进 logs/site_server.log）。
+# 手机要连进来还要防火墙放行：双击“开启局域网访问.bat”（要管理员权限，这里不做）。
+# 取消登记：Unregister-ScheduledTask -TaskName 足球预测_网站服务 -Confirm:$false
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.web.serve" -WorkingDirectory $root
+$repeat = New-ScheduledTaskTrigger -Once -At ((Get-Date).Date.AddMinutes(5)) -RepetitionInterval (New-TimeSpan -Minutes 10)
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$siteTask = "足球预测_网站服务"
+$siteDesc = "局域网网站（带登录）：登录 Windows 时启动，每 10 分钟检查一次，停了就重启"
+try {
+    # 登录时启动的触发器：只对当前用户。个别电脑上普通权限登记不了这种触发器，那就只用每 10 分钟检查（最多晚 10 分钟启动）
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    Register-ScheduledTask -TaskName $siteTask -Action $action -Trigger @($logon, $repeat) -Settings $settings `
+        -Description $siteDesc -Force | Out-Null
+} catch {
+    Write-Host "“登录时启动”登记不了（$($_.Exception.Message)），改成只每 10 分钟检查一次"
+    Register-ScheduledTask -TaskName $siteTask -Action $action -Trigger $repeat -Settings $settings `
+        -Description $siteDesc -Force | Out-Null
 }
 
 Get-ScheduledTask -TaskName "足球预测_*" | Select-Object TaskName, State
