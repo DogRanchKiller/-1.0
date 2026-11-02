@@ -680,6 +680,7 @@ site_server:
   lockout_minutes: 15            # 锁定多少分钟
   max_login_body_bytes: 4096     # 登录表单最多收多少字节（防止有人发很大的数据把服务器卡住）
   request_timeout_seconds: 20    # 一个连接多少秒没动静就断开
+  max_connections: 32            # 最多同时处理几个连接，满了新连接直接关掉（防止慢速连接把服务器拖垮）
   firewall_rule: 足球预测_局域网网站   # Windows 防火墙规则名（开启局域网访问.bat 加、关闭局域网访问.bat 删）
   task_name: 足球预测_网站服务       # 开机自动运行的定时任务名（register_tasks.ps1 登记）
 

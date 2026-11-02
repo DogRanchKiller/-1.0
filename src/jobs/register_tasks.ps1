@@ -91,6 +91,8 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) 
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $siteTask = "足球预测_网站服务"
 $siteDesc = "局域网网站（带登录）：登录 Windows 时启动，每 10 分钟检查一次，停了就重启"
+# 你用“关闭局域网访问.bat”关掉过网站服务的话，重新登记（-Force 会整个替换成启用状态）以后要照样关着，不能偷偷打开
+$siteWasDisabled = (Get-ScheduledTask -TaskName $siteTask -ErrorAction SilentlyContinue).State -eq 'Disabled'
 try {
     # 登录时启动的触发器：只对当前用户。个别电脑上普通权限登记不了这种触发器，那就只用每 10 分钟检查（最多晚 10 分钟启动）
     $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
@@ -100,6 +102,10 @@ try {
     Write-Host "“登录时启动”登记不了（$($_.Exception.Message)），改成只每 10 分钟检查一次"
     Register-ScheduledTask -TaskName $siteTask -Action $action -Trigger $repeat -Settings $settings `
         -Description $siteDesc -Force | Out-Null
+}
+if ($siteWasDisabled) {
+    Disable-ScheduledTask -TaskName $siteTask | Out-Null
+    Write-Host "“$siteTask”以前被关掉了，登记后照样关着（要打开：双击“开启局域网访问.bat”）"
 }
 
 Get-ScheduledTask -TaskName "足球预测_*" | Select-Object TaskName, State

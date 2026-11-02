@@ -84,6 +84,22 @@ try {
         Write-Host "已添加防火墙规则“$rule”：只在专用网络、只放行 TCP $port 端口、只允许同一网段。"
     }
 
+    # ---------- 开启：公用网络、域网络下明确挡住这个端口 ----------
+    # 以前运行 Python 时 Windows 弹窗点“允许”会留下“Python 任何端口都放行（含公用网络）”的规则，
+    # 上面那条只限专用网络的规则管不住它。Windows 防火墙里“阻止”比“允许”优先，所以再加一条只挡这个端口的阻止规则：
+    # 电脑连到公共 Wi-Fi 时别人连不进网站，其他 Python 程序不受影响。“关闭”时也保留它（留着没有坏处）。
+    $blockRule = "$rule（公用网络阻止）"
+    $blockExisting = Get-NetFirewallRule -DisplayName $blockRule -ErrorAction SilentlyContinue
+    if ($blockExisting) {
+        $blockExisting | Set-NetFirewallRule -Direction Inbound -Action Block -Profile 'Public,Domain' -Enabled True
+        $blockExisting | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol TCP -LocalPort $port
+    } else {
+        New-NetFirewallRule -DisplayName $blockRule -Direction Inbound -Action Block -Protocol TCP -LocalPort $port `
+            -Profile 'Public,Domain' `
+            -Description "足球预测系统：电脑连公用网络时挡住网站端口（以前给 Python 的“全部放行”规则管不住，这条优先）" | Out-Null
+    }
+    Write-Host "已核对防火墙规则“$blockRule”：连公用网络时挡住 TCP $port 端口。"
+
     # ---------- 开启：网站服务任务 ----------
     $t = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
     if ($t) {

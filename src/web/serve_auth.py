@@ -337,8 +337,9 @@ def cmd_change(settings: dict, ask=getpass.getpass) -> int:
     if first == "":
         plain, generated = generate_password(ss["password_groups"], ss["password_group_len"]), True
     else:
-        if first != first.strip():
-            _say("没有修改：密码前后有空格，手机上很容易输错。请重新双击再试。")
+        if any(ch.isspace() for ch in first):
+            # 带空格的密码手机上很容易输错，而且“网站地址和密码.txt”按一整段不带空格的字读回密码
+            _say("没有修改：密码里有空格，手机上很容易输错。请重新双击再试。")
             return 1
         if len(first) < ss["min_password_length"]:
             _say(f"没有修改：只有 {len(first)} 位，至少要 {ss['min_password_length']} 位。请重新双击再试。")

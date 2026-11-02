@@ -87,6 +87,7 @@ class ServerConfig:
     lockout_minutes: float = 15
     max_login_body_bytes: int = 4096
     request_timeout_seconds: float = 20
+    max_connections: int = 32
 
     @classmethod
     def from_settings(cls, settings: dict) -> "ServerConfig":
@@ -100,6 +101,7 @@ class ServerConfig:
             max_failures=ss["max_failures"], lockout_minutes=ss["lockout_minutes"],
             max_login_body_bytes=ss["max_login_body_bytes"],
             request_timeout_seconds=ss["request_timeout_seconds"],
+            max_connections=ss["max_connections"],
         )
 
 
@@ -421,7 +423,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_error(self, format, *args):
         # 默认会把整行请求原样写进去（可能带着网址里的东西），这里只记错误代码
-        LOG.warning("%s 请求有问题（%s）", self.client_address[0], str(args[0] if args else "")[:3])
+        # 第一个参数通常是错误代码（如 400、408），超时时是一段说明；只留前 40 个字，免得带进网址里的东西
+        LOG.warning("%s 请求有问题（%s）", self.client_address[0], str(args[0] if args else "")[:40])
 
     def log_message(self, format, *args):
         LOG.info("%s %s", self.client_address[0], _clean_for_log(format % args))
@@ -568,10 +571,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # ----- 登录 -----
     def _same_origin(self) -> bool:
-        """登录表单是不是从本网站自己的页面提交的（防止别的网站偷偷帮你提交）。没带 Origin 的（老浏览器）放行。"""
+        """登录表单是不是从本网站自己的页面提交的（防止别的网站偷偷帮你提交）。没带 Origin 的（老浏览器）放行。
+        Origin 是 "null"（别的网页里藏一个沙盒框架自动提交时就是这样）一律拒绝：否则别人能故意输错把你锁在外面。
+        本网站自己的登录页提交时，现在的浏览器都会带真实的 Origin。"""
         origin = self.headers.get("Origin")
-        if origin is None or origin == "null":
+        if origin is None:
             return True
+        if origin == "null":
+            return False
         return urlsplit(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
 
     def _login_post(self):
@@ -629,7 +636,26 @@ class SiteServer(ThreadingHTTPServer):
 
     def __init__(self, address, app: SiteApp):
         self.app = app
+        # 同时处理的连接数有上限：有人故意开几千个很慢的连接时，不至于把线程和内存用光
+        self._slots = threading.BoundedSemaphore(app.config.max_connections)
         super().__init__(address, Handler)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            LOG.warning("%s 同时连接太多，这个连接直接关掉", client_address[0])
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)    # 开一个线程去处理
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()                               # 这个连接处理完，空出一个位置
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):          # 只有 Windows 有：别的程序不能再绑同一个端口

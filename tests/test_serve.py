@@ -10,6 +10,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -392,6 +393,11 @@ def test_login_post_guards(srv):
     r, _ = srv.req("POST", "/login", {"Content-Type": "application/x-www-form-urlencoded",
                                        "Origin": "http://evil.example"}, urlencode({"username": "admin", "password": PASSWORD}))
     assert r.status == 403 and r.getheader("Set-Cookie") is None              # 别的网站帮你提交
+    r, _ = srv.req("POST", "/login", {"Content-Type": "application/x-www-form-urlencoded",
+                                       "Origin": "null"}, urlencode({"username": "admin", "password": "wrong"}))
+    assert r.status == 403                                                     # 沙盒框架偷偷提交（想把你锁在外面）
+    r, _ = srv.login()
+    assert r.status == 303                                                     # 上面那次没算输错
     r, _ = srv.login(ctype="application/json")
     assert r.status == 415 and r.getheader("Set-Cookie") is None
     r, _ = srv.req("POST", "/login", {"Content-Type": "application/x-www-form-urlencoded"}, "x=" + "a" * 5000)
@@ -572,6 +578,8 @@ def test_cmd_change(tree):
     assert serve_auth.cmd_change(settings, ask=lambda _p: next(answers)) == 1      # 两次不一样
     answers = iter([" padded-password "])
     assert serve_auth.cmd_change(settings, ask=lambda _p: next(answers)) == 1      # 前后有空格
+    answers = iter(["my pass word"])
+    assert serve_auth.cmd_change(settings, ask=lambda _p: next(answers)) == 1      # 中间有空格（txt 读不回来）
     assert cred.read_text(encoding="utf-8") == before
     answers = iter(["My-New-Pass-9", "My-New-Pass-9"])
     assert serve_auth.cmd_change(settings, ask=lambda _p: next(answers)) == 0
@@ -623,3 +631,19 @@ def test_firewall_info_is_ascii_json(capsys):
     assert out.isascii()
     info = json.loads(out)
     assert info == {"port": 8765, "rule": "足球预测_局域网网站", "task": "足球预测_网站服务"}
+
+
+def test_connection_limit(tree):
+    """同时连接数到上限时，新连接直接被关掉；占着的连接断开后又能正常访问。"""
+    with Running(make_config(tree, max_connections=2)) as s:
+        hold = [socket.create_connection(("127.0.0.1", s.port), timeout=5) for _ in range(2)]
+        time.sleep(0.3)                                    # 等服务器把这两个连接都接进去
+        extra = socket.create_connection(("127.0.0.1", s.port), timeout=5)
+        extra.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert extra.recv(100) == b""                      # 被直接关掉，没有任何回应
+        extra.close()
+        for c in hold:
+            c.close()
+        time.sleep(0.3)
+        r, _ = s.req("GET", "/")
+        assert r.status == 303
