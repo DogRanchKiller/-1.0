@@ -5,7 +5,8 @@ football-data、维基百科（杯赛）、懂球帝（变盘记录、彩票赔�
 
 比赛编号（match_id）一旦分配就不变：以后的预测存档要用它找到比赛。
 所以重建数据时，比赛表是“有就更新、没有才新增”，不是删掉重来；
-其他表（赛果统计、赔率）是从原始层算出来的，按来源整批删掉重导。
+其他表（赛果统计、赔率）是从原始层算出来的，按来源整批删掉重导；
+已经存过预测、现在所有来源都缺失的比赛，另外保留最后已知赛果并标明来源缺失。
 """
 import sqlite3
 
@@ -156,6 +157,18 @@ create table if not exists predictions (
     detail          text             -- 其他信息（JSON）：模型设置、代码版本、当时的赔率概率等
 );
 create index if not exists predictions_match on predictions (match_id, kind, model, created_at_utc);
+
+-- 来源缺失与比赛状态是两回事：不能把“来源没了”写成取消、未赛或改期。
+-- 只给已经存过预测的缺源比赛建记录。缺源时保留比赛身份和最后已知赛果；
+-- 来源恢复后保留这条转换记录，但 source_missing 变回 0，正常更新比赛和统计。
+create table if not exists match_source_state (
+    match_id          integer primary key references matches(match_id),
+    source_missing    integer not null check (source_missing in (0, 1)),
+    missing_since_utc text not null,  -- 本次缺源最早发现时间，不是来源删除或最后抓取的时间
+    restored_at_utc   text,
+    missing_reason    text,           -- 缺源时为 no_current_match_sources；恢复后为空
+    last_sources_json text not null   -- 缺源前最后已知的来源、原始文件和抓取时间；未知时为 []
+);
 """
 
 

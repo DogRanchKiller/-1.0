@@ -27,6 +27,8 @@ import yaml
 from src.clean.football_data_inventory import season_files, season_label
 from src.clean.football_data_reader import keep_league_rows, read_football_data_csv
 from src.clean.schema import create_tables
+from src.clean.source_lifecycle import (delete_replaced_results, reconcile_source_lifecycle,
+                                        snapshot_prediction_sources)
 from src.common.config import load_football_data_columns, load_settings, resolve_path, PROJECT_ROOT
 from src.common.db import connect
 
@@ -282,12 +284,14 @@ def write_database(con: sqlite3.Connection, teams: list[dict], names: dict[str, 
         matches = matches.merge(ids, on=["competition", "season", "home_team", "away_team"], how="left")
         row_to_id = matches.set_index("row")["match_id"]
 
-        # 从原始层算出来的表：football-data 的整批删掉重导
-        for table in ("match_sources", "match_stats", "odds"):
-            con.execute(f"delete from {table} where source = ?", (SOURCE,))
+        # 先换当前来源，再判断哪些预测场彻底缺源，不能先把最后已知赛果清掉。
+        previous_sources = snapshot_prediction_sources(con)
+        con.execute("delete from match_sources where source = ?", (SOURCE,))
         con.executemany("insert into match_sources values (?, ?, ?, ?, ?)",
                         [(int(r.match_id), SOURCE, r.source_key, r.raw_file, r.fetched_at_utc)
                          for r in matches.itertuples()])
+        delete_replaced_results(con, SOURCE)
+        con.execute("delete from odds where source = ?", (SOURCE,))
         stats = stats.assign(match_id=stats["row"].map(row_to_id), source=SOURCE)
         con.executemany(f"insert into match_stats (match_id, source, {', '.join(STAT_FIELDS)}) "
                         f"values ({', '.join('?' * (len(STAT_FIELDS) + 2))})",
@@ -303,8 +307,8 @@ def write_database(con: sqlite3.Connection, teams: list[dict], names: dict[str, 
                     " and home_shots_on_target is null and away_shots_on_target is null"
                     " and home_xg is null and away_xg is null"
                     " and match_id in (select match_id from match_stats where source = ?)", (SOURCE,))
-        # 原始层里已经没有的比赛（任何来源都不再提到它）删掉。以后有了预测存档，要改成只标记不删
-        con.execute("delete from matches where match_id not in (select match_id from match_sources)")
+        # 有预测的缺源比赛保留身份和最后已知赛果，另记可逆缺源状态；无预测的仍清理。
+        reconcile_source_lifecycle(con, previous_sources)
     return con.execute("select count(*) from match_sources where source = ?", (SOURCE,)).fetchone()[0]
 
 

@@ -46,6 +46,8 @@ from src.clean.dongqiudi_match import decide, load_db_matches, load_dqd_seasons,
 from src.clean.dongqiudi_reader import (DETAIL_STATS, MatchDetail, SeasonGame, detail_columns, parse_fixtures,
                                         parse_match_detail, parse_odds, read_json, read_text, resolve_ts)
 from src.clean.schema import create_tables
+from src.clean.source_lifecycle import (delete_replaced_results, reconcile_source_lifecycle,
+                                        snapshot_prediction_sources)
 from src.collect.dongqiudi import current_season
 from src.common.config import PROJECT_ROOT, load_settings, resolve_path
 from src.common.db import connect
@@ -490,6 +492,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
     started = time.perf_counter()
     with con:
         con.execute("begin immediate")   # 一开始就占住写锁，免得中途和采集程序抢
+        previous_sources = snapshot_prediction_sources(con)
         con.execute("delete from team_names where source = ?", (SOURCE,))
         con.executemany("insert into team_names (source, name, team_id) values (?, ?, ?)",
                         [(SOURCE, zh, en) for zh, en in mapping.items()])
@@ -534,7 +537,7 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
         con.execute("delete from match_sources where source = ?", (SOURCE,))
         con.executemany("insert into match_sources (match_id, source, source_key, raw_file, fetched_at_utc)"
                         " values (?, ?, ?, ?, ?)", sources)
-        con.execute("delete from match_stats where source = ?", (SOURCE,))
+        delete_replaced_results(con, SOURCE)
         con.executemany(f"insert into match_stats ({', '.join(STAT_COLS)}) values ({', '.join('?' * len(STAT_COLS))})",
                         stats)
         counts["比赛统计（行）"] = len(stats)
@@ -547,9 +550,9 @@ def write_db(con, links: list[Link], mapping: dict, zh_names: dict, changes: lis
         con.executemany("insert into lottery_odds (match_id, source, product, handicap, home, draw, away,"
                         " fetched_at_utc, raw_file) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [(ids[r[0]], *r[1:]) for r in lottery if r[0] in ids])
-        # 没有任何来源的比赛（例如以前新增、后来懂球帝改了队名对照的）删掉，和其他导入程序一样
-        cur = con.execute("delete from matches where match_id not in (select match_id from match_sources)")
-        counts["删掉的没有来源的比赛"] = cur.rowcount
+        lifecycle = reconcile_source_lifecycle(con, previous_sources)
+        counts["删掉的没有来源的比赛"] = lifecycle["deleted"]
+        counts["有预测而保留的缺源比赛"] = lifecycle["missing"]
     counts["写数据库用时（秒）"] = round(time.perf_counter() - started, 1)
     return {"ids": ids, "counts": counts, "detail_mismatches": mismatches}
 

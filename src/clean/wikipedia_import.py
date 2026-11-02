@@ -41,6 +41,8 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 
 from src.clean.football_data_import import load_teams
 from src.clean.schema import create_tables
+from src.clean.source_lifecycle import (delete_replaced_results, reconcile_source_lifecycle,
+                                        snapshot_prediction_sources)
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
 
@@ -1449,7 +1451,7 @@ def write_database(con: sqlite3.Connection, rows: list[Row], team_map: TeamMap, 
 
     - 比赛表：有就更新（编号不变），没有才新增。联赛的比赛（round=''、leg=0）不会被碰到。
     - 来源、赛果、加时点球表：只删 source='wikipedia' 的行再重写，football-data 的行一行都不动。
-    - 最后删掉“任何来源都不再提到”的比赛（和 football-data 导入的规则一样），以及没有比赛用到的外来球队。
+    - 无当前来源但有预测的比赛保留身份和最后已知赛果、单独标记缺源；清理其他无来源比赛及无比赛的外来球队。
     """
     create_tables(con)
     teams, _ = load_teams_for_db(team_map)
@@ -1489,9 +1491,10 @@ def write_database(con: sqlite3.Connection, rows: list[Row], team_map: TeamMap, 
         id_of = {tuple(k): mid for *k, mid in con.execute(
             f"select competition, season, home_team, away_team, round, leg, match_id from matches "
             f"where competition in ({ph}) and round != ''", codes)}
-        for table in ("match_sources", "match_stats", "cup_details"):   # 只删这次导入的赛事的维基行
-            con.execute(f"delete from {table} where source = ? and match_id in "
-                        f"(select match_id from matches where competition in ({ph}))", (SOURCE, *codes))
+        previous_sources = snapshot_prediction_sources(con)
+        # 来源只换本次赛事；赛果在新来源写好之后再决定是否可以删。
+        con.execute(f"delete from match_sources where source = ? and match_id in "
+                    f"(select match_id from matches where competition in ({ph}))", (SOURCE, *codes))
         src, st, cup = [], [], []
         for r in rows:
             mid = id_of[(r.competition, r.season, r.home_team, r.away_team, r.round, r.leg)]
@@ -1500,10 +1503,11 @@ def write_database(con: sqlite3.Connection, rows: list[Row], team_map: TeamMap, 
                 st.append((mid, SOURCE, r.home_goals, r.away_goals, r.result))
                 cup.append((mid, SOURCE, r.extra_time, r.aet_home, r.aet_away, r.pen_home, r.pen_away, r.note or None))
         con.executemany("insert into match_sources values (?, ?, ?, ?, ?)", src)
+        delete_replaced_results(con, SOURCE, tables=("match_stats", "cup_details"), competitions=codes)
         con.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result) "
                         "values (?, ?, ?, ?, ?)", st)
         con.executemany("insert into cup_details values (?, ?, ?, ?, ?, ?, ?, ?)", cup)
-        con.execute("delete from matches where match_id not in (select match_id from match_sources)")
+        reconcile_source_lifecycle(con, previous_sources)
         con.execute(f"delete from teams where team_id like '{FOREIGN_PREFIX}%' and team_id not in "
                     "(select home_team from matches union select away_team from matches)")
         con.execute(f"delete from team_names where team_id like '{FOREIGN_PREFIX}%' and team_id not in "
