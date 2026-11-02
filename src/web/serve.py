@@ -647,7 +647,7 @@ class SiteServer(ThreadingHTTPServer):
             return
         try:
             super().process_request(request, client_address)    # 开一个线程去处理
-        except BaseException:
+        except Exception:
             self._slots.release()
             raise
 

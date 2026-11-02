@@ -640,7 +640,11 @@ def test_connection_limit(tree):
         time.sleep(0.3)                                    # 等服务器把这两个连接都接进去
         extra = socket.create_connection(("127.0.0.1", s.port), timeout=5)
         extra.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-        assert extra.recv(100) == b""                      # 被直接关掉，没有任何回应
+        # 被直接关掉，没有任何回应。Windows 上有时是“连接被对方关掉”的报错（10053/10054），也算对
+        try:
+            assert extra.recv(100) == b""
+        except (ConnectionResetError, ConnectionAbortedError):
+            pass
         extra.close()
         for c in hold:
             c.close()
