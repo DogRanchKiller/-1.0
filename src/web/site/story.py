@@ -208,7 +208,7 @@ def lean_rule_text(cfg: dict, row: dict, p) -> str:
         ln = fusion(row).get("倾向")
         draw = ln.get("draw") if isinstance(ln, dict) else None
         risk = draw.get("risk") if isinstance(draw, dict) and isinstance(draw.get("risk"), bool) else None
-        mark = "标了“平局风险高”" if risk else ("没标平局风险" if risk is False else "这一版没有存平局风险")
+        mark = "标了“平局风险高”" if risk else ("没标平局风险" if risk is False else "没有存平局风险")
         parts.append(f"平局 {shown[1]:.1f}%，平局风险的线是 {dr * 100:g}%，这一版{mark}。")
     o = _num(th.get("over25"))
     if o is not None:
@@ -241,7 +241,14 @@ def confidence_text(cfg: dict, row: dict) -> str:
         why.append(f"碰上了 {'、'.join(hit_down)}（每个降一级）")
     if hit_note:
         why.append(f"碰上了 {'、'.join(hit_note)}（只作提醒，不降级）")
-    here = f"这场：{'；'.join(why) if why else '没有碰上要提醒的因素'}，信心 {level_name(lv)}。"
+    if why:
+        here = f"这场：{'；'.join(why)}，信心 {level_name(lv)}。"
+    elif not isinstance(flags, dict):
+        # 旧格式存档没存提醒因素：不能写成“没碰上”
+        here = ("这一版没有存信心等级和提醒因素。" if lv not in (1, 2, 3)
+                else f"这一版没有存提醒因素，信心 {level_name(lv)}。")
+    else:
+        here = f"这场：没有碰上要提醒的因素，信心 {level_name(lv)}。"
     if lv == 3 and not used:
         here += "所以几乎每场都是 ●●● 高，这不等于“很有把握”，只说明还没找到能区分把握大小的信号。"
     return "<br>" + e(rule + here)

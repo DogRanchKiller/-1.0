@@ -123,7 +123,9 @@ def test_old_row_without_fusion_does_not_claim_no_lean():
     head = story.headline(data, row, "Liverpool", "Arsenal")
     assert head == "最可能是利物浦赢（50%；这一版没有存倾向）"
     t = text_of(story.chain_html(data, row, "Liverpool", "Arsenal"))
-    assert "这一版没有存倾向；按现在的门槛够" in t and "这一版没有存平局风险" in t and "两边差不多" not in t
+    assert "这一版没有存倾向；按现在的门槛够" in t and "平局风险的线是 28%，这一版没有存平局风险。" in t
+    assert "这一版这一版" not in t and "两边差不多" not in t
+    assert "这一版没有存信心等级和提醒因素。" in t and "没有碰上要提醒的因素" not in t
 
 
 def test_stored_lean_wins_over_recomputed_threshold():
