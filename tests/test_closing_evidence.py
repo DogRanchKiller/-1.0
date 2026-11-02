@@ -87,6 +87,22 @@ def test_review_asof_does_not_use_a_later_download(con):
     assert summary(df, [1])["qualified_match_count"] == 0
 
 
+def test_fractional_download_after_cutoff_is_not_rounded_into_evidence(con):
+    source(con, fetched="2024-01-12 00:00:00.500")
+    odds(con)
+    row = gather(con).iloc[0]
+    assert not row["qualified"]
+    assert "fetched_after_cutoff" in row["reasons"]
+    assert row["known_at_utc"] > CUTOFF
+
+
+def test_fractional_change_after_download_remains_invalid(con):
+    change(con, changed="2024-01-10 19:59:00.900", fetched="2024-01-10 19:59:00.800")
+    row = gather(con).iloc[0]
+    assert row["qualification"] == "excluded"
+    assert "changed_after_fetched" in row["reasons"]
+
+
 @pytest.mark.parametrize("raw,fetched,reason", [
     (None, "2024-01-11 09:00:00", "missing_raw_file"),
     ("", "2024-01-11 09:00:00", "missing_raw_file"),

@@ -44,7 +44,12 @@ def _time(row, name, reasons, required=False):
             reasons.append(f"missing_{name}")
         return None
     try:
-        row[name] = to_utc_text(value)
+        # 截止时间向下取秒是保守的，但候选证据不能同样截断：
+        # 迟到0.5秒的下载会被错误移到截止时点，变动晚于下载的关系也会丢失。
+        # 统一成无时区后缀的UTC文字，保留原有秒以下精度；整秒仍兼容旧格式。
+        ts = pd.Timestamp(value)
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+        row[name] = ts.tz_localize(None).isoformat(sep=" ")
         return row[name]
     except (ValueError, TypeError, OverflowError):
         row[name] = None
