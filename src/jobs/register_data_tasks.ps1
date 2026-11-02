@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Stop'
 $refreshRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
 if (-not $PythonPath) { $PythonPath = Join-Path $refreshRoot '.venv\Scripts\python.exe' }
 if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "找不到项目 Python：$PythonPath" }
+$refreshRunner = Join-Path (Split-Path -Parent $PythonPath) 'pythonw.exe'
+if (-not (Test-Path -LiteralPath $refreshRunner -PathType Leaf)) { throw "找不到后台运行 Python：$refreshRunner" }
 $refreshConfigPath = Join-Path $refreshRoot 'config\settings.yaml'
 $readConfig = 'import json,sys,yaml; s=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); print(json.dumps({"data_refresh":s["data_refresh"],"cups_enabled":s["cup_refresh"]["enabled"]}))'
 $configText = & $PythonPath -X utf8 -c $readConfig $refreshConfigPath
@@ -24,7 +26,7 @@ $refreshPlans = @($refreshEntries | ForEach-Object {
     if ($_.at -notmatch '^([01][0-9]|2[0-3]):[0-5][0-9]$') { throw '任务时间必须是北京时间HH:mm' }
     [pscustomobject]@{
         task_name=$_.task_name; module=$_.module; at=$_.at
-        executable=$PythonPath; arguments="-X utf8 -m $($_.module)"
+        executable=$refreshRunner; arguments="-X utf8 -m $($_.module)"
         working_directory=$refreshRoot; execution_limit_minutes=$refreshLimit
         multiple_instances='IgnoreNew'; start_when_available=$true
     }

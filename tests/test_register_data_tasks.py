@@ -25,4 +25,5 @@ def test_registration_plan_is_limited_to_two_source_jobs():
     assert all(Path(p["working_directory"]).resolve() == root for p in plans)
     assert all(p["multiple_instances"] == "IgnoreNew" and p["start_when_available"] for p in plans)
     assert all(p["execution_limit_minutes"] > 0 for p in plans)
+    assert all(Path(p["executable"]).name.lower() == "pythonw.exe" for p in plans)
     assert len({p["at"] for p in plans}) == 2
