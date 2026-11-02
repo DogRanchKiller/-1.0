@@ -438,6 +438,7 @@ def test_parse_lineup():
     post = parse_lineup(lineup_html(54483776, new_lineup=0, status="Played", subs=9).decode())
     assert post.count("away", "sub") == 9 and lineup_kind(post.new_lineup, post.status) == "实际首发"
     assert lineup_kind(1, "Fixture") == "预计首发" and lineup_kind(0, "Fixture") == "首发"
+    assert lineup_kind(None, "Fixture") == lineup_kind(2, "Fixture") == "说不清"   # 读不到或没见过的值：不写成正式首发
     assert parse_lineup(lineup_html(5, starters=0).decode()).players == []        # 结构在、首发还没出
     assert parse_lineup("<html>请验证</html>") is None
 

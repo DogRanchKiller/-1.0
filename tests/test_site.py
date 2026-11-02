@@ -383,3 +383,32 @@ def test_finished_match_lineup_counts_only_pre_match_changes(env):
     html = plain(read(out, "match/1.html"))
     assert "赛后实际首发" in html and "homesub3" in html
     assert "变过" not in html
+
+
+def test_pre_match_lineup_switched_to_official(env):
+    """开球前约 1 小时懂球帝把预计首发换成正式首发（new_lineup 0、带替补、阵型位置都是 0）：写“正式首发”，替补也列出来。"""
+    con = connect(env[0])
+    rows = [(1, "dongqiudi", t, "Fixture", nl, side, role, i, f"{side}{role}{nl}_{i}", str(i), "中场", None,
+             0 if nl == 0 else i, 0, "x")
+            for t, nl, roles in (("2026-11-04 12:00:00", 1, ("starter",)), ("2026-11-04 13:00:00", 0, ("starter", "sub")))
+            for side in ("home", "away") for role in roles for i in range(1, 12)]
+    con.executemany("insert into lineups values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    out, _ = build(env)
+    html = plain(read(out, "match/1.html"))
+    assert "懂球帝正式首发（开球前约 1 小时换上、带替补，应是官方公布的；只看过 1 场）" in html
+    assert "homesub0_3" in html and "homestarter1_3" not in html and "开球前名单变过 1 次" in html
+
+
+def test_pre_match_lineup_without_flag_is_not_called_official(env):
+    """页面没写 new_lineup（比如网站改版）：不写成正式首发。"""
+    con = connect(env[0])
+    rows = [(1, "dongqiudi", "2026-11-04 12:00:00", "Fixture", None, side, "starter", i, f"{side}{i}", str(i), "中场", None, i, 0, "x")
+            for side in ("home", "away") for i in range(1, 12)]
+    con.executemany("insert into lineups values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    out, _ = build(env)
+    html = plain(read(out, "match/1.html"))
+    assert "懂球帝首发（页面没写是预计的还是正式的）" in html and "正式首发" not in html
