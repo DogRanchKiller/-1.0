@@ -104,6 +104,21 @@ class Downloader:
         files = sorted(folder.glob(f"*{suffix}")) if folder.exists() else []
         return hashlib.sha256(files[-1].read_bytes()).hexdigest() if files else None
 
+    def _save_snapshot(self, folder: Path, suffix: str, content: bytes) -> Path:
+        """旧日期文件仍有效；同日补跑按序号追加，独占创建保证不覆盖原始证据。"""
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = f"{self.today:%Y-%m-%d}"
+        sequence = 0
+        while True:
+            name = stem if sequence == 0 else f"{stem}_{sequence:06d}"
+            path = folder / f"{name}{suffix}"
+            try:
+                with path.open("xb") as stream:
+                    stream.write(content)
+                return path
+            except FileExistsError:
+                sequence += 1
+
     # ---------- 下载一个文件 ----------
     def fetch(self, url: str, data_type: str, target: Path, snapshot_dir: Path | None = None, retry_missing=False) -> str:
         """下载一个文件。target 是已完赛赛季的保存位置；snapshot_dir 不为空时按“带日期快照”保存。返回状态。"""
@@ -133,10 +148,11 @@ class Downloader:
             return "unchanged"
         else:
             status = "saved"
-        if snapshot_dir is not None and status == "saved":
-            target = snapshot_dir / f"{self.today:%Y-%m-%d}{suffix}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)  # 原样保存字节，不改编码、不改内容
+        if snapshot_dir is not None:
+            target = self._save_snapshot(snapshot_dir, suffix if status == "saved" else ".suspicious.html", content)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)  # 原样保存字节，不改编码、不改内容
         self._record(url, data_type, status, http_status=200, path=target, content=content)
         return status
 

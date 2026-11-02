@@ -13,24 +13,28 @@
    亚盘配上对应的盘口（2003–2004 各家有自己的盘口列，2005–2018 用 BbAHh，2019 起赛前用 AHh、收盘用 AHCh）。
 只导入有用途的列（数据字典的“用途”），其余留在原始文件里，以后要用再导。
 """
+import csv
+import hashlib
+import io
 import logging
+import math
 import re
 import sqlite3
 import time
 from collections import Counter
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
 from src.clean.football_data_inventory import season_files, season_label
-from src.clean.football_data_reader import keep_league_rows, read_football_data_csv
+from src.clean.football_data_reader import decode, keep_league_rows, read_football_data_csv
 from src.clean.schema import create_tables
 from src.clean.source_lifecycle import (delete_replaced_results, new_match_ids, reconcile_source_lifecycle,
                                         snapshot_prediction_sources)
 from src.common.config import load_football_data_columns, load_settings, resolve_path, PROJECT_ROOT
 from src.common.db import connect
+from src.collect.football_data import BASE_URL, season_code
 
 SOURCE = "football-data"
 log = logging.getLogger(__name__)
@@ -316,7 +320,116 @@ def write_database(con: sqlite3.Connection, teams: list[dict], names: dict[str, 
 
 # ---------- 全部文件 ----------
 
-def run(settings: dict | None = None, con: sqlite3.Connection | None = None) -> dict:
+
+def verified_download(con: sqlite3.Connection, path: Path, league: str, season: int) -> dict | None:
+    """只认实际下载日志与当前文件字节吻合的凭据；mtime 不是下载证据。"""
+    path = path.resolve()
+    if not path.is_file():
+        return None
+    content = path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    rel = path.relative_to(PROJECT_ROOT).as_posix() if path.is_relative_to(PROJECT_ROOT) else str(path)
+    url = f"{BASE_URL}/mmz4281/{season_code(season)}/{league}.csv"
+    rows = con.execute("select fetched_at_utc, bytes from fetch_log where source=? and data_type='league_csv' "
+                       "and status='saved' and file_path=? and sha256=? and url=?", (SOURCE, rel, digest, url)).fetchall()
+    times = []
+    for fetched, size in rows:
+        try:
+            when = pd.Timestamp(fetched)
+            if pd.isna(when) or (size is not None and size != len(content)):
+                continue
+            when = when.tz_localize("UTC") if when.tzinfo is None else when.tz_convert("UTC")
+            times.append(when)
+        except (ValueError, TypeError, OverflowError):
+            continue
+    if not times:
+        return None
+    return {"raw_file": rel, "sha256": digest, "fetched_at_utc": min(times).isoformat()}
+
+
+def _raw_rows(table: pd.DataFrame) -> dict[str, dict]:
+    """整条原始比赛内容相同才可沿用旧凭据，任一赔率/统计变化都重新计时。"""
+    found = {}
+    for row in table.to_dict("records"):
+        key = "|".join(str(row.get(name) or "") for name in ("Div", "Date", "HomeTeam", "AwayTeam"))
+        value = {name: item for name, item in row.items() if name != "row" and item is not None and not pd.isna(item)}
+        if key in found:
+            found[key] = None  # 重复身份不能用来证明旧条目未变。
+        else:
+            found[key] = value
+    return found
+
+
+def _check_current_width(path: Path) -> None:
+    """当季文件不接受短行；历史宽松解析会补空，自动更新不能把截断当字段缺失。"""
+    text, _ = decode(path.read_bytes())
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        raise ValueError("当前文件为空")
+    width = len(rows[0])
+    for row in rows[1:]:
+        if any(value.strip() for value in row) and len(row) < width:
+            raise ValueError("当前文件存在截断短行，未替换库")
+
+
+def _check_current_statistics(con: sqlite3.Connection, matches: pd.DataFrame, stats: pd.DataFrame,
+                              league: str, season: int) -> None:
+    """当前文件的已知技术统计不能因源列/值消失而被全量导入清空。"""
+    incoming = stats.merge(matches[["row", "home_team", "away_team"]], on="row", how="left")
+    current = {row[:2]: row[2:] for row in rows_of(incoming, ["home_team", "away_team", *STAT_FIELDS])}
+    previous = con.execute(
+        "select m.home_team,m.away_team," + ",".join(f"s.{field}" for field in STAT_FIELDS)
+        + " from match_stats s join matches m using(match_id)"
+        " where s.source=? and m.competition=? and m.season=?", (SOURCE, league, season))
+    for record in previous:
+        fresh = current.get(record[:2])
+        if fresh is None or any(old is not None and new is None for old, new in zip(record[2:], fresh)):
+            raise ValueError(f"{league} {season} 当前文件丢失既有比赛统计，未替换库")
+
+
+def _check_current_markets(con: sqlite3.Connection, matches: pd.DataFrame, odds: pd.DataFrame,
+                           league: str, season: int) -> None:
+    """当季已有赔率不能因删列/整组空/单个价格变空而消失；变成另一有效价格允许纠正。"""
+    keys = ["home_team", "away_team", "bookmaker", "market", "timing", "line"]
+    prices = ["home", "draw", "away", "over", "under"]
+    incoming = odds.merge(matches[["row", "home_team", "away_team"]], on="row", how="left")
+    current = {row[:len(keys)]: row[len(keys):] for row in rows_of(incoming, keys + prices)}
+    previous = con.execute(
+        "select m.home_team,m.away_team,o.bookmaker,o.market,o.timing,o.line,"
+        "o.home,o.draw,o.away,o.over,o.under from odds o join matches m using(match_id)"
+        " where o.source=? and m.competition=? and m.season=?", (SOURCE, league, season))
+    for record in previous:
+        fresh = current.get(record[:len(keys)])
+        if fresh is None or any(old is not None and new is None for old, new in zip(record[len(keys):], fresh)):
+            raise ValueError(f"{league} {season} 当前文件丢失既有赔率证据，未替换库")
+
+
+def _retain_verified_sources(con, matches: pd.DataFrame, table: pd.DataFrame, league: str, season: int,
+                             raw_dir: Path, cache: dict) -> None:
+    """新快照追加别场时保留未变行的旧真实来源；旧文件/日志/hash须再次可核验。"""
+    old = con.execute("select s.source_key,s.raw_file from match_sources s join matches m using(match_id) "
+                      "where s.source=? and m.competition=? and m.season=?", (SOURCE, league, season)).fetchall()
+    latest = _raw_rows(table)
+    by_key = {str(key): raw for key, raw in old}
+    for index, row in matches.iterrows():
+        prior = by_key.get(row["source_key"])
+        if not prior:
+            continue
+        path = (PROJECT_ROOT / prior).resolve()
+        if not path.is_relative_to(raw_dir.resolve()):
+            continue
+        cache_key = (path, league, season)
+        if cache_key not in cache:
+            proof = verified_download(con, path, league, season)
+            cache[cache_key] = (proof, _raw_rows(read_football_data_csv(path).table)) if proof else (None, {})
+        proof, previous = cache[cache_key]
+        if proof and latest.get(row["source_key"]) is not None and previous.get(row["source_key"]) == latest[row["source_key"]]:
+            matches.at[index, "raw_file"] = proof["raw_file"]
+            matches.at[index, "fetched_at_utc"] = proof["fetched_at_utc"]
+
+
+def run(settings: dict | None = None, con: sqlite3.Connection | None = None, *,
+        required_season: int | None = None, required_leagues: list[str] | None = None) -> dict:
     """导入全部 football-data 文件。返回导入结果（给报告用）。"""
     settings = settings or load_settings()
     raw_dir = resolve_path(settings["paths"]["raw"])
@@ -325,8 +438,10 @@ def run(settings: dict | None = None, con: sqlite3.Connection | None = None) -> 
     leagues = {**settings["leagues"]["top"], **settings["leagues"]["second"]}
     con = con or connect()
     create_tables(con)
-    fetched = dict(con.execute("select file_path, max(fetched_at_utc) from fetch_log "
-                               "where status = 'saved' group by file_path").fetchall())
+    required = set(required_leagues or ())
+    if required_season is not None and (not required or required - set(leagues)):
+        raise ValueError("当前赛季必需联赛未配置或不在导入范围")
+    current_sources, cache = {}, {}
 
     all_m, all_s, all_o = [], [], []
     issues: list[str] = []
@@ -337,28 +452,60 @@ def run(settings: dict | None = None, con: sqlite3.Connection | None = None) -> 
         for season, path in season_files(raw_dir, lg).items():
             r = read_football_data_csv(path)
             file_issues = list(r.issues)
+            strict = required_season is not None and season == required_season
+            if strict:
+                _check_current_width(path)
+                columns = {"Div", "Date", "Time", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR"}
+                if r.issues or not columns.issubset(r.table.columns) or r.table.empty or not r.table["Div"].eq(lg).all():
+                    raise ValueError(f"{lg} {season} 当前文件不完整或格式可疑")
             table = keep_league_rows(r.table, lg, file_issues)
             if len(table):
                 table = table.assign(row=range(next_row, next_row + len(table)))
                 next_row += len(table)
                 m, s, o, d = parse_file(table, lg, season, names, slots, settings, file_issues, unknown)
-                rel = path.relative_to(PROJECT_ROOT).as_posix()
-                if rel in fetched:
-                    m["fetched_at_utc"] = fetched[rel]
-                else:   # 抓取记录里没有（例如手工放进来的文件）：用文件的修改时间
-                    m["fetched_at_utc"] = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+                rel = path.relative_to(PROJECT_ROOT).as_posix() if path.is_relative_to(PROJECT_ROOT) else str(path.resolve())
+                proof = verified_download(con, path, lg, season)
+                if strict:
+                    if proof is None:
+                        raise ValueError(f"{lg} {season} 缺少与文件hash吻合的实际下载凭据")
+                    expected = s["home_goals"].gt(s["away_goals"]).map({True: "H", False: "A"})
+                    expected = expected.where(s["home_goals"].ne(s["away_goals"]), "D")
+                    numbers = o[["line", "home", "draw", "away", "over", "under"]].stack().dropna().tolist()
+                    if (file_issues or d or len(m) != len(table) or s[["home_goals", "away_goals"]].isna().any().any()
+                            or s[["home_goals", "away_goals"]].lt(0).any().any() or not s["result"].eq(expected).all()
+                            or any(not math.isfinite(float(value)) for value in numbers)
+                            or m["kickoff_utc"].isna().any()
+                            or not m["match_date"].between(f"{season}-07-01", f"{season + 1}-06-30").all()):
+                        raise ValueError(f"{lg} {season} 当前文件有未知球队、重复、无效日期/比分或赔率，未替换库")
+                    _check_current_statistics(con, m, s, lg, season)
+                    _check_current_markets(con, m, o, lg, season)
+                    current_sources[lg] = {"season": season, "raw_file": rel, "sha256": proof["sha256"],
+                                           "last_changed_utc": proof["fetched_at_utc"], "match_count": len(m),
+                                           "latest_match_date": m["match_date"].max()}
+                m["fetched_at_utc"] = proof["fetched_at_utc"] if proof else None
                 m["raw_file"] = rel
+                _retain_verified_sources(con, m, table, lg, season, raw_dir, cache)
                 all_m.append(m); all_s.append(s); all_o.append(o)
                 dropped += d
                 files += 1
             issues += [f"{lg} {season_label(season)}：{i}" for i in file_issues]
 
+    if required - set(current_sources):
+        raise ValueError(f"缺少当前赛季必需文件：{sorted(required - set(current_sources))}")
+    if not all_m:
+        raise ValueError("没有可导入的football-data文件")
     matches = pd.concat(all_m, ignore_index=True)
+    if required_season is not None:
+        previous = set(con.execute("select m.competition,m.season,m.home_team,m.away_team from matches m "
+                                   "join match_sources s using(match_id) where s.source=?", (SOURCE,)).fetchall())
+        incoming = set(matches[["competition", "season", "home_team", "away_team"]].itertuples(index=False, name=None))
+        if previous - incoming:
+            raise ValueError(f"原有football-data比赛在本次完整原始文件集中缺失 {len(previous - incoming)} 场，未替换库")
     n = write_database(con, teams, names, matches,
                        pd.concat(all_s, ignore_index=True), pd.concat(all_o, ignore_index=True))
     odds_rows = con.execute("select count(*) from odds where source = ?", (SOURCE,)).fetchone()[0]
     return {"files": files, "matches": n, "odds_rows": odds_rows, "dropped_odds": dropped,
-            "issues": issues, "unknown": unknown}
+            "issues": issues, "unknown": unknown, "leagues": current_sources}
 
 
 def main() -> None:

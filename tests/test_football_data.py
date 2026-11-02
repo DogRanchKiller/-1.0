@@ -110,3 +110,39 @@ def test_http_300_counts_as_missing(setup):
     assert con.execute("select status, http_status from fetch_log").fetchone() == ("not_found", 300)
     assert d.fetch(url("9394"), "league_csv", out / "E0" / "9394.csv") == "skipped"
     assert site.requests.count(url("9394")) == 1
+
+
+def test_same_day_changed_snapshot_never_overwrites_old_bytes(setup):
+    """手工重试/补跑与当天定时任务可能都成功；旧的原始凭据必须仍可核验。"""
+    from src.clean.football_data_inventory import season_files
+
+    _, out, make = setup
+    first = CSV
+    second = CSV + b"E0,01/11/26,Arsenal,Chelsea,2,2\n"
+    _, d = make({url("2627"): first})
+    d.run(["E0"], date(2026, 11, 2))
+    _, d = make({url("2627"): second})
+    d.run(["E0"], date(2026, 11, 2))
+    files = sorted((out / "E0" / "2627").glob("*.csv"))
+    assert len(files) == 2
+    assert files[0].read_bytes() == first and files[1].read_bytes() == second
+    assert season_files(out.parent, "E0")[2026] == files[1]
+    _, d = make({url("2627"): second})
+    d.run(["E0"], date(2026, 11, 2))
+    assert sorted((out / "E0" / "2627").glob("*.csv")) == files
+
+
+def test_current_suspicious_responses_keep_distinct_original_files(setup):
+    from pathlib import Path
+
+    con, out, make = setup
+    folder = out / "E0" / "2627"
+    payloads = [b"<html>first failure</html>", b"<html>second failure</html>"]
+    for content in payloads:
+        _, downloader = make({url("2627"): content})
+        downloader.today = date(2026, 11, 2)
+        assert downloader.fetch(url("2627"), "league_csv", folder, snapshot_dir=folder) == "suspicious"
+    paths = [Path(row[0]) for row in con.execute("select file_path from fetch_log order by id")]
+    assert len(set(paths)) == 2
+    assert [path.read_bytes() for path in paths] == payloads
+    assert not list(folder.glob("*.csv"))
