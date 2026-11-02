@@ -102,19 +102,23 @@ def slot_rows(row: dict) -> str:
     return table(["时点", "计划时间", "存档核验", "存档编号", "数据截止时间", "实际写入时间", "实际迟到"], rows)
 
 
-def archive_rows(row: dict) -> str:
+def archive_table(archives: list[dict]) -> str:
     rows = []
-    for slot in row.get("slots", []):
-        for archive in slot.get("archives", []):
-            validity = "证据有效" if archive.get("valid") is True else "证据无效或未知"
-            rows.append([number(archive.get("prediction_id")), e(archive.get("kind") or slot.get("kind") or "—"),
-                         e(f"{archive.get('model') or '未知'} / {archive.get('model_version') or '未知'}"),
-                         stamp(archive.get("kickoff_utc")), stamp(archive.get("cutoff_utc")),
-                         stamp(archive.get("created_at_utc")), e(validity) + issues_html(archive.get("issues"))])
-    if not rows:
-        return ""
-    return details("全部同场定时存档核验（保留重复、旧开球时间与版本冲突）",
-                   table(["存档编号", "时点", "模型 / 版本", "存档开球时间", "数据截止", "实际写入", "证据核验"], rows))
+    for archive in archives:
+        validity = "证据有效" if archive.get("valid") is True else "证据无效或未知"
+        rows.append([number(archive.get("prediction_id")), e(archive.get("kind") or "—"),
+                     e(f"{archive.get('model') or '未知'} / {archive.get('model_version') or '未知'}"),
+                     stamp(archive.get("kickoff_utc")), stamp(archive.get("cutoff_utc")),
+                     stamp(archive.get("created_at_utc")), e(validity) + issues_html(archive.get("issues"))])
+    return table(["存档编号", "时点", "模型 / 版本", "存档开球时间", "数据截止", "实际写入", "证据核验"], rows)
+
+
+def archive_rows(row: dict) -> str:
+    formal = [{**archive, "kind": archive.get("kind") or slot.get("kind")}
+              for slot in row.get("slots", []) for archive in slot.get("archives", [])]
+    other = row.get("other_archives", [])
+    return ((details("全部同场定时存档核验（保留重复、旧开球时间与版本冲突）", archive_table(formal)) if formal else "")
+            + (details("其他存档（不计入正式三时点）", archive_table(other)) if other else ""))
 
 
 def closing_rows(closing: dict) -> str:

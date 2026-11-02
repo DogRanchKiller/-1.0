@@ -79,6 +79,9 @@ def report_problem(report) -> str | None:
             return "比赛身份格式不完整"
         if "source_state" in row and not _state(row["source_state"], "source"):
             return "当前来源状态格式不完整"
+        if (not _list_of(row.get("other_archives", []), dict)
+                or any(not _list_of(archive.get("issues", []), str) for archive in row.get("other_archives", []))):
+            return "其他存档证据格式不完整"
         slots = row.get("slots")
         if (not _list_of(slots, dict) or len(slots) != len(KINDS)
                 or sorted(str(slot.get("kind")) for slot in slots) != sorted(KINDS)):

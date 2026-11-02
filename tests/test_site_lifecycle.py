@@ -295,3 +295,19 @@ def test_completed_report_can_render_without_implying_lineup_acceptance():
     html = lifecycle.render(data)
     assert "验收报告暂不可用" not in html and "三个正式时点的评分与单场复盘已核验" in html
     assert "首发链路尚未验收" in html and "首发验收通过" not in html
+
+
+def test_nonformal_archives_are_visible_without_completing_formal_slots():
+    from src.web.site import lifecycle
+
+    data = site_fixture()
+    row = data.lifecycle["matches"][0]
+    row["other_archives"] = [{"prediction_id": 991, "kind": "preview", "model": "gb_l7",
+                               "model_version": "gb_l7-fixture", "kickoff_utc": row["kickoff_utc"],
+                               "cutoff_utc": "2026-11-02 09:00:00", "created_at_utc": "2026-11-02 09:00:01",
+                               "valid": False, "issues": ["非正式时点 <evidence>"]}]
+    html = lifecycle.render(data)
+    assert "其他存档（不计入正式三时点）" in html and "preview" in html and "991" in html
+    assert "&lt;evidence&gt;" in html and "<evidence>" not in html
+    assert data.lifecycle["summary"]["archived_complete_count"] == 0
+    assert "尚未到点" in html
