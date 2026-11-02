@@ -23,6 +23,7 @@ import pandas as pd
 from src.features import FeatureStore
 from src.features.errors import FeatureAccessError
 from src.features.known_time import to_utc_text
+from src.features.rest_days import calendar_year_codes
 from src.review.reconcile import SCORE_COLUMNS, archive_metadata
 from src.web.site.lifecycle_contract import report_problem
 
@@ -351,8 +352,12 @@ def load(con, settings: dict, now: datetime) -> SiteData:
 
     # 5. 比分（赛后的答案）：用途「复盘」。实时模式下期末考试赛季（2024/25、2025/26）不能这样取，只取上线后的赛季；
     #    以前赛季的比分（如果有）从 scores.csv 补
-    live_first = con.execute("select min(coalesce(kickoff_utc, match_date)) from matches where season >= ?",
-                             (int(settings["seasons"]["live_first"]),)).fetchone()[0]
+    #    上线后赛季的第一场只看跨年赛季的联赛：一年一季的日职、中超 2026 赛季 2–3 月就开赛，算进来的话起点会提前到
+    #    五大联赛 2025/26（考试赛季）里面，取比分就会报错
+    cal = sorted(calendar_year_codes(settings))
+    live_first = con.execute("select min(coalesce(kickoff_utc, match_date)) from matches where season >= ?"
+                             f" and competition not in ({','.join('?' * len(cal))})",
+                             (int(settings["seasons"]["live_first"]), *cal)).fetchone()[0]
     since = max(to_utc_text(start), to_utc_text(pd.Timestamp(live_first))) if live_first else to_utc_text(start)
     current_source_states = {}
     try:

@@ -29,6 +29,7 @@ import pandas as pd
 import requests
 
 from src.common.config import load_settings, resolve_path
+from src.features.standings import standings_leagues
 
 USER_AGENT = "football-learning-project/0.1 (personal study; low frequency)"
 BASE = "https://en.wikipedia.org/wiki/"
@@ -173,7 +174,7 @@ def main() -> None:
     a = p.parse_args()
     settings = load_settings()
     cfg = settings["standings_check"]
-    comps = a.comps.split(",") if a.comps else [c for g in settings["leagues"].values() for c in g]
+    comps = a.comps.split(",") if a.comps else standings_leagues(settings)   # 只核对有积分规则的联赛
     lo, hi = (a.seasons or f"{cfg['first_season']}-{cfg['last_season']}").split("-")
     seasons = list(range(int(lo), int(hi) + 1))
     if a.fetch:

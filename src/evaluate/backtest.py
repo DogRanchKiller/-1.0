@@ -53,7 +53,7 @@ from src.evaluate import metrics
 from src.features import FeatureStore, LookAheadError, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
 from src.features.market_odds import attach_odds_features, history_odds_features
-from src.features.rest_days import RestDays
+from src.features.rest_days import RestDays, calendar_year_codes, other_season_system  # noqa: F401（calendar_year_codes 给别的模块从这里导入）
 from src.models.base import Model, check_result_probs
 
 BENCHMARK = "pinnacle_close"   # 标杆 1 在结果表里的模型名：平博收盘
@@ -104,11 +104,22 @@ def season_targets(fs: FeatureStore, competitions: list[str], first: int, last: 
     取数层按开球时间段取目标，这里先取一个盖住这些赛季的时间段，再按 season 列筛（2019/20 疫情延期到 8 月也不会漏）。
     时间段的终点：下一个赛季也是开发赛季，就放宽到再下一年（反正按 season 筛掉）；
     下一个赛季不是开发赛季（期末考试），就停在 window_end_md（7 月 1 日），不碰考试赛季。
+    一年一个赛季的联赛（settings 的 backtest.calendar_year_groups，日职、中超）用 calendar_year_window：
+    从第一个赛季那年 1 月 1 日起，到 2 月 1 日止（下一个赛季最早 2 月中旬才开赛）。
     开发模式下赛季范围里有考试赛季，取数层会直接报错（SeasonLockedError）。
     """
     b = fs.settings["backtest"]
     end_year = last + 2 if season_role(last + 1, fs.settings) == "dev" else last + 1
-    start, end = f"{first}-{b['window_start_md']}", f"{end_year}-{b['window_end_md']}"
+    start_md, end_md = b["window_start_md"], b["window_end_md"]
+    # 一年一个赛季的联赛（日职、中超）用另一个窗口：第一个赛季那年 1 月 1 日到最后一个赛季下一年 2 月 1 日。
+    # 跨年赛季的窗口（6 月 15 日起）会漏掉这些联赛 2–6 月的比赛，最后一季的窗口还会伸进下一年的考试赛季
+    cal_codes = calendar_year_codes(fs.settings)
+    cal = [c for c in competitions if c in cal_codes]
+    if cal:
+        if len(cal) != len(competitions):
+            raise ValueError(f"一年一个赛季的联赛 {cal} 和跨年赛季的联赛不能放在同一次回测里（取目标的日期窗口不一样），分开跑")
+        start_md, end_md = b["calendar_year_window"]["start_md"], b["calendar_year_window"]["end_md"]
+    start, end = f"{first}-{start_md}", f"{end_year}-{end_md}"
     t = fs.prediction_targets(start, end, usage="A版输入", competition=competitions)
     t = t[(t["season"] >= first) & (t["season"] <= last)]
     missing = sorted(set(range(first, last + 1)) - set(t["season"].unique()))
@@ -171,6 +182,7 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         rest = RestDays.from_settings(settings)
         # 只有“哪一轮”日期的杯赛，最早、最晚开球差 round_date_window_days 天；往回多取这么多再加 2 天，免得漏
         sched_margin = pd.Timedelta(days=float(settings["features"]["round_date_window_days"]) + 2)
+        other_system = other_season_system(settings, comps)   # 另一种赛季制度的联赛不取（见 other_season_system）
         last_sched: str | None = None
         timing["取赛程次数"] = 0
 
@@ -198,7 +210,7 @@ def _rolling_predictions(fs: FeatureStore, targets: pd.DataFrame, models: list[M
         # ---- 取新赛程（只有要休息天数时） ----
         if rest is not None:
             since = None if last_sched is None else to_utc_text(pd.Timestamp(last_sched) - sched_margin)
-            sched = fs.schedule(cutoff, "休息天数和欧战后标签", since=since)
+            sched = fs.schedule(cutoff, "休息天数和欧战后标签", since=since, exclude_competitions=other_system)
             if (sched["known_at_utc"] > cutoff).any():
                 raise LookAheadError(f"取数层返回了截止时间 {cutoff} 之后才开球的赛程，回测停止")
             rest.add(sched)

@@ -26,7 +26,7 @@ from src.clean.schema import create_tables
 from src.common.config import load_settings, resolve_path
 from src.features import FeatureStore, SeasonLockedError
 from src.features.standings import (LeagueRules, SeasonTable, compute_table, load_deductions, load_rules,
-                                    season_table, standings_at)
+                                    season_table, standings_at, standings_leagues)
 from src.review import labels as L
 
 A, T, C, F = "Arsenal", "Tottenham", "Chelsea", "Fulham"
@@ -332,7 +332,10 @@ def test_saved_labels_respect_season_lock(con, settings):
 def test_real_rules_cover_every_league_and_season():
     """league_rules.yaml 要覆盖每个联赛的每个赛季（1993 起），同分项目都认识，危险区名额合理。"""
     s = load_settings()
-    for comp in [c for g in s["leagues"].values() for c in g]:
+    comps = standings_leagues(s)
+    # 五大联赛和次级联赛（十个）一个都不能少；日职、中超没写规则，不在里面（standings.league_groups）
+    assert set(comps) == set(s["leagues"]["top"]) | set(s["leagues"]["second"])
+    for comp in comps:
         for season in range(1993, 2031):
             r = load_rules(comp, season, s)
             assert r.win_points in (2, 3) and 1 <= r.danger_spots <= 6 and r.source

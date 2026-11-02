@@ -54,8 +54,8 @@ import yaml
 from src.common.config import load_settings, resolve_path, season_role
 from src.features import FeatureStore, open_readonly
 from src.features.known_time import compute_known_times, to_utc_text
-from src.features.rest_days import RestDays
-from src.features.standings import LeagueRules, SeasonTable, load_deductions, load_rules, season_schedule, season_table
+from src.features.rest_days import RestDays, other_season_system
+from src.features.standings import LeagueRules, SeasonTable, load_deductions, load_rules, season_schedule, season_table, standings_leagues
 from src.features.usage import season_label
 
 USAGE = "复盘"
@@ -153,7 +153,10 @@ def after_euro_flags(fs: FeatureStore, sched: pd.DataFrame, settings: dict) -> d
     """
     rest = RestDays.from_settings(settings)
     since = pd.to_datetime(sched["kickoff_earliest_utc"]).min() - pd.Timedelta(days=rest.cap)
-    games = fs.schedule(sched["cutoff_utc"].max(), EURO_USAGE, since=since)
+    # 不取另一种赛季制度的联赛（日职、中超）：英超 2023/24 的截止时间到 2024 年 5 月，不排除就会取到
+    # 2 月开赛的日职、中超 2024 赛季（考试赛季），开发模式直接报错。两边的球队不互相比赛，排除了结果不变
+    other = other_season_system(settings, sorted(set(sched["competition"])))
+    games = fs.schedule(sched["cutoff_utc"].max(), EURO_USAGE, since=since, exclude_competitions=other)
     games = games.assign(_known=pd.to_datetime(games["known_at_utc"])).sort_values("_known", kind="stable")
     games = games.reset_index(drop=True)
     known = games["_known"].to_numpy()
@@ -232,7 +235,7 @@ def label_all(settings: dict | None = None, comps: list[str] | None = None, seas
     """
     settings = settings or load_settings()
     conn = conn or open_readonly(resolve_path(settings["paths"]["database"]))
-    comps = comps or [c for g in settings["leagues"].values() for c in g]
+    comps = comps or standings_leagues(settings)   # 只算有积分规则的联赛（standings.league_groups）
     derbies = load_derbies(settings)
     deductions = load_deductions(settings)
     stores: dict[str, FeatureStore] = {}
