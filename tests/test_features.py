@@ -308,6 +308,32 @@ def test_optional_round_column_and_source_priority(con, settings):
     assert fs.team_schedule("A", "2024-01-20", "显示").set_index("match_id").loc[4, "round"] == "第 3 轮"
 
 
+def test_historical_source_filter_precedes_completeness_for_each_data_type(con, settings):
+    """指定来源先限制候选；未指定时继续按每类数据完整度选，找不到指定来源时不回退。"""
+    con.execute("insert into match_stats (match_id, source, home_goals, away_goals, result, "
+                "home_shots, away_shots, home_xg, away_xg) values (1, 'dongqiudi', 0, 0, 'D', 0, 0, 0, 0)")
+    fs = FeatureStore(con, "开发", settings)
+    args = {"data": ["比分", "射门、xG"], "competition": "E0"}
+    default = fs.historical_matches("2024-01-12", "A版输入", **args).set_index("match_id")
+    assert default.loc[1, "stats_source"] == "football-data"
+    assert default.loc[1, "stats_source_射门、xG"] == "dongqiudi"
+    chosen = fs.historical_matches("2024-01-12", "A版输入", source="football-data", **args).set_index("match_id")
+    assert chosen.loc[1, "home_goals"] == 2 and chosen.loc[1, "home_shots"] == 10
+    assert pd.isna(chosen.loc[1, "home_xg"])
+    assert set(chosen["stats_source"]) == set(chosen["stats_source_射门、xG"]) == {"football-data"}
+    dqd = fs.historical_matches("2024-01-12", "A版输入", source="dongqiudi", **args).set_index("match_id")
+    assert dqd.loc[1, "home_goals"] == 0
+    assert pd.isna(dqd.loc[2, "stats_source"]) and pd.isna(dqd.loc[2, "home_goals"])
+
+
+def test_historical_source_filter_preserves_time_and_season_guards(dev):
+    assert dev.historical_matches("2024-01-10 22:59:59", "A版输入", source="football-data").empty
+    got = dev.historical_matches("2024-01-10 23:00", "A版输入", data=(), source="football-data")
+    assert ids(got) == [1] and set(got["stats_source"]) == {"football-data"}
+    with pytest.raises(SeasonLockedError):
+        dev.historical_matches("2024-09-01", "A版输入", source="没有这个来源")
+
+
 def test_prediction_targets_hide_status(dev):
     t = dev.prediction_targets("2024-01-01", "2024-02-01", "A版输入")
     assert ids(t) == [1, 2, 3] and "status" not in t.columns

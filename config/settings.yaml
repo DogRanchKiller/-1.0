@@ -733,3 +733,24 @@ news:
   # 新闻及引用它的结构化信息只收“允许”的来源；规则产物必须引用已导入新闻。现在一个都没有登记
   # 唯一无新闻来源的例外是 method=人工 的手动结构化信息，仍检查球队、种类和录入时间
   sources: {}
+
+# 第 10 阶段：角球、黄牌研究 src/evaluate/corners_cards_study.py（需求文档第 4 节“第 10 阶段：角球、黄牌怎么做”，跑之前写下，不临时加）
+# 只做研究、只出报告，不改任何模型、融合 w、倾向门槛、信心等级，不碰期末考试赛季（赛季范围取 seasons.dev_last，不在这里重复写）
+corners_cards:
+  leagues: [E0, SP1, D1, I1, F1]   # 五大联赛；裁判只有英超有完整记录，所以裁判那一组只在 referee_league 里做
+  referee_league: E0
+  usage: 研究实验                  # 取数用途（数据字典，只在开发模式）
+  horizon_hours: 24                # 预测时点：开球前 24 小时（T-24）
+  refit_days: 7                    # 每隔几天重新拟合一次，和第 4 节其他模型一致
+  min_train_matches: 760           # 每个联赛有角球 / 黄牌数的历史比赛不到这么多场（约两个赛季）就不出预测
+  baseline_matches: 1000           # c0_league：同联赛截止前最近这么多场的场均数
+  train_matches: 1520              # c1、c2、c3：用截止前最近这么多场拟合（约 4 个赛季）
+  half_life_days: 365              # 时间衰减半衰期（固定，不选）
+  ridge_grid: [5, 20, 80]          # 岭惩罚强度的 3 档，在 select_seasons 里选，角球、黄牌分别选
+  select_seasons: [2005, 2013]     # 选惩罚强度用的赛季（含两头）
+  eval_seasons: [2014, 2023]       # 评的赛季（含两头），不能超过 seasons.dev_last
+  ref_ridge: 20                    # c3 里裁判项的岭惩罚强度（固定，不选）
+  ref_min_matches: 20              # 裁判在截止前不到这么多场，裁判项取 0
+  confidence_levels: [0.95, 0.99]  # 两个可信区间都要整个在“更准”一边才算更准（需求文档“判定规则”）
+  calibration_bins: 10             # 校准：按预测均值分几档
+  output_dir: data/reports/corners_cards   # 报告放这里（data/ 不进 Git）
