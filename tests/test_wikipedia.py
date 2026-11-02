@@ -97,6 +97,28 @@ def test_find_subpages_skips_rules_and_redlinks():
         ["2010–11 UEFA Champions League group stage"]
 
 
+def test_configured_mens_scope_excludes_real_spanish_womens_subpage(settings):
+    """真实SSC主页链接到女足同名赛事，不能把它当成男子赛事的回合子页。"""
+    main = "2027 Supercopa de España"
+    women = main + " Femenina"
+    html = f'<a href="{C.page_url(settings["wikipedia"]["base_url"], women)}">Women</a>'
+    rules = settings["wikipedia"]["skip_subpages"]
+    assert C.find_subpages(html, main, rules) == []
+    # 原始层保留以前误采的页面；后续导入也必须按同一范围排除它。
+    assert W.skip_page(C.file_stem(women), [main], rules)
+
+
+def test_configured_mens_scope_keeps_qualifying_and_knockout_subpages(settings):
+    main = "2026–27 UEFA Champions League"
+    pages = [main + " qualifying", main + " qualifying (third and play-off round matches)",
+             main + " league phase", main + " knockout phase"]
+    html = "".join(f'<a href="{C.page_url(settings["wikipedia"]["base_url"], page)}">Round</a>'
+                   for page in pages)
+    rules = settings["wikipedia"]["skip_subpages"]
+    assert C.find_subpages(html, main, rules) == pages
+    assert not any(W.skip_page(C.file_stem(page), [main], rules) for page in pages)
+
+
 def test_download_waits_retries_and_never_downloads_twice(tmp_path):
     d, con, waits = downloader(tmp_path, [FakeResponse(503), FakeResponse(429, headers={"Retry-After": "7"}),
                                           FakeResponse(200, PAGE)])

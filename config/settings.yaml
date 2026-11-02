@@ -513,7 +513,7 @@ wikipedia:
   # 子页面：主页面里链接到“主页面标题 + 空格 + ……”的页面（例如 “2008–09 UEFA Cup group stage”）。
   # “……”部分（小写后）符合下面任何一条规则（正则表达式）的不跟进：决赛单场页（主页面里已经有）、名单、统计等
   skip_subpages: ['^final$', 'squads', 'statistics', 'broadcast', 'disciplinary', 'top ?scorers', 'preliminary rounds',
-                  'women', 'frauen', 'féminine', 'water polo', 'serie c', 'serie d', 'lega pro', 'dilettanti']
+                  'women', 'frauen', 'féminine', 'femenina', 'water polo', 'serie c', 'serie d', 'lega pro', 'dilettanti']
   # 清洗时也按 skip_subpages 跳过这些页面（第一次下载时还没有女子、低级别赛事这几条规则，那时下载的页面留在原始层，但不导入）。
   # 法国杯第 7 轮以前是业余球队的地区赛（我们的球队从第 7、8 轮才参加），这些页面也不导入：
   import_skip_pages: ['coupe de france (qualifying rounds|preliminary round|[1-6](st|nd|rd|th) (round|through))']
