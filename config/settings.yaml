@@ -44,10 +44,29 @@ seasons:
 leagues:                     # 第一阶段的联赛（football-data 的联赛代码）
   top: {E0: 英超, SP1: 西甲, D1: 德甲, I1: 意甲, F1: 法甲}
   second: {E1: 英冠, SP2: 西乙, D2: 德乙, I2: 意乙, F2: 法乙}
+  # 第 11 阶段（2026-11-03）：football-data “新联赛”文件里的亚洲联赛。一年一个赛季（2024 = 2024 赛季），
+  # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响。还没接进实时预测、定时任务、网页
+  asia: {JPN: 日职, CHN: 中超}
 
 football_data:
   timezone: Europe/London    # football-data 的开球时间是英国当地时间（已核对，见需求文档 6.1）
   refresh_leagues: [E0, SP1, D1, I1, F1, E1, SP2, D2, I2, F2] # 只自动检查当前赛季；已有十联赛范围
+
+# football-data 的“新联赛”文件（需求文档 6.1“新联赛文件”；下载 src/collect/football_data_new.py，导入 src/clean/football_data_new_import.py）
+# 一个联赛一个文件、所有赛季都在里面，列和老联赛不一样。现在只有日职、中超（韩K football-data 没有，另找来源）
+football_data_new:
+  leagues: [JPN, CHN]        # 只下这两个；必须是 leagues.asia 里登记过的代码
+  url: https://www.football-data.co.uk/new/{code}.csv
+  raw_folder: new            # 存到 data/raw/football-data/new/<联赛>/<下载日期>.csv
+  db_source: football-data-new  # 数据库里的来源名。和老联赛的 football-data 分开：老联赛整批重导时只删自己的行，不会删掉这两个联赛
+  # 文件里 Time 列的时区（2026-11-03 核对，见需求文档 6.1）：和老联赛一样是英国当地时间
+  timezone: Europe/London
+  # 当地时区：只用来在质量报告里核对“换成当地时间后开球时间是不是整齐”“英国日期和当地日期差几场”，不改导入的数
+  local_timezone: {JPN: Asia/Tokyo, CHN: Asia/Shanghai}
+  # 联赛球队的门槛：这个赛季出场次数 ≥ 本季球队出场次数中位数 × 这个比例，才算本季联赛的球队。
+  # 文件里混着升降级附加赛（例如 J1 2018 有东京绿茵 3 场、J2 球队之间的附加赛），这些队只踢 1–3 场，低于门槛；
+  # 有它们参加的比赛不导入，列进质量报告（附加赛不是联赛比赛，主客场、战意都不一样）
+  league_team_min_share: 0.5
 
 # 自动维护只更新已登记来源。北京时间每天运行，错过时开机补跑；不触发预测、研究或消息发送。
 data_refresh:
@@ -239,6 +258,13 @@ backtest:                    # 回测框架 src/evaluate/backtest.py（需求文
   benchmark_devig_method: proportional  # 两个标杆用哪种去水。只管回测标杆，不影响 calc.devig_method（预测页用的）
   window_start_md: "06-15"   # 按赛季取预测目标时，日期窗口从这年的几月几日开始（再按 season 列筛，窗口只是为了少查）
   window_end_md: "07-01"     # 窗口到下一年的几月几日（2019/20 疫情延期的赛季按 season 列筛，不受影响）
+  # 一年一个赛季的联赛（日职、中超，第 11 阶段）：赛季在一个日历年里（中超 2021 踢到 2022-01-12），
+  # 上面“6 月 15 日到下一年 7 月 1 日”的窗口不适用（会漏掉 2–6 月的比赛，最后一季还会碰到下一个考试赛季）。
+  # 这些联赛组的窗口：从第一个赛季那年的 start_md 到最后一个赛季下一年的 end_md（再按 season 列筛）。
+  # end_md 选 2 月 1 日：中超 2021 最晚一场 2022-01-12，两个联赛最早开赛是 2 月 14 日（日职 2025），一场考试赛季都碰不到。
+  # 和跨年赛季的联赛不能放在同一次回测里（窗口不一样），混在一起直接报错
+  calendar_year_groups: [asia]
+  calendar_year_window: {start_md: "01-01", end_md: "02-01"}
 
 rest_days:                   # 休息天数和“欧战后”标签（src/features/rest_days.py，需求文档第 4 节“步骤 6 怎么做”）
   euro_competitions: [UCL, UEL, UECL]   # 哪几个赛事算“欧战”
@@ -462,6 +488,10 @@ models:                      # 第 0 步模型 src/models（需求文档第 4 �
     ada_a99: {alpha: 0.99}
     # ada_league（对照组）：2005–2013 选出的 ada_a99 那组 α，一个联赛共用一套权重（和 dyn_weekly 一样，选完才加）
     ada_league: {alpha: 0.99, per_team: false}
+  # 梯度提升树的“联赛”特征给哪几组联赛编号（按代码排序编 0、1、2…，不在这里的联赛编 -1）。
+  # 第 11 阶段加了 leagues.asia 以后，如果按全部联赛编号，五大联赛的编号会变，模型版本指纹也跟着变（上线的 gb_l7 会被当成新版本）。
+  # 所以只给 top、second 编号，和加 asia 之前完全一样；日职、中超单独回测（一次一个联赛），联赛特征是常数，不影响
+  gbdt_league_groups: [top, second]
   # 第 4 节步骤 6：特征表 + 梯度提升树（src/models/gbdt.py，原理见文件开头）。下面是默认设置
   gbdt:
     dyn: dyn_q1e5_b01         # 里面带的 dyn 用哪一组（步骤 5 选出的）

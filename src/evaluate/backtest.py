@@ -104,11 +104,22 @@ def season_targets(fs: FeatureStore, competitions: list[str], first: int, last: 
     取数层按开球时间段取目标，这里先取一个盖住这些赛季的时间段，再按 season 列筛（2019/20 疫情延期到 8 月也不会漏）。
     时间段的终点：下一个赛季也是开发赛季，就放宽到再下一年（反正按 season 筛掉）；
     下一个赛季不是开发赛季（期末考试），就停在 window_end_md（7 月 1 日），不碰考试赛季。
+    一年一个赛季的联赛（settings 的 backtest.calendar_year_groups，日职、中超）用 calendar_year_window：
+    从第一个赛季那年 1 月 1 日起，到 2 月 1 日止（下一个赛季最早 2 月中旬才开赛）。
     开发模式下赛季范围里有考试赛季，取数层会直接报错（SeasonLockedError）。
     """
     b = fs.settings["backtest"]
     end_year = last + 2 if season_role(last + 1, fs.settings) == "dev" else last + 1
-    start, end = f"{first}-{b['window_start_md']}", f"{end_year}-{b['window_end_md']}"
+    start_md, end_md = b["window_start_md"], b["window_end_md"]
+    # 一年一个赛季的联赛（日职、中超）用另一个窗口：第一个赛季那年 1 月 1 日到最后一个赛季下一年 2 月 1 日。
+    # 跨年赛季的窗口（6 月 15 日起）会漏掉这些联赛 2–6 月的比赛，最后一季的窗口还会伸进下一年的考试赛季
+    cal_codes = {c for g in b.get("calendar_year_groups") or [] for c in fs.settings["leagues"].get(g, {})}
+    cal = [c for c in competitions if c in cal_codes]
+    if cal:
+        if len(cal) != len(competitions):
+            raise ValueError(f"一年一个赛季的联赛 {cal} 和跨年赛季的联赛不能放在同一次回测里（取目标的日期窗口不一样），分开跑")
+        start_md, end_md = b["calendar_year_window"]["start_md"], b["calendar_year_window"]["end_md"]
+    start, end = f"{first}-{start_md}", f"{end_year}-{end_md}"
     t = fs.prediction_targets(start, end, usage="A版输入", competition=competitions)
     t = t[(t["season"] >= first) & (t["season"] <= last)]
     missing = sorted(set(range(first, last + 1)) - set(t["season"].unique()))
