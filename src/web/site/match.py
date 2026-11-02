@@ -552,7 +552,13 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
     ps = pk.match_picks(row, data.settings)
     score = data.results.get(mid)
     got = pk.before_kickoff(data, mid) if score else None
-    late = bool(score) and not (isinstance(got, tuple) and got[2] is row)   # 这一版开球以后才出（理论上不该有）
+    # 踢完了但这一版不算进战绩页的命中率：开球时间读不出来，或这一版开球以后才出（理论上不该有）
+    if not score or (isinstance(got, tuple) and got[2] is row):
+        late = ""
+    elif got == "开球时间不明":
+        late = "这场的开球时间不明，不算进战绩页的命中率。"
+    else:
+        late = "这一版是开球以后才出的，不算进战绩页的命中率。"
     rows = []
     for k in pk.MARKETS:
         rows.append([e(pk.MARKET_NAMES[k]), f"<b>{e(pk.pick_text(k, ps[k], home, away))}</b>", pk.prob_html(k, ps[k]),
@@ -561,7 +567,7 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
             "让球：-0.5 = 要赢 1 球以上才算中，+0.5 = 不输就算中；四分之一球会有赢半、输半，整数球打平会走盘。"
             "比分只是 121 个比分里可能性最大的一个，一般只有一成左右，常常和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。</p>")
     if late:
-        note = "<p class='note'>这一版是开球以后才出的，不算进战绩页的命中率。</p>" + note
+        note = f"<p class='note'>{late}</p>" + note
     return table(["玩法", "预测", "可能性", "结果"], rows, "picks") + note
 
 

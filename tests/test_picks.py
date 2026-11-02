@@ -176,3 +176,19 @@ def test_why_points_say_where_the_probability_comes_from():
     assert "从平博的赔率（去掉抽水）算出来的" in pin[0] and "和赔率差不多" in pin[1]
     old = why_points(D, {**base, "detail": {}}, "H", "A")
     assert "那时还没接赔率融合" in old[0]
+
+
+def test_match_page_says_why_a_version_is_not_counted():
+    from src.web.site.match import picks_html
+    from tests.test_explanation_pages import site_data
+
+    data = site_data()
+    row = data.latest(10)[1]
+    data.results[10] = (1, 0)
+    assert "不算进战绩页" not in picks_html(data, 10, row)                       # 正常：开球前出的
+    data.matches[10]["kickoff_utc"] = "2000-01-01 00:00:00"
+    assert "这一版是开球以后才出的" in picks_html(data, 10, row)
+    data.matches[10]["kickoff_utc"] = None
+    for r in data.preds[10].values():
+        r["kickoff_utc"] = None
+    assert "开球时间不明" in picks_html(data, 10, row)

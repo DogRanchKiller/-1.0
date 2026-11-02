@@ -201,8 +201,9 @@ def picks_record(data: SiteData) -> str:
     home = s["always_home"]
     rows.append(["<span class='muted'>对照：一直猜主胜</span>", str(home["n"]), e(pk.counts_text(home)), pk.rate_text(home),
                  f"{ref['always_home']['rate']:.0%}" if ref else "—"])
-    ref_head = e(f"历史参考（{ref['seasons'][0]}/{str(ref['seasons'][0] + 1)[2:]}–{ref['seasons'][1]}/{str(ref['seasons'][1] + 1)[2:]}"
-                  f" 赛季 {ref['n_matches']} 场）") if ref else "历史参考"
+    # 表头 table() 会转义，这里不再转义
+    ref_head = (f"历史参考（{ref['seasons'][0]}/{str(ref['seasons'][0] + 1)[2:]}–{ref['seasons'][1]}/{str(ref['seasons'][1] + 1)[2:]}"
+                f" 赛季 {ref['n_matches']} 场）") if ref else "历史参考"
     notes = []
     if not ref:
         notes.append(f"历史参考：{ref_why}。")
