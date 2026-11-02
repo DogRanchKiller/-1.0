@@ -169,3 +169,31 @@ def test_public_helpers_keep_same_contract():
     assert score_summary(df, min_matches=300)[0]["n_matches"] == 1
     assert calibration_by_group(df, n_bins=5)[0]["n_matches"] == 1
     assert matched_comparisons(df, benchmark_books=BOOKS, min_matches=300)[0]["n_matches"] == 1
+
+
+def test_sample_warning_counts_valid_scores_instead_of_all_review_rows():
+    empty = {k: None for k in ("logloss_1x2", "brier_1x2", "rps_1x2", "logloss_score",
+                              "logloss_over25", "logloss_btts")}
+    rows = [prediction(mid, **empty) for mid in range(300)]
+    rows[0]["logloss_1x2"] = 0.7
+    group = build(rows)["groups"][0]
+    assert group["n_matches"] == 300
+    assert group["metrics"]["logloss_1x2"]["n_matches"] == 1
+    assert group["note"] == "样本太少，不能下结论"
+    assert group["metrics"]["logloss_1x2"]["note"] == "样本太少，不能下结论"
+    assert group["metrics"]["brier_1x2"]["note"] == "无匹配证据"
+
+
+def test_nonfinite_confidence_is_unknown_and_remains_strict_json():
+    out = build([prediction(1, confidence=float("inf")), prediction(2, confidence=-float("inf"))])
+    assert len(out["confidence"]) == 1
+    assert out["confidence"][0]["group"]["confidence"] == "未知"
+    json.dumps(out, allow_nan=False)
+
+
+def test_explicit_unknown_derby_is_not_inferred_true_or_false():
+    out = build([prediction(1), prediction(2), prediction(3)], labels={
+        1: {"德比": "未知"}, 2: {"德比": float("nan")}, 3: {"德比": None},
+    })
+    derby = {g["group"]["tag_value"]: g["n_matches"] for g in out["tags"] if g["group"]["tag"] == "德比"}
+    assert derby == {"未知": 2, False: 1}

@@ -29,6 +29,8 @@ def _scalar(value):
     """把 pandas/numpy 标量换成严格 JSON 能表示的值。"""
     if value is None or (not isinstance(value, (list, dict, tuple)) and pd.isna(value)):
         return None
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return None
     return value.item() if isinstance(value, np.generic) else value
 
 
@@ -90,11 +92,15 @@ def _summary(df: pd.DataFrame, group_by, min_matches: int) -> list[dict]:
         for name in METRICS:
             values = _numeric(part[name]).dropna()
             metrics[name] = {"n_matches": len(values), "missing_matches": n - len(values),
-                             "mean": float(values.mean()) if len(values) else None}
-        available = any(v["n_matches"] for v in metrics.values())
+                             "mean": float(values.mean()) if len(values) else None,
+                             "note": _note(len(values), min_matches)}
+        valid_counts = [v["n_matches"] for v in metrics.values() if v["n_matches"]]
+        available = bool(valid_counts)
+        # 300行存档但仅1场有分数，证据仍然只有1场。每项各报有效数，
+        # 组级提示按非空指标中最小的有效数，避免稀疏指标掩盖小样本。
         out.append({"group": group, "n_matches": n, "n_rows": len(part),
                     "status": "available" if available else "unavailable",
-                    "note": _note(n if available else 0, min_matches), "metrics": metrics})
+                    "note": _note(min(valid_counts) if available else 0, min_matches), "metrics": metrics})
     return out
 
 
@@ -194,9 +200,12 @@ def _tag_rows(df: pd.DataFrame, labels: Mapping | None) -> pd.DataFrame:
             label = (labels or {}).get(str(int(row["match_id"])))
         label = label if isinstance(label, Mapping) and "算不出" not in label else {}
         for tag in TAG_COLUMNS:
-            value = _scalar(label.get(tag))
+            raw = label.get(tag)
+            value = _scalar(raw)
             if tag == "德比" and tag in label:
-                value = bool(value)  # 没有德比名明确表示非德比；缺整条标签才是未知。
+                # attach_labels 明确写 None 代表非德比；NaN、无穷和“未知”
+                # 则是资料缺失，不能按非空文本推成德比或混入非德比组。
+                value = None if raw is not None and value in (None, UNKNOWN) else bool(value)
             elif value is not None and not isinstance(value, bool):
                 # 旧标签的 0/1 可读取，其他文本不能凭非空误当成 True。
                 value = bool(value) if value in (0, 1) else None
