@@ -119,6 +119,35 @@ def _close(left: float, right: float, atol: float) -> bool:
     return math.isfinite(left) and math.isfinite(right) and abs(left - right) <= atol
 
 
+def _check_term_conversion(terms: list[dict], raw_base: float, raw_end: float, atol: float) -> bool:
+    """逐项核对路径换算关系，防止两项一加一减后仍通过总和校验。
+
+    球数系数由保存的原始基准与终点确定。主胜路径积分不在页面重算，但同侧的每个
+    原始贡献必须乘同一个有限系数；用绝对值最大的原始贡献作参照，避免放大小数误差。
+    """
+    delta = raw_end - raw_base
+    goal_factor = math.exp(raw_base) * (math.expm1(delta) / delta if delta != 0 else 1.0)
+    if not math.isfinite(goal_factor):
+        return False
+    pivot = max(terms, key=lambda term: abs(term["raw_contribution"]))
+    pivot_phi, pivot_prob = pivot["raw_contribution"], pivot["home_win_contribution"]
+    # 即使全部贡献相消，非零项也不能靠无穷大的共同系数伪装成合法的路径积分。
+    if pivot_phi != 0 and not math.isfinite(pivot_prob / pivot_phi):
+        return False
+    for term in terms:
+        phi, goals, probability = term["raw_contribution"], term["goal_contribution"], term["home_win_contribution"]
+        if phi == 0:
+            # 生产计算为0乘有限系数，只会得到正零/负零；这里不能用容差接受非零贡献。
+            if goals != 0 or probability != 0:
+                return False
+            continue
+        # |phi / pivot_phi| <= 1；先乘这个比例比先除极小phi再乘回来更稳定。
+        expected_probability = pivot_prob * (phi / pivot_phi)
+        if not _close(goals, phi * goal_factor, atol) or not _close(probability, expected_probability, atol):
+            return False
+    return True
+
+
 def _check_available(payload: dict, row: dict, atol: float) -> bool:
     """核对结构、每一项和端点，独立重算加和；绝不重算模型或 SHAP。"""
     if payload.get("reason") is not None or payload.get("method") != "tree_shap_raw_log_lambda" \
@@ -167,7 +196,8 @@ def _check_available(payload: dict, row: dict, atol: float) -> bool:
         base, end = payload["base"][f"{side}_goals"], payload["prediction"][f"{side}_goals"]
         if not _close(raw_base + math.fsum(term["raw_contribution"] for term in own), raw_end, atol) \
                 or not _close(base + math.fsum(term["goal_contribution"] for term in own), end, atol) \
-                or not _close(math.exp(raw_base), base, atol) or not _close(math.exp(raw_end), end, atol):
+                or not _close(math.exp(raw_base), base, atol) or not _close(math.exp(raw_end), end, atol) \
+                or not _check_term_conversion(own, raw_base, raw_end, atol):
             return False
     if not _close(payload["base"]["home_win"] + math.fsum(term["home_win_contribution"] for term in terms),
                   payload["prediction"]["home_win"], atol):

@@ -153,6 +153,61 @@ def test_every_feature_has_exactly_one_home_and_one_away_term(change):
     assert validate_explanation(payload, archived_row())[0] is None
 
 
+@pytest.mark.parametrize("metric", ["goal_contribution", "home_win_contribution"])
+def test_cancelling_term_corruption_is_rejected_even_when_all_totals_match(metric):
+    payload = explanation()
+    payload["terms"][0][metric] += .2
+    payload["terms"][1][metric] -= .2
+    valid, reason = validate_explanation(payload, archived_row())
+    assert valid is None and "校验未通过" in reason
+
+
+def replace_home_terms(payload, phis, *, base=0.0, delta=None, slope=.3):
+    """构造零差、近零差和极小原始贡献；不导入待检算法，也不计算比赛模型。"""
+    delta = math.fsum(phis) if delta is None else delta
+    payload["raw_base"]["home"] = base
+    payload["raw_prediction"]["home"] = base + delta
+    payload["base"]["home_goals"] = math.exp(base)
+    payload["prediction"]["home_goals"] = math.exp(base + delta)
+    factor = math.exp(base) * (math.expm1(delta) / delta if delta else 1.0)
+    for term, phi in zip(payload["terms"][:4], phis):
+        term.update(raw_contribution=phi, goal_contribution=phi * factor, home_win_contribution=phi * slope)
+    payload["prediction"]["home_win"] = payload["base"]["home_win"] + math.fsum(
+        term["home_win_contribution"] for term in payload["terms"])
+    row = archived_row()
+    row["p_home"] = round(payload["prediction"]["home_win"], 4)
+    return row
+
+
+@pytest.mark.parametrize("phis,delta", [
+    ([.4, -.3, -.1, 0.0], 0.0), ([.4, -.3, -.1, 1e-10], 1e-10),
+    ([.4, -.3, -.1, -1e-10], -1e-10), ([1e-310, -2e-310, 1e-310, 0.0], 0.0),
+    ([0.0, 0.0, 0.0, 0.0], 0.0),
+])
+def test_term_checks_accept_zero_near_zero_and_subnormal_raw_changes(phis, delta):
+    payload = explanation()
+    row = replace_home_terms(payload, phis, base=math.log(2), delta=delta)
+    assert validate_explanation(payload, row)[0] is not None
+
+
+@pytest.mark.parametrize("metric", ["goal_contribution", "home_win_contribution"])
+def test_zero_raw_term_cannot_hide_nonzero_contribution_below_total_tolerance(metric):
+    payload = explanation()
+    row = replace_home_terms(payload, [0.0, .2, -.2, 0.0])
+    payload["terms"][0][metric] = 1e-8
+    payload["terms"][3][metric] = -1e-8
+    assert validate_explanation(payload, row)[0] is None
+
+
+def test_extremely_small_raw_terms_do_not_allow_large_cancelling_probability_contributions():
+    payload = explanation()
+    row = replace_home_terms(payload, [1e-310, -2e-310, 1e-310, 0.0])
+    payload["terms"][0]["home_win_contribution"] = .1
+    payload["terms"][1]["home_win_contribution"] = -.2
+    payload["terms"][2]["home_win_contribution"] = .1
+    assert validate_explanation(payload, row)[0] is None
+
+
 def test_prediction_probability_uses_only_the_archived_rounding_tolerance():
     row = archived_row()
     row["p_home"] = .44005
