@@ -543,6 +543,14 @@ def lifecycle_check(report: dict) -> Check:
     if all_complete and "closing_complete_count" not in counts:
         return unavailable
     level = "warn" if bad or warnings else "ok" if all_complete else "unknown"
+    if level == "ok":
+        # 绿色结论也必须通过逐场网页的同一消费合同，不能只有汇总数字看起来齐全。
+        from src.web.site.lifecycle_contract import report_problem
+
+        problem = report_problem(report)
+        if problem:
+            return Check("prediction_lifecycle", "逐场流程验收", "unknown",
+                         f"验收报告不可确认完整：{problem}。")
     if not counts["match_count"]:
         text = "当前范围没有可验收比赛；全周期未完成，不能从空样本得出通过结论。"
     else:
