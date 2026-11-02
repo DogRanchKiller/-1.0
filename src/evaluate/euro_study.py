@@ -33,7 +33,7 @@ from src.evaluate import metrics
 from src.evaluate.backtest import season_targets
 from src.evaluate.compare import block_ids, bootstrap_mean_diff, verdict
 from src.features import FeatureStore, LookAheadError, open_readonly
-from src.features.euro_matches import USAGE, fetch_euro, stage8_settings
+from src.features.euro_matches import USAGE, fetch_euro, season_memberships, stage8_settings
 from src.models.base import window_start
 from src.models.euro_strength import OUTSIDE, EuroStrength, dyn_team_table
 from src.models.registry import build_model
@@ -47,10 +47,10 @@ def _text(ts) -> str:
 
 
 def leg_kind(rnd, leg) -> str:
-    '''回合类型：小组赛 / 两回合（淘汰赛、资格赛的分回合） / 单场。'''
+    '''回合类型：小组赛 / 第1回合 / 第2回合 / 单场，按事先规则分别报告两回合。'''
     if str(rnd).startswith('G'):
         return '小组赛'
-    return '两回合' if int(leg) > 0 else '单场'
+    return f'第{int(leg)}回合' if int(leg) > 0 else '单场'
 
 
 def window_freq(es: EuroStrength, cutoff: str) -> np.ndarray:
@@ -78,6 +78,7 @@ def run(settings=None, db_path=None, last=None, first_eval=None) -> dict:
     t0 = time.perf_counter()
     fs = FeatureStore(open_readonly(db_path), '开发', s)
     end = f'{last + 1}-{md} 00:00:00'
+    memberships = season_memberships(fs, first_season - 1, last)
 
     # ---- 走之前：名单和答案（取数层一次取好；预测时不用） ----
     full, drop_report = fetch_euro(fs, end)
@@ -117,15 +118,24 @@ def run(settings=None, db_path=None, last=None, first_eval=None) -> dict:
         seen_l.update(int(m) for m in new['match_id'])
         since_l = _text(g - margin)
         dyn.fit(new, c)
-        table = dyn_team_table(dyn, leagues)
+        # 每步的评分固定，但球队所属组按欧战自身的赛季查，不能让上季降级队沿用旧联赛。
+        tables: dict = {}
+
+        def table_for(season):
+            season = int(season)
+            if season not in tables:
+                tables[season] = dyn_team_table(dyn, leagues, memberships, season)
+            return tables[season]
 
         raw, rep = fetch_euro(fs, c, USAGE, since=_text(g - back))
         if (raw['known_at_utc'] > c).any():
             raise LookAheadError(f'取数层返回了截止时间 {c} 之后才能知道的欧战比赛，研究停止')
         if not rep.empty:
             dups.append(rep)
-        es.add(raw, table)
-        es0.add(raw, table)
+        for season, part in raw.groupby('season'):
+            table = table_for(season)
+            es.add(part, table)
+            es0.add(part, table)
         es.fit(c)
         es0.fit(c)
         delta_log.append((c, es.deltas(), es.ready))
@@ -134,6 +144,7 @@ def run(settings=None, db_path=None, last=None, first_eval=None) -> dict:
         if grp is not None and es.ready and es0.ready:
             fq = window_freq(es, c)
             for r in grp.to_dict('records'):
+                table = table_for(r['season'])
                 h, a, nt = r['home_team'], r['away_team'], bool(r['neutral'])
                 p1 = es.result_probs(h, a, nt, table)
                 p0 = es0.result_probs(h, a, nt, table)

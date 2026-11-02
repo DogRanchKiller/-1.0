@@ -34,26 +34,24 @@ from src.models.goals import score_matrices, time_weights
 OUTSIDE = '联赛外'     # 不在五大联赛的球队（含次级联赛球队）一律算这一组
 
 
-def dyn_team_table(dyn, rating_leagues) -> dict:
+def dyn_team_table(dyn, rating_leagues, memberships: dict, season: int) -> dict:
     """dyn 现在的状态 → {球队: (联赛代码, a, d)}。只放 rating_leagues 里的联赛。
 
-    一个联赛的球队 = 这个赛季和上个赛季踢过的队（赛季刚开始、有的队还没踢第一场，也算在里面）。
-    联赛还没过 burn_in_seasons（dyn 头几个赛季只让估计稳定，不出预测）的，a、d 记 nan，add() 会跳过这样的比赛。
+    球队所属联赛以欧战自身的赛季和取数层赛程 memberships 为准；降级队不能因 dyn 仍存有上季状态就沿用旧组。
+    该季尚未踢首轮的球队也用 dyn 的赛前实力规则（升班马取初值），不需要等待首轮比分。
+    五大联赛球队的评分不可用、未过 burn_in_seasons 或窗口内比赛不够时，a、d 记 nan，add() 会跳过这样的比赛。
     调用前 dyn 要先 fit 过（fit 里会把平均值挪到 mu 上，a、d 才是“比联赛平均强多少”）。
     """
+    if season not in memberships:
+        raise ValueError(f"{season} 赛季没有联赛成员赛程，不能把未知球队当作联赛外")
     out: dict = {}
-    for comp in rating_leagues:
-        lg = dyn.leagues.get(comp)
-        if lg is None:
+    for team, comp in memberships[season].items():
+        if comp not in rating_leagues:
             continue
-        ready = lg.season - lg.first_season >= dyn.burn_in_seasons
-        prev = lg.members.get(lg.season - 1) or []
-        cur = lg.members.get(lg.season) or []
-        for team in dict.fromkeys([*prev, *cur]):
-            if team not in lg.idx:
-                continue
-            i, j = lg.pos(team)
-            out[team] = (comp, float(lg.m[i]), float(lg.m[j])) if ready else (comp, float('nan'), float('nan'))
+        lg = dyn.leagues.get(comp)
+        ready = lg is not None and lg.ready and season - lg.first_season >= dyn.burn_in_seasons
+        strength = dyn._strength(lg, season, team) if ready else None
+        out[team] = (comp, float(strength[0]), float(strength[1])) if strength is not None else (comp, float('nan'), float('nan'))
     return out
 
 

@@ -21,6 +21,7 @@ from src.clean.schema import create_tables
 from src.common.config import load_settings
 from src.evaluate.euro_study import leg_kind, main_compare, residual_rows, slope_boot
 from src.features import FeatureStore, SeasonLockedError, UsageNotAllowedError, open_readonly
+from src.features import euro_matches as EM
 from src.features.euro_matches import (dev_end_cutoff, drop_round_duplicates, fetch_euro, mark_neutral,
                                        prepare_euro, stage8_settings)
 from src.models.dynamic import DynamicModel
@@ -288,14 +289,15 @@ def league_history(seasons, n_teams=10, seed=3) -> pd.DataFrame:
 def test_dyn_team_table_needs_burn_in():
     m = DynamicModel(min_matches=50)
     m.fit(league_history((2018, 2019, 2020, 2021)), '2022-07-01 00:00:00')
-    t = dyn_team_table(m, ['E0'])
+    members = {2021: {f'T{i}': 'E0' for i in range(10)}}
+    t = dyn_team_table(m, ['E0'], members, 2021)
     assert len(t) == 10 and {v[0] for v in t.values()} == {'E0'}
     assert not np.isnan([v[1] for v in t.values()]).any()
     young = DynamicModel(min_matches=50)                               # 只有 1 个赛季：还在“让估计稳定”，不给数
     young.fit(league_history((2021,)), '2022-07-01 00:00:00')
-    t2 = dyn_team_table(young, ['E0'])
+    t2 = dyn_team_table(young, ['E0'], members, 2021)
     assert len(t2) == 10 and np.isnan([v[1] for v in t2.values()]).all()
-    assert dyn_team_table(m, ['SP1']) == {}
+    assert dyn_team_table(m, ['SP1'], members, 2021) == {}
 
 
 # ======================= 残差研究和比较 =======================
@@ -354,5 +356,41 @@ def test_main_compare_verdicts(settings):
 
 def test_leg_kind():
     assert leg_kind('G', 0) == '小组赛'
-    assert leg_kind('Q2', 1) == '两回合'
+    assert leg_kind('Q2', 1) == '第1回合'
+    assert leg_kind('Q2', 2) == '第2回合'
     assert leg_kind('F', 0) == '单场'
+
+
+def test_dyn_team_table_uses_euro_season_membership():
+    """新季首轮以前：降级队不能沿用上季联赛组；升班马和仍在联赛的队使用 dyn 的赛前规则。"""
+    m = DynamicModel(min_matches=50)
+    m.fit(league_history((2018, 2019, 2020, 2021)), '2022-07-01 00:00:00')
+    members = {2022: {**{f'T{i}': 'E0' for i in range(1, 10)}, 'Promoted': 'E0'}}
+    table = dyn_team_table(m, ['E0'], members, 2022)
+    assert 'T0' not in table  # 已降级，即使 dyn 还保存上一季的状态，也必须归到联赛外。
+    assert set(table) == set(members[2022])
+    for team in ('T1', 'Promoted'):
+        assert table[team][0] == 'E0'
+        assert table[team][1:] == pytest.approx(m._strength(m.leagues['E0'], 2022, team))
+    es = EuroStrength(['E0'])
+    assert es._lookup(table, 'T0') == (1, 0.0, 0.0)
+
+
+def test_known_top_league_without_rating_is_unavailable():
+    """明确属于五大联赛但 dyn 尚无该联赛评分，不能伪装成评分为零的联赛外队。"""
+    m = DynamicModel(min_matches=50)
+    table = dyn_team_table(m, ['E0'], {2022: {'A': 'E0'}}, 2022)
+    assert table['A'][0] == 'E0' and np.isnan(table['A'][1:]).all()
+
+
+def test_season_memberships_uses_schedule_without_results(db_path, settings):
+    """当季成员来自取数层赛程，未完赛也可识别；次级联赛球队不进五大联赛成员表。"""
+    con = sqlite3.connect(db_path)
+    con.executemany('insert into matches (match_id, competition, season, home_team, away_team, match_date,'
+                    ' kickoff_utc, status) values (?, ?, 2023, ?, ?, ?, ?, ?)', [
+        (20, 'E0', 'A', 'B', '2023-08-12', '2023-08-12 14:00', 'scheduled'),
+        (21, 'E1', 'C', 'X', '2023-08-12', '2023-08-12 14:00', 'scheduled')])
+    con.commit()
+    con.close()
+    fs = make_store(db_path, '开发', stage8_settings(settings))
+    assert EM.season_memberships(fs, 2023, 2023) == {2023: {'A': 'E0', 'B': 'E0'}}

@@ -43,6 +43,25 @@ def dev_end_cutoff(settings: dict) -> str:
     return f"{last + 1}-{settings['euro']['dev_end_month_day']} 00:00:00"
 
 
+def season_memberships(fs, first: int, last: int) -> dict[int, dict[str, str]]:
+    """从取数层的联赛赛程取当季成员，不用比赛状态、比分或 dyn 的上季成员。
+
+    赛程按数据字典是赛前信息；成员必须按欧战自身的 season 查，不能因为联赛尚未踢首轮就沿用上季。
+    只列五大联赛成员，其他球队按既定规则归“联赛外”；取数层仍会阻止开发模式读取考试赛季。
+    """
+    leagues = fs.settings["euro"]["rating_leagues"]
+    schedule = fs.prediction_targets(f"{first}-07-01", f"{last + 1}-07-01", USAGE, competition=leagues)
+    schedule = schedule[schedule["season"].between(first, last)]
+    out: dict[int, dict[str, str]] = {}
+    for season, comp, home, away in schedule[["season", "competition", "home_team", "away_team"]].itertuples(index=False, name=None):
+        members = out.setdefault(int(season), {})
+        for team in (home, away):
+            if team in members and members[team] != comp:
+                raise ValueError(f"{season} 赛季球队 {team} 同时出现在两个联赛，不能确定欧战所属组")
+            members[team] = comp
+    return out
+
+
 def mark_neutral(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """加一列 neutral（True = 中立场）。库里没有中立场标记，只能推断（规则第 2 条，推测，不是事实）：
     决赛（round = final_round、leg = 0）；以及 single_leg_season 赛季里 single_leg_competitions 的
