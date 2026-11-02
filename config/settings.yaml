@@ -579,9 +579,9 @@ review:
   output_dir: data/review        # 输出文件夹（data/ 不进 Git）：scores.csv、matches/<match_id>.json、reports/*.md，每次全部重算
   # 预测版本的显示顺序（信息从少到多）；表里出现别的 kind 也照样对账，排在最后
   kinds: [T-24, T-6, T-1, preview]
-  # 每场的“正式成绩”用哪一版（第 15 节：T-1 为准；还没有定时版本时用预览页最后一版）。按顺序取这场有的第一个
+  # 每个模型版本分别选择“正式成绩”（第 15 节：T-1 为准）；按顺序取该模型版本有的第一个，不合并不同模型版本
   official_order: [T-1, T-6, T-24, preview]
-  # 收盘赔率用哪家：按顺序，这场有胜平负收盘赔率的第一家（和第 5 节两个标杆同一套写法：平博 → 多家平均）
+  # 两家收盘标杆独立保留、分别比较；1x2 与大小2.5各用自己的同场交集，没有合格证据就留空
   close_bookmakers: [平博 Pinnacle, 多家平均]
   close_devig_method: proportional  # 收盘赔率去水方法（和 backtest.benchmark_devig_method 一样用按比例）
   # 存档里的概率是 4 位小数，三个加起来可能差 0.0001 左右；差得比这个多就当这一行坏了，不对账（摘要里记下）
