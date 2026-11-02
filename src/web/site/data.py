@@ -53,6 +53,7 @@ class SiteData:
     comp_names: dict[str, str] = field(default_factory=dict)
     page_ids: set[int] = field(default_factory=set)               # 要做单场页的比赛（见 load 第 4 步）
     levels: dict[int, int | None] = field(default_factory=dict)   # scores.csv 里每个 prediction_id 当时的信心等级
+    lifecycle: dict = field(default_factory=dict)                # 同一次生成的只读逐场周期证据
 
     def comp(self, code: str) -> str:
         return self.comp_names.get(code, code)
@@ -261,6 +262,7 @@ def quarantine_review_conflicts(con, data: SiteData) -> None:
 def load(con, settings: dict, now: datetime) -> SiteData:
     """读整站要的数据。con：数据库连接（建议只读打开）；now：现在（UTC，带时区）。"""
     from src.common.config import resolve_path
+    from src.review.lifecycle import build_report
 
     cfg = settings["site"]
     data = SiteData(now=now, settings=settings)
@@ -268,6 +270,7 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     for code, c in (settings.get("wikipedia", {}).get("competitions") or {}).items():
         names.setdefault(code, str(c.get("名称", code)).split("（")[0])
     data.comp_names = names
+    data.lifecycle = build_report(con, settings, now)
 
     # 1. 预测存档
     data.preds = read_predictions(con, list(cfg["versions"]))
@@ -330,6 +333,7 @@ def load(con, settings: dict, now: datetime) -> SiteData:
     # 4.1 只给人看的：中文队名、比赛状态（和预览页 add_display_info 一样直接读，不进模型）
     ids = list(data.matches)
     teams = {m[k] for m in data.matches.values() for k in ("home_team", "away_team")}
+    teams.update(m.get(k) for m in data.lifecycle.get("matches", []) for k in ("home_team", "away_team"))
     data.team_zh = {t: n for t, n in con.execute("select team_id, name_zh from teams") if n and t in teams}
     status = {}
     for k in range(0, len(ids), 500):

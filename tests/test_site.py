@@ -146,11 +146,11 @@ def test_build_makes_all_pages(env):
     write_review(env[2])
     out, summary = build(env)
     files = {p.relative_to(out).as_posix() for p in all_pages(out)}
-    assert {"index.html", "record.html", "match/1.html", "match/10.html", "match/11.html"} <= files
+    assert {"index.html", "record.html", "lifecycle.html", "match/1.html", "match/10.html", "match/11.html"} <= files
     assert "match/20.html" not in files                   # 杯赛只有赛程，不做单场页
     team_files = {f for f in files if f.startswith("team/")}
     assert team_files == {"team/Liverpool.html", "team/Arsenal.html", "team/Man_City.html", "team/A_B_C.html"}
-    assert summary["单场页"] == 3 and summary["球队页"] == 4 and summary["页面合计"] == 9
+    assert summary["单场页"] == 3 and summary["球队页"] == 4 and summary["页面合计"] == 10
     assert summary["有复盘数据"] is True and summary["有预测的比赛"] == 2
     assert not (out.parent / build_site.TMP_NAME).exists() and not (out.parent / build_site.OLD_NAME).exists()
 
@@ -165,8 +165,12 @@ def test_no_script_no_advice_words_and_links_work(env):
         assert re.fullmatch(r"[A-Za-z0-9._-]+", p.name), p.name    # 文件名都安全
         # 每个相对链接都要能点开（双击 index.html 打开也能用）
         for href in re.findall(r"href='([^']+)'", html):
-            target = (p.parent / unquote(href)).resolve()
+            path, _, anchor = unquote(href).partition("#")
+            target = (p.parent / path).resolve() if path else p
             assert target.exists(), f"{p.name} 里的链接 {href} 打不开"
+            if anchor:
+                linked_html = target.read_text(encoding="utf-8")
+                assert f"id='{anchor}'" in linked_html or f'id="{anchor}"' in linked_html
     assert "不是下注建议" in read(out, "index.html")
 
 

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ from src.common.config import load_settings, resolve_path
 from src.features import open_readonly
 from src.jobs.heartbeat import job_run
 from src.web.site import data as site_data
-from src.web.site import match, pages
+from src.web.site import lifecycle, match, pages
 from src.web.site.common import TeamFiles
 
 TMP_NAME, OLD_NAME = "site_tmp_build", "site_old"   # 临时文件夹、换下来的旧网站，和 data/site 放在同一层
@@ -68,7 +69,10 @@ def write_site(data: site_data.SiteData, folder: Path, final_dir: Path) -> dict:
         (folder / "team" / files.file(team)).write_text(pages.render_team(data, team, files), encoding="utf-8")
     (folder / "index.html").write_text(pages.render_index(data, files), encoding="utf-8")
     (folder / "record.html").write_text(pages.render_record(data, final_dir), encoding="utf-8")
-    return {"首页": 1, "单场页": len(data.page_ids), "球队页": len(teams), "战绩页": 1}
+    (folder / "lifecycle.html").write_text(lifecycle.render(data), encoding="utf-8")
+    (folder / "lifecycle.json").write_text(json.dumps(data.lifecycle, ensure_ascii=False, indent=2, allow_nan=False),
+                                          encoding="utf-8")
+    return {"首页": 1, "单场页": len(data.page_ids), "球队页": len(teams), "战绩页": 1, "逐场验收页": 1}
 
 
 def build(settings: dict | None = None, now: datetime | None = None, db_path: Path | str | None = None,
@@ -102,7 +106,7 @@ def main() -> dict:
         summary = build(s)
         run.summary.update(summary)
     out = resolve_path(s["site"]["output_dir"])
-    print(f"网站生成好了：首页 1 页、单场页 {summary['单场页']} 页、球队页 {summary['球队页']} 页、战绩页 1 页，"
+    print(f"网站生成好了：首页 1 页、单场页 {summary['单场页']} 页、球队页 {summary['球队页']} 页、战绩页 1 页、逐场验收页 1 页，"
           f"共 {summary['页面合计']} 页。")
     print(f"有预测的比赛 {summary['有预测的比赛']} 场；复盘数据：{'有' if summary['有复盘数据'] else '还没有'}。")
     if summary["提示"]:

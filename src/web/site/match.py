@@ -459,6 +459,8 @@ def key_points(row: dict) -> list[str]:
 
 def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
     """单场页的整页 HTML。页面在 match/ 文件夹里，回到网站根目录要 "../"。"""
+    from src.web.site.lifecycle import match_reference
+
     info = data.matches[mid]
     pre = "../"
     home, away = info["home_team"], info["away_team"]
@@ -485,6 +487,7 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))
     body = "".join([
         head, summary, f"<div class='note'>{NOT_ADVICE}</div>",
+        match_reference(data, mid),
         details("模型依据（逐场贡献解释）", explanations_html(data, mid), open_=True),
         details("各版本对比（开球前 24 / 6 / 1 小时、预览版）", versions_html(data, mid)),
         details("比分概率和各玩法（亚盘、大小球、双方进球）", scores_html(data, mid)),

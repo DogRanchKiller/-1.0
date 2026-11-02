@@ -125,7 +125,7 @@ def page(title: str, body: str, prefix: str, now: datetime, refresh_minutes: int
     定时任务也是每 15 分钟重新生成一次，所以开着的页面会跟着变。
     """
     nav = (f"<nav class='top'><span class='brand'>足球预测</span><a href='{e(prefix)}index.html'>即将开赛</a>"
-           f"<a href='{e(prefix)}record.html'>战绩</a></nav>")
+           f"<a href='{e(prefix)}record.html'>战绩</a><a href='{e(prefix)}lifecycle.html'>逐场验收</a></nav>")
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 {VIEWPORT}
 <meta http-equiv="refresh" content="{int(refresh_minutes) * 60}">
