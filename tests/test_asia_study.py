@@ -168,7 +168,7 @@ def test_second_study_end_to_end(settings, tmp_path):
     报告、csv 都写出来。"""
     s = second_settings(settings, tmp_path)
     s["compare"] = dict(s["compare"], n_boot=500)
-    make_second_runs(s, tmp_path)
+    _, top_pred = make_second_runs(s, tmp_path)
     seasons, totals, out = a.run(s, "second_study")
     groups = list(s["leagues"]["second"]) + ["次级联赛合计"]
     assert set(totals["league"]) == set(groups) and set(totals["model"]) == set(MODELS)
@@ -180,21 +180,26 @@ def test_second_study_end_to_end(settings, tmp_path):
     others = gaps[gaps["group"].isin(["SP2", "D2", "I2", "F2"])]
     assert (others["verdict"] == a.GAP_SAME).all()
     assert (gaps["reference"] == "五大联赛").all()
+    # 参照组只算两边都有平博收盘的比赛：造的 2 场没有平博收盘的不算
+    assert (gaps["ref_n"] == top_pred["match_id"].nunique() - 2).all()
     same = pd.read_csv(out.with_name(out.stem + "_同国顶级联赛.csv"), encoding="utf-8-sig")
     assert dict(zip(same["group"], same["reference"])) == s["second_study"]["gap_reference"]["same_country"]
     eras = pd.read_csv(out.with_name(out.stem + "_前后两段.csv"), encoding="utf-8-sig")
     assert set(eras["era"]) == {"前", "后"} and "五大联赛" in set(eras["group"])
     text = out.read_text(encoding="utf-8")
     assert "次级联赛开发回测" in text and "比五大联赛差得多还是少" in text and "英冠" in text and "一样" in text
+    era_lines = [l for l in text.splitlines() if l.startswith("| 五大联赛 | gb_l7 |")]
+    assert [l.split(" | ")[2] for l in era_lines] == ["前", "后"]   # 前后两段表：先“前”再“后”
     assert "推荐" not in text and "下注" not in text
 
 
-def test_reproduce_mismatch_stops(settings, tmp_path):
+@pytest.mark.parametrize("key, change", [("n", 1), ("model", 0.001)])
+def test_reproduce_mismatch_stops(settings, tmp_path, key, change):
     """五大联赛重跑和第 4 节的数对不上（场数或分数），直接报错，不往下出报告。"""
     s = second_settings(settings, tmp_path)
     s["compare"] = dict(s["compare"], n_boot=50)
     make_second_runs(s, tmp_path)
-    s["second_study"]["five_league_reference"]["gb_l7"]["n"] += 1
+    s["second_study"]["five_league_reference"]["gb_l7"][key] += change
     with pytest.raises(ValueError, match="不一样"):
         a.run(s, "second_study")
     assert not (tmp_path / "reports" / "次级.md").exists()

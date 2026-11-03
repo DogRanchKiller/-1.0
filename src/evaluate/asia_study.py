@@ -280,10 +280,11 @@ def report(seasons: pd.DataFrame, totals: pd.DataFrame, cfg: dict, league_names:
         split = cfg["era_split"]
         out += [f"## 只看看：{split} 赛季以前 / 以后（次级联赛 {split}/{(split + 1) % 100:02d} 起才有射门数据）", ""]
         head = ["组", "模型", "段", "赛季", "场数", "模型 log loss", "平博", "差"]
-        e = extra["eras"].assign(_o=extra["eras"]["group"].map(order).fillna(len(order)))
+        e = extra["eras"].assign(_o=extra["eras"]["group"].map(order).fillna(len(order)),
+                                 _e=extra["eras"]["era"].map({"前": 0, "后": 1}))   # “前”在“后”前面（按汉字编码排会反过来）
         rows = [[name(r["group"]), r["model"], r["era"], r["seasons"], str(int(r["n"])), _f(r["log_loss_model"]),
                  _f(r["log_loss_bench"]), _f(r["log_loss_diff"], sign=True)]
-                for _, r in e.sort_values(["_o", "group", "model", "era"], ascending=[True, True, True, False]).iterrows()]
+                for _, r in e.sort_values(["_o", "group", "model", "_e"]).iterrows()]
         out += [md_table(head, rows), ""]
     out += ["## 分赛季（log loss、Brier、命中率；只看看）", ""]
     head = ["联赛", "模型", "赛季", "场数", "模型 log loss", "平博", "差", "Brier 差", "命中率差", "备注"]
