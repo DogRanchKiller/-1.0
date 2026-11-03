@@ -549,7 +549,7 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
 
     info = data.matches[mid]
     home, away = data.zh(info["home_team"]), data.zh(info["away_team"])
-    ps = pk.match_picks(row, data.settings)
+    ps, mine = pk.match_picks(row, data.settings), pk.model_picks(row, data.settings)
     score = data.results.get(mid)
     got = pk.before_kickoff(data, mid) if score else None
     # 踢完了但这一版不算进战绩页的命中率：开球时间读不出来，或这一版开球以后才出（理论上不该有）
@@ -561,14 +561,18 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
         late = "这一版是开球以后才出的，不算进战绩页的命中率。"
     rows = []
     for k in pk.MARKETS:
+        q = mine[k]
+        own = ("—" if q is None else f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>{pct0(q['p'])}</span>"
+               + (f" {pk.outcome_html(pk.settle(k, q, score))}" if score else ""))
         rows.append([e(pk.MARKET_NAMES[k]), f"<b>{e(pk.pick_text(k, ps[k], home, away))}</b>", pk.prob_html(k, ps[k]),
-                     pk.outcome_html(pk.settle(k, ps[k], score)) if score else "<span class='muted'>还没踢</span>"])
+                     pk.outcome_html(pk.settle(k, ps[k], score)) if score else "<span class='muted'>还没踢</span>", own])
     note = ("<p class='small muted'>每个玩法写最可能的那一边，踢完记中没中，汇总在<a href='../record.html'>战绩页</a>。"
             "让球：-0.5 = 要赢 1 球以上才算中，+0.5 = 不输就算中；四分之一球会有赢半、输半，整数球打平会走盘。"
-            "比分写 121 个比分里可能性最大的 4 个，实际比分是其中一个就算中；4 个合起来一般也只有四成左右，里面常常有平局的比分，和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。</p>")
+            "比分写 121 个比分里可能性最大的 4 个，实际比分是其中一个就算中；4 个合起来一般也只有四成左右，里面常常有平局的比分，和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。"
+            "“模型自己”是只用我们自己的模型、不看赔率时的预测（有赔率时前面的预测用赔率算出来的概率，历史上赔率更准；这一版没用上赔率时两列一样），两列不一样时可以对比着看。</p>")
     if late:
         note = f"<p class='note'>{late}</p>" + note
-    return table(["玩法", "预测", "可能性", "结果"], rows, "picks") + note
+    return table(["玩法", "预测", "可能性", "结果", "模型自己"], rows, "picks") + note
 
 
 def tech_line(row: dict) -> str:
