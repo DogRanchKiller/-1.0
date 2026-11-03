@@ -53,7 +53,12 @@ def latest_cell(data: SiteData, mid: int) -> str:
 # ---------- 首页 ----------
 # 首页表格上面的“怎么看”：颜色条、概率、倾向、信心各是什么意思
 def index_guide(settings: dict) -> str:
-    """首页表格上面的“怎么看”。信心那一条按 settings.yaml 的 confidence 写：现在一个降级因素都不用时，说明几乎都是 ●●● 高。"""
+    """首页表格上面的“怎么看”。信心那一条按 settings.yaml 的 confidence 写：现在一个降级因素都不用时，说明几乎都是 ●●● 高。
+    概率那一条按 settings.yaml 的 fusion.w 写：w = 1 时三个数全部来自赔率，模型只作对照（不然读的人会以为是模型算的）。"""
+    w = (settings.get("fusion") or {}).get("w")
+    source = ("现在这三个数全部来自博彩公司的赔率（去掉抽水后平均），因为回测里赔率比我们的模型准；"
+              "模型自己算的概率在单场页里作对照。没有赔率的比赛才用模型的，会标“只有模型”。"
+              if w is not None and float(w) == 1.0 else "")
     conf = settings.get("confidence") or {}
     if conf.get("downgrade_factors"):
         level = "按规则碰上提醒因素会降级，规则在单场页“结论是怎么得出来的”最后一步。"
@@ -62,7 +67,8 @@ def index_guide(settings: dict) -> str:
                  "只有完全没有赔率时才降级，所以它暂时不能拿来挑比赛。")
     return ("<div class='card pad guide'><b>怎么看这张表</b><ul class='points small'>"
             "<li>彩色条：<span class='legend'><span><i class='s0'></i>主队赢</span><span><i class='s1'></i>平局</span>"
-            "<span><i class='s2'></i>客队赢</span></span>，越长越可能。下面三个数就是三种结果的可能性，加起来 100%。</li>"
+            "<span><i class='s2'></i>客队赢</span></span>，越长越可能。下面三个数就是三种结果的可能性，加起来 100%。"
+            f"{e(source)}</li>"
             "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
             f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>"
             "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")

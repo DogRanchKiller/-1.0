@@ -8,6 +8,7 @@ import re
 from src.web.site import story
 from src.web.site.common import TeamFiles, bar_html
 from src.web.site.match import render as render_match
+from src.web.site.pages import index_guide
 from tests.test_explanation_pages import site_data
 from tests.test_site import build, env, plain, read, write_review  # noqa: F401  （env 是 pytest 的 fixture）
 
@@ -104,6 +105,13 @@ def test_index_cell_is_short_and_record_starts_with_plain_summary(env):
     assert "四个玩法的命中率" in record and "对照：一直猜主胜" in record
     assert record.index("四个玩法的命中率") < record.index("详细统计表")
 
+
+
+def test_index_guide_says_where_probabilities_come_from():
+    conf = {"downgrade_factors": [], "no_odds_downgrade": 1}
+    text = plain(index_guide({"fusion": {"w": 1.0}, "confidence": conf}))
+    assert "全部来自博彩公司的赔率" in text and "几乎每场都是 ●●● 高" in text
+    assert "全部来自" not in plain(index_guide({"fusion": {"w": 0.7}, "confidence": conf}))   # 模型也占一部分时不能这么写
 
 
 def one_row():
