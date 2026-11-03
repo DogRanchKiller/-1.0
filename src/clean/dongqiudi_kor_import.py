@@ -269,6 +269,28 @@ def build_odds(games: list[Game], raw: Path, settings: dict, report: dict) -> li
 
 
 # ---------- 写数据库 ----------
+def check_nothing_lost(con: sqlite3.Connection, source: str, games: list[Game], odds: list[tuple]) -> None:
+    """写入前先核对：数据库里已有的韩K 赛季、已有赔率的比赛，这次都还在。
+
+    写入是“先删掉这个来源的全部行再重写”。要是原始层少了某一季的赛季页（比如从工作树复制文件时漏了），
+    或者少了某场的赔率文件，重写以后那一季 / 那场的赔率就悄悄没了。所以发现少了就报错，一行都不动。
+    """
+    old_seasons = {y for (y,) in con.execute(
+        "select distinct m.season from matches m join match_sources s on s.match_id = m.match_id "
+        "where s.source = ?", (source,))}
+    lost_seasons = sorted(old_seasons - {g.season for g in games})
+    if lost_seasons:
+        raise ValueError(f"数据库里有这些赛季的韩K 比赛，这次原始层里没有（缺赛季页？）：{lost_seasons}。"
+                         "不导入（不然会删掉这几季）")
+    old_odds = {k for (k,) in con.execute(
+        "select distinct s.source_key from odds o join match_sources s "
+        "on s.match_id = o.match_id and s.source = o.source where o.source = ?", (source,))}
+    lost_odds = sorted(old_odds - {str(r[0]) for r in odds})
+    if lost_odds:
+        raise ValueError(f"这些比赛数据库里有赔率，这次没有了（缺赔率文件？）：{len(lost_odds)} 场，"
+                         f"懂球帝编号 {lost_odds[:10]}…。不导入（不然会删掉这些赔率）")
+
+
 def write_db(con: sqlite3.Connection, cfg: dict, games: list[Game], name_rows: list[tuple], odds: list[tuple]) -> int:
     """在一个事务里写入：中途出错就全部不算。只动来源 dongqiudi-kor 的行。返回这个来源的比赛数。"""
     source, league, country = cfg["db_source"], cfg["league"], cfg["country"]
@@ -280,6 +302,7 @@ def write_db(con: sqlite3.Connection, cfg: dict, games: list[Game], name_rows: l
                             (*used, country)).fetchall()
         if other:
             raise ValueError(f"这些球队编号数据库里已经有了，国家不是{country}（不合并）：{other}")
+    check_nothing_lost(con, source, games, odds)
     with con:
         con.executemany("insert into teams (team_id, name_zh, country) values (?, ?, ?) "
                         "on conflict(team_id) do update set name_zh = excluded.name_zh, country = excluded.country",

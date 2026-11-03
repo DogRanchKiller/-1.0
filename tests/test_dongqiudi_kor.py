@@ -293,6 +293,24 @@ def test_import_rerun_identical_and_other_sources_untouched(settings, ienv):
     assert con.execute("select team_id from team_names where source = 'dongqiudi'").fetchall() == [("Arsenal",)]
 
 
+def test_import_missing_season_or_odds_file_stops_and_keeps_db(settings, ienv):
+    """导过一次以后，原始层少了一季的赛季页、或者少了一场的赔率文件：报错，数据库一行都不动。"""
+    con, raw = ienv
+    imp.run(con, settings, raw)
+    before = imp.content_digest(con, kor_cfg(settings))
+    season_2021 = raw / "dongqiudi" / "season" / "KOR" / "2021.html.gz"
+    keep = season_2021.read_bytes()
+    season_2021.unlink()
+    with pytest.raises(ValueError, match=r"缺赛季页.*\[2021\]|\[2021\].*缺赛季页"):
+        imp.run(con, settings, raw)
+    assert imp.content_digest(con, kor_cfg(settings)) == before
+    season_2021.write_bytes(keep)
+    (raw / "dongqiudi" / "odds_final" / "KOR" / "2022" / "101.json.gz").unlink()
+    with pytest.raises(ValueError, match="缺赔率文件"):
+        imp.run(con, settings, raw)
+    assert imp.content_digest(con, kor_cfg(settings)) == before
+
+
 def test_import_unknown_round_name_stops(settings, tmp_path):
     bad = copy.deepcopy(S2022)
     bad[-1] = ("季后赛", bad[-1][1])
