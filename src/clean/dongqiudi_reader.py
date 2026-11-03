@@ -47,6 +47,8 @@ GAME_RE = re.compile(
     r'<span class="d">(\d\d)-(\d\d)</span><a href="/zhanbao/(\d+)">\s*(.*?)\s*<b>\s*(\d+)\s*-\s*(\d+)\s*</b>\s*(.*?)\s*(?:<!---->)*</a>')
 # 历届赛季页里的赛季链接，例如 <a href="/zhanbao/saiji/21198">2023/24</a>
 SEASON_LINK_RE = re.compile(r'<a href="/zhanbao/saiji/(\d+)">(\d{4})/(\d{2})</a>')
+# 一年一个赛季的联赛（韩K）的赛季链接，例如 <a href="/zhanbao/saiji/20741">2023</a>
+YEAR_LINK_RE = re.compile(r'<a href="/zhanbao/saiji/(\d+)">(\d{4})</a>')
 TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -65,9 +67,19 @@ def read_json(path: Path):
 
 
 # ---------- 历届赛季页、赛季页 ----------
-def parse_history(html: str) -> dict[int, int]:
-    """历届赛季页 → {赛季开始年份: 懂球帝赛季编号}，例如 {2023: 21198}。进行中的赛季不在里面。"""
+def parse_history(html: str, calendar_year: bool = False) -> dict[int, int]:
+    """历届赛季页 → {赛季开始年份: 懂球帝赛季编号}，例如 {2023: 21198}。进行中的赛季不在里面。
+
+    calendar_year=False（五大联赛）：只认“2023/24”这样跨两年的写法。
+    calendar_year=True（韩K 这样一年一个赛季的联赛，第 11 阶段）：只认“2023”这样只写一个年份的；
+    韩K 的历届赛季页把进行中的赛季（2026）也列出来了，用的时候要自己看是不是已经踢完。
+    两种写法分开认：一个联赛只用其中一种，免得两种写法混在一起时把同一年当成两个赛季。
+    """
     out = {}
+    if calendar_year:
+        for sid, y in YEAR_LINK_RE.findall(html):
+            out[int(y)] = int(sid)
+        return out
     for sid, y1, y2 in SEASON_LINK_RE.findall(html):
         y1 = int(y1)
         if (y1 + 1) % 100 == int(y2):  # 只认“2023/24”这样跨两年的写法
@@ -105,6 +117,78 @@ def parse_season_page(html: str) -> list[SeasonGame]:
 def count_game_rows(html: str) -> int:
     """页面里一共有几行比赛（不管有没有比分），用来检查 parse_season_page 有没有漏读。"""
     return html.count('<span class="d">')
+
+
+# ---------- 赛季页里的页面数据（第 11 阶段韩K 用） ----------
+SCORE_RE = re.compile(r"\s*(\d+)\s*-\s*(\d+)\s*")
+KICKOFF_RE = re.compile(r"(\d{4})-(\d\d)-(\d\d)(?: (\d\d):(\d\d))?")
+
+
+@dataclass
+class StateGame:
+    """赛季页数据里的一场比赛（比 SeasonGame 多了年份、开球时刻、球队编号、轮次名字）。"""
+    match_id: int              # 懂球帝的比赛编号
+    round_no: int              # 赛季页里第几个轮次（1 起，按页面顺序；分组以后接着往下数）
+    round_name: str            # 轮次名字，例如“联赛 第1轮”“争冠组 第5轮”“升降级附加赛”
+    kickoff_bj: datetime | None   # 北京时间的开球时刻（带时区）；只有日期时是 None
+    day_bj: str                # 北京时间的日期 YYYY-MM-DD
+    home: str                  # 中文队名
+    home_id: str               # 懂球帝球队编号（没有时是空字符串）
+    away: str
+    away_id: str
+    home_goals: int | None     # 没有比分时是 None
+    away_goals: int | None
+    status: str                # Played 踢完 / 其他
+
+
+def parse_season_state(html: str) -> tuple[dict, list[StateGame]] | None:
+    """赛季页里 window.__INITIAL_STATE__ 的赛季数据 → (赛季信息, 全部比赛)。页面里没有这段数据返回 None。
+
+    数据在 zhanbaoStore.pages 里（只有一页）：season = {sid, name: "2023", cur: 是否进行中, ...}，
+    rounds = [{name: "联赛 第1轮", lc: "/zhanbao/lunci/20741-1", m: [{id, t: "2023-02-25 13:00", a, aid, b, bid, s: "2-1",
+    ps, st: "Played"}]}]。t 是北京时间（轮次页上写着“北京时间”，2026-11-03 核对过 2023 第 1 轮）。
+    """
+    state = initial_state(html)
+    pages = (((state or {}).get("zhanbaoStore") or {}).get("pages")) or {}
+    page = next((p for p in pages.values() if isinstance(p, dict) and isinstance(p.get("rounds"), list)), None)
+    if page is None:
+        return None
+    games = []
+    for no, rd in enumerate(page["rounds"], start=1):
+        for g in rd.get("m") or []:
+            m = KICKOFF_RE.fullmatch(str(g.get("t") or "").strip())
+            if not m:
+                raise ValueError(f"认不出比赛时间 {g.get('t')!r}（比赛 {g.get('id')}）")
+            y, mo, d, hh, mm = m.groups()
+            ko = datetime(int(y), int(mo), int(d), int(hh), int(mm), tzinfo=BEIJING) if hh is not None else None
+            sc = SCORE_RE.fullmatch(str(g.get("s") or ""))
+            games.append(StateGame(
+                int(g["id"]), no, str(rd.get("name") or "").strip(), ko, f"{y}-{mo}-{d}",
+                str(g.get("a") or "").strip(), str(g.get("aid") or ""), str(g.get("b") or "").strip(),
+                str(g.get("bid") or ""), int(sc.group(1)) if sc else None, int(sc.group(2)) if sc else None,
+                str(g.get("st") or "")))
+    return dict(page.get("season") or {}), games
+
+
+ROUND_NO_RE = re.compile(r"(.+?) 第\d+轮")
+
+
+def round_kind(name: str, league_prefixes: list[str], non_league: list[str]) -> str:
+    """轮次名字 → 'league'（联赛比赛）/ 'other'（附加赛、淘汰赛等，不导入）。认不出就报错（不猜）。
+
+    league_prefixes：联赛比赛的轮次名字是“<这些前缀之一> 第N轮”，例如“联赛 第1轮”“争冠组 第5轮”
+      （分组以后的争冠组、保级组，2017 以前叫冠军附加、降级附加，也是联赛比赛）。
+      不能只看“第N轮”：2010 年的季后赛有一轮叫“附加赛 第2轮”，是淘汰赛。
+    non_league：settings 里列出的非联赛名字（“升降级附加赛”“半决赛”等）。
+    """
+    name = name.strip()
+    if name in non_league:
+        return "other"
+    m = ROUND_NO_RE.fullmatch(name)
+    if m and m.group(1) in league_prefixes:
+        return "league"
+    raise ValueError(f"认不出的轮次名字“{name}”：是联赛比赛还是附加赛？查清楚后加进 settings 的 "
+                     f"league_round_prefixes 或 non_league_rounds")
 
 
 # ---------- 赔率 ----------

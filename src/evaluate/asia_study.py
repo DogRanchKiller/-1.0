@@ -8,6 +8,10 @@
     min_total_n：一个联赛合计少于这么多场，只列数、不下结论；
     gap_reference：和另一组联赛（五大联赛）比“差距之差”，同一周一起抽的 bootstrap（见 bootstrap_gap）；
     era_split：按这个赛季分前后两段只看看（次级联赛 2017/18 起才有射门数据）。
+  kor_study：韩K（工作树 KR）。也是同一种写法，多几项可选的（别的段没写就和原来一样）：
+    bench_label：报告表头里标杆叫什么（不写是“平博”；韩K 主标杆是多家平均，写“多家平均”）；
+    look_benchmarks：只看看的另一个标杆（例如平博收盘），合计照算区间，但结论一律写“只看看”；
+    side_by_side：别的联赛已经写下的数（日职、中超、五大联赛），只并排放，不算差距之差。
 
 这个程序不重新预测，只读已经跑好的回测结果（data/backtest/<名字>/predictions.csv）：
   回测本身用 src.evaluate.backtest 跑（经过取数层、开发模式，碰不到 2024、2025 考试赛季）。
@@ -39,6 +43,7 @@ from src.evaluate.compare import block_ids, bootstrap_mean_diff, verdict
 NAMES = {"log_loss": "log loss", "brier": "Brier", "hit": "命中率"}
 BENCH_NAMES = {"pinnacle_close", "market_avg"}   # 回测结果里这两个“模型”其实是标杆
 SMALL = "样本少，不下结论"
+LOOK = "只看看"
 GAP_MORE, GAP_SAME, GAP_LESS = "差得更多", "看不出大小", "差得更少"
 
 
@@ -69,12 +74,13 @@ def model_verdict(metric: str, lo: float, hi: float) -> str:
 
 
 def league_tables(pred: pd.DataFrame, league: str, cfg: dict, cmp_cfg: dict,
-                  codes: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+                  codes: list[str] | None = None, look_only: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     '''一个联赛：分赛季的表、合计的表（合计带 bootstrap 区间和结论）。
 
     league：表里写的名字（联赛代码，或者合在一起的组名，例如“次级联赛合计”）；
     codes：这一组包括哪几个联赛代码，不写就是 [league]。
     合计少于 cfg 的 min_total_n 场（写了才查）：区间照算，结论写“样本少，不下结论”。
+    look_only：只看看的标杆（kor_study 的 look_benchmarks），区间照算，结论一律写“只看看”。
     '''
     metrics = cfg["metrics"]
     bench = cfg["benchmark"]
@@ -95,7 +101,10 @@ def league_tables(pred: pd.DataFrame, league: str, cfg: dict, cmp_cfg: dict,
             d = p[f"{m}_model"] - p[f"{m}_bench"]
             _, lo, hi = bootstrap_mean_diff(d, blocks, cmp_cfg["n_boot"], cmp_cfg["confidence"], cmp_cfg["seed"])
             row[f"{m}_lo"], row[f"{m}_hi"] = lo, hi
-            row[f"{m}_verdict"] = model_verdict(m, lo, hi) if min_total is None or len(p) >= min_total else SMALL
+            if look_only:
+                row[f"{m}_verdict"] = LOOK
+            else:
+                row[f"{m}_verdict"] = model_verdict(m, lo, hi) if min_total is None or len(p) >= min_total else SMALL
         total_rows.append(row)
     return pd.DataFrame(season_rows), pd.DataFrame(total_rows)
 
@@ -238,12 +247,13 @@ def report(seasons: pd.DataFrame, totals: pd.DataFrame, cfg: dict, league_names:
     extra = extra or {}
     order = {g: i for i, g in enumerate(group_order(cfg))}
     name = lambda g: league_names.get(g, g)   # noqa: E731（联赛代码 → 中文名，合计组本来就是中文）
+    bl = cfg.get("bench_label", "平博")       # 标杆在表头里的名字（kor_study 是“多家平均”）
     out = [f"# {cfg.get('title', '日职、中超开发回测：模型和平博收盘比')}", "",
-           f"时点 {cfg['horizon']}；只比模型和平博收盘去水概率都有的比赛。差 = 模型 − 平博：",
+           f"时点 {cfg['horizon']}；只比模型和{bl}收盘去水概率都有的比赛。差 = 模型 − {bl}：",
            "log loss、Brier 差 > 0 是模型更差；命中率差 < 0 是模型更差。区间是按周成块 bootstrap 的 95% 区间。", ""]
     out += ["## 合计", ""]
-    head = ["联赛", "模型", "赛季", "场数", "模型 log loss", "平博", "差", "95% 区间", "结论",
-            "模型 Brier", "平博", "差", "模型命中率", "平博", "差"]
+    head = ["联赛", "模型", "赛季", "场数", "模型 log loss", bl, "差", "95% 区间", "结论",
+            "模型 Brier", bl, "差", "模型命中率", bl, "差"]
     rows = []
     t_sorted = totals.assign(_o=totals["league"].map(order)).sort_values(["_o", "log_loss_diff"])
     for _, r in t_sorted.iterrows():
@@ -253,6 +263,16 @@ def report(seasons: pd.DataFrame, totals: pd.DataFrame, cfg: dict, league_names:
                      _f(r["brier_model"]), _f(r["brier_bench"]), _f(r["brier_diff"], sign=True),
                      _f(r["hit_model"], 3), _f(r["hit_bench"], 3), _f(r["hit_diff"], 3, sign=True)])
     out += [md_table(head, rows), ""]
+    for label, look in extra.get("look", []):
+        out += [f"## 只看看：和{label}收盘比（只算两边都有的比赛，不下结论）", ""]
+        rows = [[name(r["league"]), r["model"], r["seasons"], str(int(r["n"])), _f(r["log_loss_model"]),
+                 _f(r["log_loss_bench"]), _f(r["log_loss_diff"], sign=True),
+                 f"{_f(r['log_loss_lo'], sign=True)} 到 {_f(r['log_loss_hi'], sign=True)}"]
+                for _, r in look.iterrows()]
+        out += [md_table(["联赛", "模型", "赛季", "场数", "模型 log loss", label, "差", "95% 区间"], rows)
+                if rows else "（没有两边都有的比赛）", ""]
+    if cfg.get("side_by_side"):
+        out += [side_by_side_md(cfg, totals, name), ""]
     if "reproduce" in extra:
         out += ["## 五大联赛重跑核对（和第 4 节步骤 6 的数比）", "", extra["reproduce"], ""]
     if "gaps" in extra and not extra["gaps"].empty:
@@ -287,7 +307,7 @@ def report(seasons: pd.DataFrame, totals: pd.DataFrame, cfg: dict, league_names:
                 for _, r in e.sort_values(["_o", "group", "model", "_e"]).iterrows()]
         out += [md_table(head, rows), ""]
     out += ["## 分赛季（log loss、Brier、命中率；只看看）", ""]
-    head = ["联赛", "模型", "赛季", "场数", "模型 log loss", "平博", "差", "Brier 差", "命中率差", "备注"]
+    head = ["联赛", "模型", "赛季", "场数", "模型 log loss", bl, "差", "Brier 差", "命中率差", "备注"]
     rows = []
     s_sorted = seasons.assign(_o=seasons["league"].map(order)).sort_values(["_o", "model", "season"])
     for _, r in s_sorted.iterrows():
@@ -297,6 +317,24 @@ def report(seasons: pd.DataFrame, totals: pd.DataFrame, cfg: dict, league_names:
                      _f(r["brier_diff"], sign=True), _f(r["hit_diff"], 3, sign=True), note])
     out += [md_table(head, rows), ""]
     return "\n".join(out)
+
+
+def side_by_side_md(cfg: dict, totals: pd.DataFrame, name) -> str:
+    '''和别的联赛并排（只看看）：这次算的合计 + settings 里 side_by_side 写下的别的联赛的数（标杆可能不一样，表里写明）。'''
+    bl = cfg.get("bench_label", "平博")
+    head = ["联赛", "模型", "标杆", "场数", "模型 log loss", "标杆 log loss", "差", "95% 区间", "数从哪来"]
+    rows = []
+    for _, r in totals.iterrows():
+        rows.append([name(r["league"]), r["model"], f"{bl}收盘", str(int(r["n"])), _f(r["log_loss_model"]),
+                     _f(r["log_loss_bench"]), _f(r["log_loss_diff"], sign=True),
+                     f"{_f(r['log_loss_lo'], sign=True)} 到 {_f(r['log_loss_hi'], sign=True)}", "这次"])
+    for v in cfg["side_by_side"]:
+        ci = f"{_f(v['lo'], sign=True)} 到 {_f(v['hi'], sign=True)}" if v.get("lo") is not None else ""
+        rows.append([v["league"], v["model"], v["bench"], f"{int(v['n']):,}", _f(v["model_ll"]), _f(v["bench_ll"]),
+                     _f(v["model_ll"] - v["bench_ll"], sign=True), ci, v["source"]])
+    return "\n".join(["## 只看看：和日职、中超、五大联赛并排（log loss，差 = 模型 − 标杆）", "",
+                      "别的联赛的标杆是平博收盘，这里是" + bl + "收盘，口径不一样：只并排看，不算差距之差。", "",
+                      md_table(head, rows)])
 
 
 def gap_md(g: pd.DataFrame, name) -> str:
@@ -351,6 +389,14 @@ def run(settings: dict | None = None, section: str = "asia_study") -> tuple[pd.D
         totals.append(b)
     seasons, totals = pd.concat(seasons, ignore_index=True), pd.concat(totals, ignore_index=True)
     extra = {}
+    looks = []
+    for bench, label in (cfg.get("look_benchmarks") or {}).items():
+        lcfg = {**cfg, "benchmark": bench}
+        parts = [league_tables(pred, g, lcfg, s["compare"], codes=(cfg.get("pooled") or {}).get(g), look_only=True)[1]
+                 for g, pred in groups.items()]
+        looks.append((label, pd.concat(parts, ignore_index=True)))
+    if looks:
+        extra["look"] = looks
     gref = cfg.get("gap_reference")
     if gref:
         ref_pred = read_run(gref["run"], s)
@@ -371,6 +417,8 @@ def run(settings: dict | None = None, section: str = "asia_study") -> tuple[pd.D
     kw = {"index": False, "encoding": "utf-8-sig", "float_format": "%.6f"}
     seasons.to_csv(out.with_name(out.stem + "_分赛季.csv"), **kw)
     totals.to_csv(out.with_name(out.stem + "_合计.csv"), **kw)
+    for label, look in extra.get("look", []):
+        look.to_csv(out.with_name(f"{out.stem}_只看看_{label}.csv"), **kw)
     for key, label in (("gaps", "差距之差"), ("same_country", "同国顶级联赛"), ("eras", "前后两段")):
         if key in extra and not extra[key].empty:
             extra[key].to_csv(out.with_name(f"{out.stem}_{label}.csv"), **kw)
@@ -380,7 +428,7 @@ def run(settings: dict | None = None, section: str = "asia_study") -> tuple[pd.D
 def main() -> None:
     ap = argparse.ArgumentParser(description="开发回测和平博收盘比（读已经跑好的回测）")
     ap.add_argument("--section", default="asia_study",
-                    help="settings 里哪一段：asia_study（日职、中超，默认）/ second_study（次级联赛）")
+                    help="settings 里哪一段：asia_study（日职、中超，默认）/ second_study（次级联赛）/ kor_study（韩K）")
     a = ap.parse_args()
     _, totals, out = run(section=a.section)
     cols = ["league", "model", "n", "log_loss_model", "log_loss_bench", "log_loss_diff", "log_loss_lo",
