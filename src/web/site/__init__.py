@@ -5,5 +5,6 @@
   common.py   几页共用的小工具：北京时间、百分比、安全的文件名、页面外框、内嵌 SVG 图（热力图、折线图）
   match.py    单场页 match/<match_id>.html
   pages.py    首页 index.html、球队页 team/<球队>.html、战绩页 record.html
+  bots.py     虚拟投注页 bots.html（只读机器人历史回测的结果文件，site.bots_dir）
 整站由 src/jobs/build_site.py 生成到 data/site/。只读数据，不出预测、不跑模型、不联网；只用 HTML + CSS，没有脚本。
 """

@@ -794,6 +794,9 @@ site:
   refresh_minutes: 15            # 页面开着时多少分钟自己重新加载一次（和定时任务“足球预测_生成网站”的间隔一样）
   story_move_min: 0.01           # 单场页“盘口与水位解读”：胜平负概率变得最多的那项不到 1 个百分点就写“基本没动”（只是措辞，不影响预测）
   record_matches: 60             # 战绩页“每场四个预测”列最近多少场（命中率汇总照样算全部）
+  # 虚拟投注页 bots.html 读哪一次机器人历史回测的结果（src/web/site/bots.py，需求文档第 8 节、第 14 节）。
+  # 只读 summary.csv、by_season.csv、by_period.csv、bankroll.csv、check.json，不读每注明细 bets.csv；文件不在时页面写“还没有结果”
+  bots_dir: data/backtest/bots/bots_v1
 
 # 四个玩法的预测和命中率 picks_v2（src/web/site/picks.py、src/evaluate/picks_reference.py，需求文档第 3 节“四个玩法的预测和命中率”，
 # 算命中率之前写下）。想改规则另起一版，旧的照留（picks_v1 比分只给 1 个，picks_v2 给 4 个，别的一样）
