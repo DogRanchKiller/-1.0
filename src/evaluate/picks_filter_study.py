@@ -10,8 +10,9 @@
 数据怎么走（都经过取数层 src/features，按数据字典检查用途）：
   - 第一层的比分矩阵：已经跑好的滚动回测（每场在自己的 T-24 截止时间预测的）。
   - 特征：每场在自己的截止时间用「研究实验」取赛前赔率、变盘记录、赛程（休息天数）。
-  - 标签（第一层方向对没对）：比分，用「研究实验」取以前比赛的比分；每个 28 天的块只用块开始前已经能知道的。
-    结算、打分用的比分另外用「评估」取一次（和回测打分同一个用途），两次取到的必须一样。
+  - 标签（第一层方向对没对）和结算、打分：比分都用「评估」取（和回测打分同一个用途）；
+    训练时每个 28 天的块只用块开始前已经能知道的比赛。
+    另外用「研究实验」再取一次比分，只用来核对两次取到的完全一样（不一样就停下）。
   - 竞彩赔率：只用「研究评估」取，只拿来给虚拟注结算（赛后用），不进特征、不用来挑比赛。
     唯一例外是方法 D（按竞彩赔率算期望收益挑），只作参考，事先写明了。
     这些价格是 2026-10-30 到 11-02 回补抓的（事后抓的），这点在报告里写明。
@@ -392,7 +393,7 @@ def market_table(base: pd.DataFrame, mats: dict[str, np.ndarray], lot: pd.DataFr
         arr = t[[f"{pre}{s}" for s in SIDES]].to_numpy(float)
         t[f"{pre}pick"] = arr[idx, pick]
     t["league"] = t["competition"].map({c: i for i, c in enumerate(st["leagues"])}).astype(float)
-    # 标签和结算：比分经取数层（研究实验 / 研究评估分别取，见 study()）
+    # 标签和结算：比分经取数层用「评估」取（另用「研究实验」取一次只作核对，见 market_tables()）
     t = t.merge(results, on="match_id", how="left")
     t["outcome"] = settle_outcome(t["home_goals"], t["away_goals"], h)
     t["finished"] = t["outcome"] >= 0
@@ -800,8 +801,8 @@ def build_tables(fs: FeatureStore, settings: dict, log=print) -> tuple[dict[str,
     lot_ids = info.loc[info["season"] >= min(int(st["train_first_handicap"]), int(st["eval_first"])), "match_id"]
     lot = fetch_lottery(fs, lot_ids, settings)
     log(f"竞彩赔率取完：{lot['match_id'].nunique()} 场（{time.perf_counter() - t0:.0f} 秒）")
-    labels = fetch_results(fs, settings, st["usage"])          # 训练标签用（研究实验）
-    answers = fetch_results(fs, settings, "评估")              # 结算、打分用（「评估」：以前比赛的比分，和回测打分一样）
+    labels = fetch_results(fs, settings, st["usage"])          # 只作核对（研究实验），下面不再用
+    answers = fetch_results(fs, settings, "评估")              # 训练标签、结算、打分都用这份（「评估」：以前比赛的比分，和回测打分一样）
     if not labels.set_index("match_id").sort_index().equals(answers.set_index("match_id").sort_index()):
         raise ValueError("两种用途取到的比分不一样，停下检查")
     check = {"多个让球数的场次": lot.attrs.get("多个让球数的场次", 0),

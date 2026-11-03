@@ -89,8 +89,10 @@ class GBDTModel(Model):
             self.data = (*GBDTModel.data, INJURY_DATA)
             self.pre_match_data = (INJURY_DATA,)     # 回测框架看到这个，给要预测的比赛接上本场的伤停（快照时间之前才有数）
         self.odds = "odds" in self.extra
-        if self.odds and usage == "A版输入":
-            raise ValueError("A 版不用赔率作输入：extra 写了 odds，用途要是「B版输入」")
+        if self.odds and usage in ("A版输入", "研究实验"):
+            # 「研究实验」在数据字典里能取赛前赔率（给第 14 节二次筛选研究用），但研究用的第一层模型是 A 版，
+            # 不该把赔率当输入；要用赔率作输入就写「B版输入」
+            raise ValueError(f"用途「{usage}」不用赔率作输入：extra 写了 odds，用途要是「B版输入」")
         self.uses_pre_odds = self.odds               # 回测框架看到这个，给历史比赛、要预测的比赛接上赔率特征
         if features not in ("all", "nodyn", "dynonly", "mktonly"):
             raise ValueError(f"features 只能是 all / nodyn / dynonly / mktonly，收到 {features!r}")
