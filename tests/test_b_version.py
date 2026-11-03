@@ -206,6 +206,8 @@ def test_gbdt_odds_rules_and_registry():
     with pytest.raises(ValueError):
         gb(extra=["odds"])                               # 默认用途 A版输入，不能加赔率
     with pytest.raises(ValueError):
+        gb(extra=["odds"], usage="研究实验")              # 研究实验能取赔率，但模型不能拿它当输入
+    with pytest.raises(ValueError):
         gb(features="mktonly", usage="B版输入")           # mktonly 要有赔率特征
     m = gb(extra=["odds"], usage="B版输入", features="mktonly")
     assert [m.names[i] for i in m.use] == ["league", "is_home", "mkt_p_win", "mkt_p_draw", "mkt_p_loss", "mkt_over25",

@@ -371,6 +371,43 @@ odds_move_study:              # 赔率走向研究 src/evaluate/odds_move_study.
   min_abs_mean: 0.005             # 结论 A：平均 ΔF 的绝对值至少这么大
   same_odds_tol: 0.01             # 和 football-data 收盘比：三个赔率都差不超过这个算一样
 
+picks_filter_study:           # 竞彩二次筛选研究 src/evaluate/picks_filter_study.py（需求文档第 14 节“竞彩二次筛选研究怎么做”，跑之前写下，不临时加）
+  output_dir: data/backtest/picks_filter   # 结果放这里（data/ 不进 Git）
+  base_run: pf_base               # 第一层回测的结果文件夹（data/backtest/ 下，要有 predictions.csv 和 matrices_<模型>.npz）
+  model: gb_l7                    # 第一层：方向按它定
+  dyn_model: dyn_q1e5_b01         # 第一层的第二个模型（只用来算“模型分歧”）
+  horizon: T-24                   # 第一层用哪个时点（赛前赔率 T-24 起才能知道）
+  hours: 24                       # 特征的截止时间：开球前几小时
+  leagues: [E0, SP1, D1, I1, F1]  # 五大联赛
+  eval_first: 2019                # 打分赛季：2019/20–2023/24
+  eval_last: 2023
+  train_first_result: 2012        # 胜平负二次筛选模型的训练比赛从这个赛季起（平博 2012/13 起有赔率）
+  train_first_handicap: 2017      # 让球的训练比赛从这个赛季起（要有竞彩让球数）
+  block_days: 28                  # 每多少天重新训练一次（每块从星期一开始）
+  min_train_rows: 1000            # 训练行少于这么多，这一块不出 C 的结果
+  k: 5                            # 主结果：每个玩法每周挑几场
+  k_extra: [3, 10]                # 只列出来看看
+  n_random: 2000                  # 随机挑重复几次（E）
+  usage: 研究实验                  # 取特征的用途（只在开发模式）
+  eval_usage: 研究评估             # 取竞彩赔率的用途（赛后、只算虚拟回报）
+  lottery_cutoff_utc: "2026-11-03 00:00:00"   # 取竞彩赔率的截止时间（回补的历史价格都是 2026-10-30 到 11-02 抓的）
+  products: {result: 竞彩胜平负, handicap: 竞彩让球}
+  move_books: [Bet365, 平博 Pinnacle]   # 盘口水位变化只比同一家公司：懂球帝初盘 → football-data 赛前价格
+  lgbm:                           # 二次筛选模型的设置（事先定，不调）
+    num_leaves: 7
+    min_data_in_leaf: 100
+    learning_rate: 0.03
+    n_rounds: 300
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1
+    lambda_l2: 1.0
+    seed: 20261103
+  min_hit_diff: 0.02              # J2：C − B 的命中率差至少这么多（2 个百分点）才算“有用”
+  min_same_sign_seasons: 4        # J2、J3：5 个打分赛季里至少几个赛季方向一样
+  score_bins: 5                   # 按分数分几档看命中率和 ROI（只看看）
+  expected_payout: 0.88           # 核对：竞彩返奖率应该约这么多
+
 final_exam:                   # 期末考试（预测部分）src/evaluate/final_exam.py（需求文档第 5 节“期末考试怎么考”，跑之前写下）
   done: true                     # 考过一次后改成 true 提交，程序就不能再考（只考一次）
   run_name: final_exam           # 结果放 data/backtest/<这个名字>/（data/ 不进 Git），里面的 exam_done.json 也算“考过了”
