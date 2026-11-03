@@ -82,6 +82,12 @@ def test_reference_missing_bad_and_good(tmp_path):
     assert pk.load_reference(s)[0] is None                                       # 赛季写错也不用（页面标题要用）
     (tmp_path / "summary.json").write_text(json.dumps(good), encoding="utf-8")
     assert pk.load_reference(s)[0]["always_home"]["rate"] == 0.43
+    assert pk.load_reference(s)[0]["model_markets"] is None                   # 没有“模型自己”的历史参考：只是不写这一项
+    bad = {**good, "model_markets": {"1x2": {"n": 10, "rate": 0.5}}}           # 缺玩法：不用这一项，上面那列照用
+    (tmp_path / "summary.json").write_text(json.dumps(bad), encoding="utf-8")
+    assert pk.load_reference(s)[0]["model_markets"] is None and pk.load_reference(s)[0]["markets"]
+    (tmp_path / "summary.json").write_text(json.dumps({**good, "model_markets": good["markets"]}), encoding="utf-8")
+    assert pk.load_reference(s)[0]["model_markets"]["ou"]["rate"] == 0.5
 
 
 def test_record_and_match_page_show_four_picks_without_scores_csv(env):
@@ -91,8 +97,10 @@ def test_record_and_match_page_show_four_picks_without_scores_csv(env):
     assert "历史参考：还没算历史参考。" in record
     # 比赛 1：最新一版 T-1，主胜（中）、利物浦 -0.5（2–1 中）、大 2.5 球（中）、比分 4 个（以 1–1 打头）
     assert "主胜（利物浦）" in record and "利物浦 -0.5" in record and "1–1、" in record and "比分 4 个" in record
+    assert "<th>模型自己</th>" in record and "只用我们自己的模型、不看赔率" in record
     pages = [p.read_text(encoding="utf-8") for p in (out / "match").glob("*.html")]
     assert any("四个玩法的预测" in p and "还没踢" in p for p in pages)          # 比赛 10 还没踢
+    assert all("<th>模型自己</th>" in p for p in pages if "四个玩法的预测" in p)
     assert all("推荐" not in p for p in pages + [record])
 
 
@@ -138,7 +146,8 @@ def test_no_odds_version_is_counted_as_model_only():
     # 新存档没写亚盘、大小球倾向：不退回去用模型在主盘口上的胜算（和历史参考一样不预测）
     row["detail"].update({"亚盘主盘口": -0.5, "模型亚盘主队胜算": 0.6, "大小球主盘口": 2.5, "模型大球胜算": 0.6})
     assert p["ah"] is None and pk.pick_ah(row) is None and pk.pick_ou(row) is None
-    items = [{"row": row, "picks": p, "score": (1, 0), "outcomes": {k: pk.settle(k, p[k], (1, 0)) for k in pk.MARKETS}}]
+    items = [{"row": row, "picks": p, "score": (1, 0), "outcomes": {k: pk.settle(k, p[k], (1, 0)) for k in pk.MARKETS},
+              "model_outcomes": {k: None for k in pk.MARKETS}}]
     assert pk.summarize(items)["model_only"] == 1
 
 
@@ -214,3 +223,67 @@ def test_match_page_says_why_a_version_is_not_counted():
     for r in data.preds[10].values():
         r["kickoff_utc"] = None
     assert "开球时间不明" in picks_html(data, 10, row)
+
+
+def test_model_picks_ignore_odds():
+    """“模型自己”那列：只看 p_home/p_draw/p_away 和模型比分矩阵，不看融合概率、融合矩阵、倾向的方向。"""
+    model = fake_matrix(0.8, 1.7)                     # 模型看好客队
+    row = {"p_home": 0.25, "p_draw": 0.27, "p_away": 0.48,
+           "detail": {"融合概率": [0.6, 0.25, 0.15], "融合比分矩阵": fake_matrix(2.0, 0.6), "模型比分矩阵": model,
+                      "亚盘主盘口": -0.75,
+                      "融合": {"状态": "已融合", "倾向": {"result": {"side": 0, "p": 0.6, "lean": True},
+                                       "ah": {"side": "home", "line": -0.5, "p": 0.58, "lean": True},
+                                       "over25": {"side": "over", "p": 0.62, "lean": True}}}}}
+    s = {"site": {"matrix_sum_tol": TOL}}
+    main, mine = pk.match_picks(row, s), pk.model_picks(row, s)
+    assert main["1x2"]["side"] == 0 and mine["1x2"] == {"side": 2, "p": 0.48, "source": "模型", "lean": None}
+    # 让球用和上面那列同一条线（倾向写的 -0.5，不是亚盘主盘口 -0.75），模型在这条线上看好客队
+    assert mine["ah"]["line"] == -0.5 and mine["ah"]["side"] == "away" and main["ah"]["side"] == "home"
+    m = np.asarray(model) / np.sum(model)
+    i, j = np.indices(m.shape)
+    assert mine["ou"]["p"] == pytest.approx(max(m[i + j > 2].sum(), 1 - m[i + j > 2].sum()))
+    assert mine["score"]["scores"] == pk.best_scores(m)["scores"] and mine["score"]["scores"] != main["score"]["scores"]
+    assert all(mine[k]["source"] == "模型" for k in pk.MARKETS)
+    items = [{"row": row, "picks": main, "score": (0, 2), "outcomes": {k: pk.settle(k, main[k], (0, 2)) for k in pk.MARKETS},
+              "model_outcomes": {k: pk.settle(k, mine[k], (0, 2)) for k in pk.MARKETS}}]
+    t = pk.summarize(items)
+    assert t["1x2"]["rate"] == 0 and t["model"]["1x2"]["rate"] == 1 and t["model"]["ah"]["n"] == 1
+
+
+def test_model_picks_on_old_rows_and_missing_numbers():
+    s = {"site": {"matrix_sum_tol": TOL}}
+    # 旧存档（没有矩阵）：让球用“模型亚盘主队胜算”，大小球只有主盘口正好 2.5 才用
+    row = {"p_home": 0.3, "p_draw": 0.3, "p_away": 0.4,
+           "detail": {"亚盘主盘口": -0.5, "模型亚盘主队胜算": 0.45, "大小球主盘口": 2.25, "模型大球胜算": 0.52}}
+    mine = pk.model_picks(row, s)
+    assert mine["ah"] == {"side": "away", "line": -0.5, "p": pytest.approx(0.55), "source": "模型", "lean": None}
+    assert mine["ou"] is None and mine["score"] is None and mine["1x2"]["side"] == 2
+    # 什么都没有：四项都是 None，不报错
+    assert pk.model_picks({"detail": {}}, s) == {k: None for k in pk.MARKETS}
+    # 新存档（有融合倾向块）没写亚盘倾向：上面那列不预测，模型那列也不预测（不退回没过滤的亚盘主盘口）
+    new = {"p_home": 0.3, "p_draw": 0.3, "p_away": 0.4,
+           "detail": {"模型比分矩阵": fake_matrix(1.2, 1.1), "亚盘主盘口": -0.5, "模型亚盘主队胜算": 0.45,
+                      "融合": {"状态": "赔率不全", "倾向": {"result": None, "ah": None, "over25": None}}}}
+    assert pk.match_picks(new, s)["ah"] is None and pk.model_picks(new, s)["ah"] is None
+    assert pk.model_picks(new, s)["ou"] is not None      # 大小球固定 2.5，有矩阵就能算
+    # 没有亚盘主盘口也没有倾向：不预测让球（不能拿没有线的胜算去结算）
+    assert pk.model_picks({"detail": {"模型亚盘主队胜算": 0.6}}, s)["ah"] is None
+
+
+def test_reference_model_column_uses_same_rule():
+    """历史参考里“模型自己”那列是 picks_for(模型矩阵)；网站上同样的矩阵、同样的线要给一样的预测。"""
+    from src.evaluate.picks_reference import picks_for
+    s = load_settings()
+    for xg in ((1.6, 0.9), (0.8, 1.7), (1.2, 1.2)):
+        m = np.asarray(fake_matrix(*xg))
+        m = m / m.sum()
+        i, j = np.indices(m.shape)
+        p3 = [m[i > j].sum(), m[i == j].sum(), m[i < j].sum()]
+        row = {"p_home": p3[0], "p_draw": p3[1], "p_away": p3[2], "detail": {"模型比分矩阵": m.tolist(), "亚盘主盘口": -0.25}}
+        site, ref = pk.model_picks(row, s), picks_for(m, -0.25)
+        for k in pk.MARKETS:
+            for key in ref[k]:
+                if key == "scores":
+                    assert site[k][key] == ref[k][key], (xg, k)
+                else:
+                    assert site[k][key] == pytest.approx(ref[k][key]), (xg, k, key)

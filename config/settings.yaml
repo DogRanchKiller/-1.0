@@ -521,6 +521,29 @@ kor_study:                    # 韩K 开发回测和标杆比，同一个程序 
     - {league: 五大联赛, model: dyn_q1e5_b01, bench: 平博收盘, n: 18085, model_ll: 0.98187, bench_ll: 0.9643, source: 第 4 节步骤 6}
     - {league: 五大联赛, model: gb_l7, bench: 平博收盘, n: 18085, model_ll: 0.97884, bench_ll: 0.96429, source: 第 4 节步骤 6}
 
+disagree_study:               # 模型和赔率意见不一样时谁准 src/evaluate/disagree_study.py（需求文档第 4 节“模型和赔率意见不一样时谁准”，跑之前写下，不临时加）
+  # 读哪次开发回测：W9 那次（gb_l7，五大联赛 2005/06–2023/24，T-24）。三个文件从工作树 W9 原样复制到这里，sha256 见结果的 run_info.json（只读）。
+  # 要 predictions.csv（gb_l7 和 pinnacle_close 的逐场概率）、fusion_odds.csv（经取数层取的 T-24 赛前赔率，已去水）、run_info.json
+  base_dir: data/backtest/w9_gb_l7
+  model: gb_l7                  # 比哪个模型（上线的 A 版）
+  horizon: T-24                 # 模型用哪个时点
+  close_model: pinnacle_close   # 只看看：平博收盘（去水后）在 predictions.csv 里叫什么
+  odds_cols: [mo_p_home, mo_p_draw, mo_p_away]   # fusion_odds.csv 里赛前胜平负（去水后）的三列
+  pinnacle_col: mo_pinnacle     # fusion_odds.csv 里“胜平负用的是不是平博”（1 / 0）
+  gap_bins: [0.03, 0.06, 0.10]  # 分歧分四档的分界：3% 以内 / 3%–6% / 6%–10% / 10% 以上
+  disagree_min: 0.03            # 分歧 ≥ 这个算“意见不一样”，分类都在这批比赛里比
+  disagree_strong: 0.06         # 只看看：分歧 ≥ 这个的再比一次
+  fav_bins: [0.45, 0.60]        # 两队强弱差距：赔率里最大的概率 < 45% 势均力敌 / 45%–60% 一方稍强 / ≥ 60% 强弱分明
+  fav_labels: [势均力敌, 一方稍强, 强弱分明]       # 上面各档的名字，个数 = 分界个数 + 1（对不上程序会停下）
+  draw_bins: [0.25, 0.28]       # 平局概率：< 25% 低 / 25%–28% 中 / ≥ 28% 高
+  draw_labels: [平局概率低, 平局概率中, 平局概率高] # 上面各档的名字，个数 = 分界个数 + 1
+  phase_rounds: 10              # 每个赛季前几轮算早期、最后几轮算后期
+  period_split: 2014            # 两段：这个赛季以前 / 以后（gb_l7 的树的大小在 2005–2013 选的）
+  n_tests: 27                   # 多重比较校正时算几个区间（分歧四档 4 + 8 类 23 组，需求文档里数过）
+  sum_tol: 0.0001               # 读回来的三项概率加起来离 1 超过这么多就停下（csv 只存 6 位小数，四舍五入只会差 1e-6 左右）
+  ll_tol: 0.0001                # 重算的模型 log loss 和回测记下的差超过这么多就停下（说明读错了列或文件不对）
+  output_dir: data/backtest/disagree_study   # 结果放这里（data/ 不进 Git）
+
 models:                    # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
   frequency:                 # 历史频率基线：按联赛的主胜 / 平 / 客胜比例
@@ -823,6 +846,9 @@ site:
   refresh_minutes: 15            # 页面开着时多少分钟自己重新加载一次（和定时任务“足球预测_生成网站”的间隔一样）
   story_move_min: 0.01           # 单场页“盘口与水位解读”：胜平负概率变得最多的那项不到 1 个百分点就写“基本没动”（只是措辞，不影响预测）
   record_matches: 60             # 战绩页“每场四个预测”列最近多少场（命中率汇总照样算全部）
+  # 虚拟投注页 bots.html 读哪一次机器人历史回测的结果（src/web/site/bots.py，需求文档第 8 节、第 14 节）。
+  # 只读 summary.csv、by_season.csv、by_period.csv、bankroll.csv、check.json，不读每注明细 bets.csv；文件不在时页面写“还没有结果”
+  bots_dir: data/backtest/bots/bots_v1
 
 # 四个玩法的预测和命中率 picks_v2（src/web/site/picks.py、src/evaluate/picks_reference.py，需求文档第 3 节“四个玩法的预测和命中率”，
 # 算命中率之前写下）。想改规则另起一版，旧的照留（picks_v1 比分只给 1 个，picks_v2 给 4 个，别的一样）

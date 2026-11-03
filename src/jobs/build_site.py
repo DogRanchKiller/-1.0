@@ -1,4 +1,4 @@
-"""生成正式网站（静态页面）：data/site/ 里的首页、单场页、球队页、战绩页（需求文档第 8 节、第 9 节接口 4）。
+"""生成正式网站（静态页面）：data/site/ 里的首页、单场页、球队页、战绩页、逐场验收页、虚拟投注页（需求文档第 8 节、第 9 节接口 4）。
 
 运行：.venv\\Scripts\\python -m src.jobs.build_site
 定时：任务计划程序“足球预测_生成网站”每 15 分钟跑一次（src/jobs/register_tasks.ps1）。双击根目录的“查看网站.bat”也会先生成一次再打开。
@@ -20,7 +20,7 @@ from src.common.config import load_settings, resolve_path
 from src.features import open_readonly
 from src.jobs.heartbeat import job_run
 from src.web.site import data as site_data
-from src.web.site import lifecycle, match, pages
+from src.web.site import bots, lifecycle, match, pages
 from src.web.site.common import TeamFiles
 
 TMP_NAME, OLD_NAME = "site_tmp_build", "site_old"   # 临时文件夹、换下来的旧网站，和 data/site 放在同一层
@@ -57,10 +57,20 @@ def _swap(tmp: Path, out: Path) -> None:
     _remove(old, parent)
 
 
-def write_site(data: site_data.SiteData, folder: Path, final_dir: Path) -> dict:
-    """把整站写进 folder。final_dir 是最后换上去的位置（算战绩页里周报的相对链接用）。返回每种页面几页。"""
+def write_site(data: site_data.SiteData, folder: Path, final_dir: Path, problems: dict | None = None) -> dict:
+    """把整站写进 folder。final_dir 是最后换上去的位置（算战绩页里周报的相对链接用）。返回每种页面几页（都是数字）。
+
+    problems：给一个空字典，某一页走了兜底时在里面记一项（现在只有 {"虚拟投注页出错": 错误种类}），build 放进摘要最前面。
+    """
     (folder / "match").mkdir(parents=True)
     (folder / "team").mkdir()
+    # 虚拟投注页：只读 site.bots_dir 里机器人历史回测的结果文件；没有结果时这一页写“还没有”，不影响别的页。
+    # 先生成它：万一走了兜底（这一页出了意外的错），提示要排在首页提示的最前面（首页最多显示 10 条）
+    bots_html, bots_error = bots.render_checked(data)
+    if bots_error:
+        data.notes.insert(0, f"虚拟投注页出错（{bots_error}），这一页先换成占位页；别的页照常。")
+        if problems is not None:
+            problems["虚拟投注页出错"] = bots_error
     teams = {data.matches[mid][k] for mid in data.page_ids for k in ("home_team", "away_team")}
     files = TeamFiles(teams)
     for mid in sorted(data.page_ids):
@@ -72,7 +82,8 @@ def write_site(data: site_data.SiteData, folder: Path, final_dir: Path) -> dict:
     (folder / "lifecycle.html").write_text(lifecycle.render(data), encoding="utf-8")
     (folder / "lifecycle.json").write_text(json.dumps(data.lifecycle, ensure_ascii=False, indent=2, allow_nan=False),
                                           encoding="utf-8")
-    return {"首页": 1, "单场页": len(data.page_ids), "球队页": len(teams), "战绩页": 1, "逐场验收页": 1}
+    (folder / "bots.html").write_text(bots_html, encoding="utf-8")
+    return {"首页": 1, "单场页": len(data.page_ids), "球队页": len(teams), "战绩页": 1, "逐场验收页": 1, "虚拟投注页": 1}
 
 
 def build(settings: dict | None = None, now: datetime | None = None, db_path: Path | str | None = None,
@@ -91,12 +102,14 @@ def build(settings: dict | None = None, now: datetime | None = None, db_path: Pa
     tmp = parent / TMP_NAME
     _remove(tmp, parent)                       # 上次中途出错留下的临时文件夹
     try:
-        counts = write_site(data, tmp, out)
+        problems: dict = {}
+        counts = write_site(data, tmp, out, problems)
     except BaseException:
         _remove(tmp, parent)
         raise
     _swap(tmp, out)
-    return {**counts, "页面合计": sum(counts.values()), "有预测的比赛": len(data.preds),
+    # 出错的那一项放在摘要最前面：状态页（src/notify/watch.py summary_text）只显示摘要的前 6 项
+    return {**problems, **counts, "页面合计": sum(counts.values()), "有预测的比赛": len(data.preds),
             "有复盘数据": data.scores is not None, "提示": len(data.notes)}
 
 
@@ -106,9 +119,12 @@ def main() -> dict:
         summary = build(s)
         run.summary.update(summary)
     out = resolve_path(s["site"]["output_dir"])
-    print(f"网站生成好了：首页 1 页、单场页 {summary['单场页']} 页、球队页 {summary['球队页']} 页、战绩页 1 页、逐场验收页 1 页，"
+    print(f"网站生成好了：首页 1 页、单场页 {summary['单场页']} 页、球队页 {summary['球队页']} 页、战绩页 1 页、逐场验收页 1 页、"
+          f"虚拟投注页 1 页，"
           f"共 {summary['页面合计']} 页。")
     print(f"有预测的比赛 {summary['有预测的比赛']} 场；复盘数据：{'有' if summary['有复盘数据'] else '还没有'}。")
+    if summary.get("虚拟投注页出错"):
+        print(f"注意：虚拟投注页出错（{summary['虚拟投注页出错']}），这一页先换成占位页，别的页照常。")
     if summary["提示"]:
         print(f"读数据时有 {summary['提示']} 条提示，写在首页最下面。")
     print(f"打开：{out / 'index.html'}")

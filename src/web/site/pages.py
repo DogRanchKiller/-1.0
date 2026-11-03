@@ -198,15 +198,18 @@ def picks_record(data: SiteData) -> str:
     s = pk.summarize(items)
     ref, ref_why = pk.load_reference(data.settings)
     tiles, rows = [], []
+    mref = ref.get("model_markets") if ref else None      # “模型自己”那列的历史参考（旧文件没有就不写）
     for k in pk.MARKETS:
-        t = s[k]
+        t, mt = s[k], s["model"][k]
         tiles.append(f"<div class='stat hi'><b>{pk.rate_text(t)}</b><span>{e(pk.MARKET_NAMES[k])}（{t['n']} 场）</span></div>")
         r = ref["markets"][k] if ref else None
+        mine = (pk.rate_text(mt) + (f" <span class='small muted'>{mt['n']} 场</span>" if mt["n"] != t["n"] else "")
+                + (f" <span class='small muted'>历史 {mref[k]['rate']:.0%}</span>" if mref else ""))
         rows.append([e(pk.MARKET_NAMES[k]), str(t["n"]), e(pk.counts_text(t)) if t["n"] else "—", f"<b>{pk.rate_text(t)}</b>",
-                     f"{r['rate']:.0%}" if r else "—"])
+                     f"{r['rate']:.0%}" if r else "—", mine])
     home = s["always_home"]
     rows.append(["<span class='muted'>对照：一直猜主胜</span>", str(home["n"]), e(pk.counts_text(home)), pk.rate_text(home),
-                 f"{ref['always_home']['rate']:.0%}" if ref else "—"])
+                 f"{ref['always_home']['rate']:.0%}" if ref else "—", "—"])
     # 表头 table() 会转义，这里不再转义
     ref_head = (f"历史参考（{ref['seasons'][0]}/{str(ref['seasons'][0] + 1)[2:]}–{ref['seasons'][1]}/{str(ref['seasons'][1] + 1)[2:]}"
                 f" 赛季 {ref['n_matches']} 场）") if ref else "历史参考"
@@ -225,7 +228,10 @@ def picks_record(data: SiteData) -> str:
     guide = ("<p class='small'>命中率 = 中的场数 ÷ 场数；让球、大小球的“赢半”算半场中、“输半”算半场没中，“走盘”（退回）不算。"
              "每个玩法预测的都是更可能的那一边，所以胜平负、让球、大小球的命中率在 50% 上下才正常；比分给 4 个最可能的，实际比分是其中一个就算中，4 个合起来的可能性一般只有四成左右，命中率也就在四成上下。"
              "几十场的命中率主要看运气，要几百场以上才看得出好坏，所以旁边放了历史参考（同一规则、开球前 24 小时、"
-             "期末考试那两季，只是描述，不是又考了一次）。命中率高也不代表能赚钱：赔率已经把可能性算进去了。</p>")
+             "期末考试那两季，只是描述，不是又考了一次）。命中率高也不代表能赚钱：赔率已经把可能性算进去了。</p>"
+             "<p class='small'>“模型自己”：同样的四条规则，只用我们自己的模型、不看赔率。有赔率时，上面的预测用的是赔率算出来的概率"
+             "（历史上赔率比我们的模型准，所以网站用赔率；没用上赔率的那几场两列一样），这一列用来看模型自己能猜中多少、和赔率差多少。"
+             "下面每场的表里，模型自己的预测和上面不一样时，用淡字另写一行；模型那一版没法预测时也写一行。</p>")
     # 每场的四个预测（最近 record_matches 场）
     per = []
     for x in items[:data.settings["site"]["record_matches"]]:
@@ -235,14 +241,20 @@ def picks_record(data: SiteData) -> str:
         cells = [e(bj_text(x["kickoff"])), f"<td class='match'>{name}</td>",
                  f"<span class='score'>{x['score'][0]}–{x['score'][1]}</span>"]
         for k in pk.MARKETS:
-            p = x["picks"][k]
-            cells.append("—" if p is None else f"{e(pk.pick_text(k, p, home_n, away_n))} {pk.outcome_html(x['outcomes'][k])}")
+            p, q = x["picks"][k], x["model_picks"][k]
+            cell = "—" if p is None else f"{e(pk.pick_text(k, p, home_n, away_n))} {pk.outcome_html(x['outcomes'][k])}"
+            if q is not None and (p is None or pk.pick_text(k, q, home_n, away_n) != pk.pick_text(k, p, home_n, away_n)):
+                cell += (f"<br><span class='small muted'>模型：{e(pk.pick_text(k, q, home_n, away_n))} "
+                         f"{pk.outcome_html(x['model_outcomes'][k])}</span>")
+            elif q is None and p is not None:
+                cell += "<br><span class='small muted'>模型：这一版没法预测</span>"
+            cells.append(cell)
         per.append(cells)
     shown = min(len(items), data.settings["site"]["record_matches"])
     return ("<h2>四个玩法的命中率</h2>"
             f"<p>踢完、开球前出过预测的 {s['n_matches']} 场，每场用开球以前出的最新一版。</p>"
             f"<div class='stats'>{''.join(tiles)}</div>"
-            + table(["玩法", "场数", "结果", "命中率", ref_head], rows) + guide
+            + table(["玩法", "场数", "结果", "命中率", ref_head, "模型自己"], rows) + guide
             + "".join(f"<p class='small muted'>{e(n)}</p>" for n in notes)
             + f"<h2>每场的四个预测（最近 {shown} 场）</h2>"
             + table(["开球", "比赛", "比分", "胜平负", "让球", "大小球 2.5", "比分预测"], per))

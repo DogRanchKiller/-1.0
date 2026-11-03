@@ -4,7 +4,8 @@
 按网站上同一套规则（src/web/site/picks.py）给每场比赛做四个预测，对比分算命中率，
 存到 settings.yaml picks.reference_dir 下面以规则名命名的文件夹（picks_v2/；picks_v1 的结果在 reference_dir 本身，照留）：
   summary.json：四个玩法的汇总和“一直猜主胜”的对照（战绩页“历史参考”那一列读它）；
-  picks.csv：每场一行，四个预测和结果（想自己翻着看时用；比分写最可能的几个，用 / 隔开，最可能的在前）。
+  picks.csv：每场一行，四个预测和结果（想自己翻着看时用；比分写最可能的几个，用 / 隔开，最可能的在前）；
+    model_ 开头的几列是“模型自己”那列（同一套规则，只用 gb_l7 的比分矩阵，不看赔率；summary.json 里是 model_markets）。
 
 注意：
 - 这只是描述统计，不是第二次期末考试（考试只考一次，已经考过）；看了这里的数也不改任何规则和门槛。
@@ -32,11 +33,16 @@ from src.web.site.picks import (MARKET_NAMES, MARKETS, OU_LINE, RULE, SCORE_TOP,
                                  tally)
 
 
-def fused_matrices(t: pd.DataFrame, ids: np.ndarray, mats: np.ndarray, w: float) -> np.ndarray:
-    """每场的融合比分矩阵（和 fusion_study.build 同一个做法：赔率四个数反推市场矩阵，再按 w 和模型矩阵混）。"""
+def model_matrices(t: pd.DataFrame, ids: np.ndarray, mats: np.ndarray) -> np.ndarray:
+    """每场模型自己的比分矩阵（按 t 的比赛顺序取出来，每格除以总和，加起来正好是 1）。“模型自己”那列用它。"""
     pos = pd.Series(np.arange(len(ids)), index=ids)
     m = mats[pos.loc[t["match_id"]].to_numpy()].astype(float)
-    m /= m.sum(axis=(1, 2), keepdims=True)
+    return m / m.sum(axis=(1, 2), keepdims=True)
+
+
+def fused_matrices(t: pd.DataFrame, ids: np.ndarray, mats: np.ndarray, w: float) -> np.ndarray:
+    """每场的融合比分矩阵（和 fusion_study.build 同一个做法：赔率四个数反推市场矩阵，再按 w 和模型矩阵混）。"""
+    m = model_matrices(t, ids, mats)
     lh, la, rho = fit_market_dc(t[fu.FOUR].to_numpy(float), n=m.shape[1] - 1)
     mk = dc_matrices(lh, la, rho, n=m.shape[1] - 1)
     f = w * mk + (1 - w) * m
@@ -70,11 +76,12 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
     odds = pd.read_csv(run_dir / "fusion_odds.csv", encoding="utf-8-sig")
     t, _model, _market, check = fu.build(pred, npz["match_id"], npz["matrix"], odds, settings)
     mats = fused_matrices(t, npz["match_id"], npz["matrix"], float(settings["fusion"]["w"]))
+    own = model_matrices(t, npz["match_id"], npz["matrix"])     # “模型自己”那列：同一套规则，只用模型矩阵
 
     rows = []
     for k, r in enumerate(t.itertuples(index=False)):
         score = (int(r.home_goals), int(r.away_goals))
-        p = picks_for(mats[k], r.ah_line)
+        p, q = picks_for(mats[k], r.ah_line), picks_for(own[k], r.ah_line)
         row = {"match_id": int(r.match_id), "season": int(r.season), "competition": r.competition,
                "home_goals": score[0], "away_goals": score[1]}
         for mk in MARKETS:
@@ -84,6 +91,8 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
                                  f"{pk['side']} {pk['line']:g}" if mk in ("ah", "ou") else str(pk["side"]))
             row[f"{mk}_p"] = None if pk is None else round(pk["p"], 6)
             row[f"{mk}_outcome"] = settle(mk, pk, score)
+            row[f"model_{mk}_p"] = None if q[mk] is None else round(q[mk]["p"], 6)
+            row[f"model_{mk}_outcome"] = settle(mk, q[mk], score)
         rows.append(row)
     per = pd.DataFrame(rows)
     # 最可能的那一个比分的胜负方向（0 主胜 / 1 平 / 2 客胜）和胜平负预测对不上的场数
@@ -96,6 +105,7 @@ def run(settings: dict) -> tuple[dict, pd.DataFrame]:
         "fusion_w": float(settings["fusion"]["w"]), "n_matches": int(len(per)),
         "markets": {mk: tally(per[f"{mk}_outcome"].dropna().tolist()) for mk in MARKETS},
         "always_home": tally(np.where(per["home_goals"] > per["away_goals"], "win", "loss").tolist()),
+        "model_markets": {mk: tally(per[f"model_{mk}_outcome"].dropna().tolist()) for mk in MARKETS},
         "score_side_differs": differs,
         "top_score_picks": [[s.replace("-", "–"), int(n)] for s, n in
                             Counter(per["score_pick"].str.split("/").explode()).most_common(5)],   # 4 个里出现最多的比分
@@ -122,6 +132,8 @@ def main() -> None:
         print(f"  {MARKET_NAMES[mk]}：{t['n']} 场，命中率 {t['rate']:.1%}（中 {t['win']}、赢半 {t['half_win']}、走 {t['push']}、"
               f"输半 {t['half_loss']}、没中 {t['loss']}）")
     print(f"  对照 一直猜主胜：{summary['always_home']['rate']:.1%}")
+    print("  模型自己（不看赔率）：" + "、".join(f"{MARKET_NAMES[mk]} {summary['model_markets'][mk]['rate']:.1%}"
+                                              for mk in MARKETS))
     print(f"  比分 {summary['score_top']} 个合起来的可能性平均 {summary['score_p_mean']:.1%}")
     print(f"  最可能的那个比分和胜平负预测方向不一样的场数：{summary['score_side_differs']}；"
           f"4 个里出现最多的比分：{summary['top_score_picks']}")

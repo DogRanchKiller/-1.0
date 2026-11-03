@@ -57,6 +57,7 @@ def env(tmp_path):
     s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
     s["site"]["review_dir"] = str(tmp_path / "review")
     s["picks"]["reference_dir"] = str(tmp_path / "picks_reference")   # 不读真的历史参考
+    s["site"]["bots_dir"] = str(tmp_path / "bots_v1")                  # 不读真的机器人回测结果（这里没有，页面写“还没有”）
     db = tmp_path / "t.db"
     con = connect(db)
     create_tables(con)
@@ -147,13 +148,35 @@ def test_build_makes_all_pages(env):
     write_review(env[2])
     out, summary = build(env)
     files = {p.relative_to(out).as_posix() for p in all_pages(out)}
-    assert {"index.html", "record.html", "lifecycle.html", "match/1.html", "match/10.html", "match/11.html"} <= files
+    assert {"index.html", "record.html", "lifecycle.html", "bots.html", "match/1.html", "match/10.html", "match/11.html"} <= files
     assert "match/20.html" not in files                   # 杯赛只有赛程，不做单场页
     team_files = {f for f in files if f.startswith("team/")}
     assert team_files == {"team/Liverpool.html", "team/Arsenal.html", "team/Man_City.html", "team/A_B_C.html"}
-    assert summary["单场页"] == 3 and summary["球队页"] == 4 and summary["页面合计"] == 10
+    assert summary["单场页"] == 3 and summary["球队页"] == 4 and summary["页面合计"] == 11
+    assert "还没有虚拟投注的结果" in read(out, "bots.html")   # 没有回测结果：这一页写“还没有”，别的页照常
     assert summary["有复盘数据"] is True and summary["有预测的比赛"] == 2
     assert not (out.parent / build_site.TMP_NAME).exists() and not (out.parent / build_site.OLD_NAME).exists()
+
+
+def test_bots_page_error_does_not_break_site(env, monkeypatch):
+    """虚拟投注页出了想不到的错：只有这一页写“虚拟投注结果格式不对”，整个网站照常生成。"""
+    from src.web.site import bots
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("想不到的错")
+
+    _, normal = build(env)
+    assert "虚拟投注页出错" not in normal                                # 正常时摘要里没有这一项
+    monkeypatch.setattr(bots, "load", boom)
+    out, summary = build(env)
+    assert summary["页面合计"] == 11 and summary["虚拟投注页"] == 1        # 页数照常是数字
+    assert (out / "index.html").exists() and (out / "match" / "10.html").exists()
+    assert "虚拟投注结果格式不对" in read(out, "bots.html")
+    # 兜底要让人看得出：摘要最前面一项写出错种类（状态页只显示摘要前 6 项），首页提示也有
+    assert list(summary)[0] == "虚拟投注页出错" and summary["虚拟投注页出错"] == "RuntimeError"
+    assert summary["提示"] == normal["提示"] + 1 and "虚拟投注页出错（RuntimeError）" in read(out, "index.html")
+    from src.notify.watch import summary_text
+    assert summary_text(summary).startswith("虚拟投注页出错 RuntimeError")
 
 
 def test_no_script_no_advice_words_and_links_work(env):

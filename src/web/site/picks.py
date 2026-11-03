@@ -7,6 +7,7 @@
   大小球：固定看 2.5 球，大 2.5 球的概率 ≥ 50% 预测“大”，否则“小”（旧存档只在大小球主盘口正好是 2.5 时用模型的胜算）；
   比分：存下来的比分矩阵里最大的 4 格（先用融合后的，没有用模型自己的），实际比分是其中任意一个就算中。
 这些都是从“只加不改”的预测存档算出来的，不另外存表；规则改了就另起一版，旧的照留。
+另有“模型自己”一列（model_picks）：同样四条规则，只用模型自己的概率和比分矩阵，不看赔率，单独记命中率（需求文档 v0.88）。
 picks_v1 和 picks_v2 只差比分：picks_v1 只给最大的 1 格（历史参考在 reference_dir/summary.json，照留），
 picks_v2 给最大的 4 格（历史参考在 reference_dir/picks_v2/summary.json）。
 
@@ -159,6 +160,53 @@ def match_picks(row: dict, settings: dict) -> dict:
     return {"1x2": pick_1x2(row), "ah": pick_ah(row), "ou": pick_ou(row), "score": pick_score(row, tol)}
 
 
+# ---------- “模型自己”的四个预测（只看我们的模型，不看赔率；和上面那列对比用） ----------
+def model_picks(row: dict, settings: dict) -> dict:
+    """同一版存档里，只用模型自己的数（p_home/p_draw/p_away、模型比分矩阵）按同样的四条规则给的预测。
+
+    上线的概率是赔率（fusion.w = 1，模型没比赔率准），所以上面那列其实是“赔率怎么看”；这一列是“模型怎么看”，
+    单独记命中率，看模型自己到底差多少。规则：
+      胜平负：模型三个概率里最大的；
+      让球：和上面那列同一条线（存档倾向写的线；新存档没写倾向就不预测，接融合以前的旧存档用亚盘主盘口），模型比分矩阵在这条线上胜算较大的一边；
+        没有矩阵时（旧存档）用存档里“模型亚盘主队胜算”（那是亚盘主盘口上的）；
+      大小球：模型比分矩阵里大 2.5 球的概率；没有矩阵时只有大小球主盘口正好是 2.5 才用“模型大球胜算”；
+      比分：模型比分矩阵里最大的 SCORE_TOP 格。
+    """
+    from src.common.markets import asian_handicap, over_under   # 放这里：只有这里用
+
+    d = row.get("detail") or {}
+    m = matrix(d, "模型比分矩阵", settings["site"]["matrix_sum_tol"])
+    out = {k: None for k in MARKETS}
+    p = [_num(row.get(k)) for k in ("p_home", "p_draw", "p_away")]
+    if all(x is not None for x in p):
+        side = int(np.argmax(p))
+        out["1x2"] = {"side": side, "p": p[side], "source": "模型", "lean": None}
+    lean = _lean(row, "ah")
+    line = _num(lean.get("line")) if lean is not None else None
+    if line is None and _old(row):
+        line = _num(d.get("亚盘主盘口"))     # 只有接融合以前的旧存档才退回亚盘主盘口；新存档没写倾向 = 不预测
+    share = None
+    if m is not None and line is not None:
+        share = _num(asian_handicap(m, line, "home")["win_share"])
+    elif m is None and line is not None and line == _num(d.get("亚盘主盘口")) and _num(d.get("模型亚盘主队胜算")) is not None:
+        share = float(d["模型亚盘主队胜算"])
+    if share is not None:
+        home = share >= 0.5
+        out["ah"] = {"side": "home" if home else "away", "line": line, "p": share if home else 1 - share,
+                     "source": "模型", "lean": None}
+    over = None
+    if m is not None:
+        over = _num(over_under(m, OU_LINE, "over")["win_share"])
+    elif _num(d.get("大小球主盘口")) == OU_LINE:
+        over = _num(d.get("模型大球胜算"))
+    if over is not None:
+        side = "over" if over >= 0.5 else "under"
+        out["ou"] = {"side": side, "line": OU_LINE, "p": over if side == "over" else 1 - over, "source": "模型", "lean": None}
+    if m is not None:
+        out["score"] = {**best_scores(m), "source": "模型", "lean": None}
+    return out
+
+
 # ---------- 对比分 ----------
 def settle(market: str, pick: dict | None, score) -> str | None:
     """预测和 90 分钟比分 (主, 客) 一比：win / half_win / push / half_loss / loss。没预测、没比分是 None。"""
@@ -213,7 +261,7 @@ def finished(data) -> tuple[list[dict], dict]:
     """算命中率的比赛：有 90 分钟比分、开球前出过预测的。每场用最新的那一版（和单场页一样）。
 
     返回 (比赛列表（开球时间从近到远），没算的场数和原因)。比赛列表每项：
-    {"mid", "kickoff", "kind", "row", "score", "picks", "outcomes"}。
+    {"mid", "kickoff", "kind", "row", "score", "picks", "outcomes", "model_picks", "model_outcomes"}（后两个是“模型自己”那列）。
     开球以后才出的版本不用（取开球以前的最新一版，before_kickoff）；只有开球以后的版本、开球时间不明的，不算，单独记场数。
     """
     out, skipped = [], {"只有开球以后的版本": 0, "开球时间不明": 0}
@@ -228,16 +276,19 @@ def finished(data) -> tuple[list[dict], dict]:
             skipped["开球时间不明"] += 1
             continue
         kick, kind, row = got
-        picks = match_picks(row, data.settings)
+        picks, mine = match_picks(row, data.settings), model_picks(row, data.settings)
         out.append({"mid": mid, "kickoff": kick, "kind": kind, "row": row, "score": score, "picks": picks,
-                    "outcomes": {k: settle(k, picks[k], score) for k in MARKETS}})
+                    "outcomes": {k: settle(k, picks[k], score) for k in MARKETS},
+                    "model_picks": mine, "model_outcomes": {k: settle(k, mine[k], score) for k in MARKETS}})
     out.sort(key=lambda x: (x["kickoff"], x["mid"]), reverse=True)
     return out, {k: v for k, v in skipped.items() if v}
 
 
 def summarize(items: list[dict]) -> dict:
-    """网站上的汇总：每个玩法 tally 一次（没预测的那场不算进这个玩法），另算“一直猜主胜”的对照。"""
+    """网站上的汇总：每个玩法 tally 一次（没预测的那场不算进这个玩法），另算“一直猜主胜”的对照，
+    和“模型自己”那列每个玩法的 tally（放在 out["model"]）。"""
     out = {k: tally([x["outcomes"][k] for x in items if x["outcomes"][k] is not None]) for k in MARKETS}
+    out["model"] = {k: tally([x["model_outcomes"][k] for x in items if x["model_outcomes"][k] is not None]) for k in MARKETS}
     out["always_home"] = tally(["win" if x["score"][0] > x["score"][1] else "loss" for x in items])
     out["n_matches"] = len(items)
     out["model_only"] = sum(1 for x in items if not used_odds(x["row"]))   # 这一版没用上赔率（旧版、没有赔率）
@@ -267,6 +318,14 @@ def load_reference(settings: dict) -> tuple[dict | None, str | None]:
         ok = False
     if not ok:
         return None, "历史参考文件格式不对，没有用"
+    # “模型自己”那列的历史参考是后来加的：格式不对只是不显示这一项，不影响上面那列
+    mm = ref.get("model_markets")
+    try:
+        good = isinstance(mm, dict) and all(_num(mm[k]["rate"]) is not None and int(mm[k]["n"]) > 0 for k in MARKETS)
+    except (KeyError, TypeError, ValueError):
+        good = False
+    if not good:
+        ref = {**ref, "model_markets": None}
     return ref, None
 
 
