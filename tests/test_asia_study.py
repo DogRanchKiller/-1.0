@@ -221,3 +221,25 @@ def test_asia_section_still_works_without_extras(settings, tmp_path):
     assert text.startswith("# 日职、中超开发回测") and "和五大联赛比（log loss 差" in text
     assert "差距之差" not in text
     assert not out.with_name(out.stem + "_差距之差.csv").exists()
+
+
+def test_kor_study_market_avg_main_and_pinnacle_look_only(settings, tmp_path):
+    """韩K 那一段：主标杆是多家平均（报告写“多家平均”）；和平博比只看看（结论写“只看看”，只算有平博的比赛）；
+    有和日职、中超、五大联赛并排的表。"""
+    s = second_settings(settings, tmp_path)
+    s["compare"] = dict(s["compare"], n_boot=50)
+    s["kor_study"]["output"] = str(tmp_path / "reports" / "韩K.md")
+    pred = fake_pred(["KOR"], [2021, 2022, 2023], per_week=3, weeks=30)
+    avg = pred[pred["model"] == "pinnacle_close"].assign(model="market_avg")
+    keep_pin = pred["model"] != "pinnacle_close"
+    keep_pin |= pred["season"] == 2023                      # 平博只有 2023 有（90 场）
+    write_run(tmp_path / "backtest", "kor_dev", pd.concat([pred[keep_pin], avg], ignore_index=True))
+    _, totals, out = a.run(s, "kor_study")
+    assert set(totals["league"]) == {"KOR"} and (totals["n"] == 270).all()
+    assert (totals["log_loss_verdict"] == a.SMALL).all()    # 270 < min_total_n 1000：不下结论
+    look = pd.read_csv(out.with_name(out.stem + "_只看看_平博.csv"), encoding="utf-8-sig")
+    assert (look["n"] == 90).all() and (look["log_loss_verdict"] == a.LOOK).all()
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("# 韩K 开发回测") and "多家平均" in text and "只看看：和平博收盘比" in text
+    assert "和日职、中超、五大联赛并排" in text and "| 日职 | dyn_q1e5_b01 | 平博收盘 | 3,132 |" in text
+    assert "推荐" not in text and "下注" not in text

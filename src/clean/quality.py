@@ -25,6 +25,11 @@ def league_codes(settings: dict) -> list[str]:
     return [*settings["leagues"]["top"], *settings["leagues"]["second"]]
 
 
+def all_league_codes(settings: dict) -> list[str]:
+    """settings.yaml 的 leagues 里所有组的联赛代码（top、second、asia……）。"""
+    return [c for group in settings["leagues"].values() for c in group]
+
+
 # 小组赛、联赛阶段（不是淘汰赛，没有“谁晋级”）
 GROUP_ROUNDS = ("G", "G1", "G2", "LP")
 
@@ -202,7 +207,9 @@ def run_checks(con: sqlite3.Connection, settings: dict, today: date | None = Non
          "select competition, match_date, home_team, away_team from matches "
          f"where season >= 2019 and kickoff_utc is null and {is_league}", leagues)])
 
-    for name, explain, rows in cup_checks(con, leagues):
+    # 杯赛检查跳过 settings 的 leagues 里所有联赛（不只 top、second）：韩K 联赛比赛的 round 记第几个轮次（不是空的），
+    # 不跳过就会被当成杯赛淘汰赛（需求文档第 4 节“第 11 阶段：韩K”）。日职、中超的 round 是空的，本来就不查
+    for name, explain, rows in cup_checks(con, all_league_codes(settings)):
         add(name, explain, rows)
 
     # 抽水检查：赔率倒数之和 = 公司给的各结果概率之和，比 1 多出来的部分就是公司的抽水。

@@ -287,7 +287,9 @@ class Collector:
         if not (folder / f"{today}.html.gz").exists():
             self.fetch(url, "history_page", folder / f"{today}.html.gz", check_html, once=False)
         files = sorted(f for f in folder.glob("*.html.gz") if ".suspicious." not in f.name) if folder.exists() else []
-        return parse_history(gzip.decompress(files[-1].read_bytes()).decode("utf-8")) if files else {}
+        # 一年一个赛季的联赛（韩K，settings 里 calendar_year: true）赛季写成“2023”，五大联赛写成“2023/24”
+        calendar = bool(self.cfg.get("calendar_year", False))
+        return parse_history(gzip.decompress(files[-1].read_bytes()).decode("utf-8"), calendar) if files else {}
 
     def season_games(self, league: str, season: int, season_id: int):
         """已结束赛季的赛季页（只存一次）→ 比赛列表。"""

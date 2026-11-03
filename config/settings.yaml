@@ -46,7 +46,7 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
   second: {E1: 英冠, SP2: 西乙, D2: 德乙, I2: 意乙, F2: 法乙}
   # 第 11 阶段（2026-11-03）：football-data “新联赛”文件里的亚洲联赛。一年一个赛季（2024 = 2024 赛季），
   # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响。还没接进实时预测、定时任务、网页
-  asia: {JPN: 日职, CHN: 中超}
+  asia: {JPN: 日职, CHN: 中超, KOR: 韩K}   # KOR：懂球帝来源（2026-11-03 工作树 KR 加，第 4 节“韩K 回补和开发回测”）
 
 football_data:
   timezone: Europe/London    # football-data 的开球时间是英国当地时间（已核对，见需求文档 6.1）
@@ -156,6 +156,37 @@ dongqiudi:
   # 懂球帝“时间待定”（Uncertain）的比赛，开球时间是占位的（同一轮都写成同一个时间，常常是这一轮靠后的日子），
   # 所以日期往前挪几天，当作“这一轮从哪天开始”（date_precision = round），宁早勿晚，取数层就不会让赛前预测看到开球后的东西
   uncertain_back_days: 3
+
+# 韩K（K联赛 1 级）历史回补和导入（需求文档第 4 节“第 11 阶段：韩K 回补和开发回测”）。工作树 KR 里做，没接定时任务。
+# 采集 src/collect/dongqiudi_kor.py（用懂球帝采集程序的低频、停止规则），导入 src/clean/dongqiudi_kor_import.py。
+# 不放进上面 dongqiudi.league_ids：每小时的懂球帝任务、懂球帝导入、数据状态页都只看那里，碰不到韩K
+dongqiudi_kor:
+  league: KOR                # 我们的联赛代码（leagues.asia 里登记）
+  league_ids: {KOR: 117}     # 懂球帝的联赛编号（历届赛季页 https://m.dongqiudi.com/zhanbao/lishi/117）
+  calendar_year: true        # 一年一个赛季：历届赛季页写“2023”，不是“2023/24”
+  min_interval_seconds: 10   # 两次请求至少隔几秒（比五大联赛的 5 秒慢一倍）
+  first_season: 2010         # 赛季页从哪年下（2010–2016 只当热身历史）
+  odds_first_season: 2017    # 赔率从哪年下（2015 没有赔率；2017 起胜平负 2–3 家，见需求文档 6.1）
+  last_season: 2023          # 到哪年为止：只下开发赛季（考试赛季 2024、2025 不下，程序里还会按 season_role 再查）
+  db_source: dongqiudi-kor   # 数据库里的来源名（和五大联赛的 dongqiudi 分开）
+  country: 韩国              # teams 表的国家
+  local_timezone: Asia/Seoul # 韩国时间：导入时查英国、北京、韩国三个日期是不是一样
+  report_file: 韩K_导入报告.md   # 导入报告（放 paths.reports 里）
+  # 轮次名字怎么分（2026-11-03 把 2010–2023 十四季的赛季页都看过）。两样都不是的名字，下载和导入都报错（不猜）
+  # 联赛比赛：“<下面的前缀> 第N轮”。常规赛以后分组打的争冠组、保级组（以前叫冠军附加、降级附加）也是联赛比赛
+  league_round_prefixes: [联赛, 争冠组, 保级组, 冠军附加, 降级附加]
+  non_league_rounds:          # 不是联赛比赛（不导入、不下赔率）
+    - 升降级附加赛            # K1 倒数几名和 K2 球队的附加赛（2021、2022、2023 赛季页最后一个轮次）
+    - 附加赛第一轮            # 2010、2011 前 6 名的冠军季后赛（淘汰赛）
+    - 附加赛 第2轮            # 2010 冠军季后赛第二轮（只有 1 场；名字像“第N轮”，但是淘汰赛）
+    - 附加赛                  # 2011 冠军季后赛第二轮
+    - 附加赛半决赛            # 2011 冠军季后赛半决赛
+    - 半决赛                  # 2010 冠军季后赛半决赛
+    - 总决赛                  # 2010 冠军季后赛决赛（两回合）
+    - 决赛                    # 2011 冠军季后赛决赛（两回合）
+  league_team_min_share: 0.5 # 一季出场次数少于“本季中位数 × 这个数”的队不该有（有就报错，说明上面的规则漏了）
+  min_books_average: 2       # “多家平均”至少要几家公司（2017 年一场只有 2 家胜平负）
+  max_requests: 400          # 一次运行最多发几次请求（分段跑：到数就停，下次接着来）
 
 # 数据状态页 src/jobs/status_page.py（需求文档第 6.2、8 节）：超过这些界限就在网页上标出来，并弹窗提醒一次
 status:
@@ -468,6 +499,27 @@ second_study:                 # 次级联赛开发回测和平博收盘比，同
   five_league_reference:      # 第 4 节步骤 6 结果（五大联赛 2014/15–2023/24，T-24），只用来核对重跑
     dyn_q1e5_b01: {model: 0.98187, pinnacle: 0.9643, n: 18085}
     gb_l7: {model: 0.97884, pinnacle: 0.96429, n: 18085}
+
+kor_study:                    # 韩K 开发回测和标杆比，同一个程序 src/evaluate/asia_study.py --section kor_study（需求文档第 4 节“第 11 阶段：韩K”，跑之前写下）
+  title: 韩K 开发回测：模型和多家平均收盘比
+  # 回测（工作树 KR）：python -m src.evaluate.backtest --leagues KOR --first 2017 --last 2023 --models dyn_q1e5_b01 gb_l7 --horizons 24 --name kor_dev
+  runs:
+    KOR: [kor_dev]
+  horizon: T-24
+  benchmark: market_avg       # 主标杆：多家平均收盘去水（韩K 的平博胜平负年份不全，原因见需求文档）
+  bench_label: 多家平均
+  look_benchmarks: {pinnacle_close: 平博}   # 只看看：有平博胜平负收盘的比赛再和平博比，不下结论
+  metrics: [log_loss, brier, hit]
+  min_season_n: 100           # 一季可比场数少于这个，标“样本少”
+  min_total_n: 1000           # 合计少于这么多场，只列数、不下结论
+  output: data/reports/韩K_开发回测对比.md   # 报告放这里（data/ 不进 Git）
+  side_by_side:               # 只并排看：别的联赛已经写下的数（需求文档第 4 节“第 11 阶段结果”，标杆是平博收盘，口径不同）
+    - {league: 日职, model: dyn_q1e5_b01, bench: 平博收盘, n: 3132, model_ll: 1.0386, bench_ll: 1.0278, lo: 0.0049, hi: 0.0163, source: 第 11 阶段（J1）}
+    - {league: 日职, model: gb_l7, bench: 平博收盘, n: 1793, model_ll: 1.0442, bench_ll: 1.0305, lo: 0.0066, hi: 0.0211, source: 第 11 阶段（J1）}
+    - {league: 中超, model: dyn_q1e5_b01, bench: 平博收盘, n: 1806, model_ll: 0.9775, bench_ll: 0.9270, lo: 0.0371, hi: 0.0644, source: 第 11 阶段（J1）}
+    - {league: 中超, model: gb_l7, bench: 平博收盘, n: 600, model_ll: 0.9612, bench_ll: 0.8837, lo: 0.0493, hi: 0.1035, source: 第 11 阶段（J1）}
+    - {league: 五大联赛, model: dyn_q1e5_b01, bench: 平博收盘, n: 18085, model_ll: 0.98187, bench_ll: 0.9643, source: 第 4 节步骤 6}
+    - {league: 五大联赛, model: gb_l7, bench: 平博收盘, n: 18085, model_ll: 0.97884, bench_ll: 0.96429, source: 第 4 节步骤 6}
 
 models:                    # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
