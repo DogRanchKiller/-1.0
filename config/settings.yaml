@@ -438,7 +438,38 @@ asia_study:                   # 日职、中超开发回测和平博收盘比 sr
     dyn_q1e5_b01: {model: 0.98187, pinnacle: 0.9643, n: 18085}
     gb_l7: {model: 0.97884, pinnacle: 0.96429, n: 18085}
 
-models:                    # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
+second_study:                 # 次级联赛开发回测和平博收盘比，同一个程序 src/evaluate/asia_study.py --section second_study（需求文档第 4 节“第 11 阶段：次级联赛开发回测”，跑之前写下）
+  title: 次级联赛开发回测：模型和平博收盘比
+  # 每个联赛读哪几次回测。五个次级联赛在同一次回测里一起跑（梯度提升树用这几个联赛一起训练，和五大联赛一样）：
+  #   python -m src.evaluate.backtest --leagues E1 SP2 D2 I2 F2 --first 2014 --last 2023 --models dyn_q1e5_b01 gb_l7 --horizons 24 --name l2_second_2014-2023
+  runs:
+    E1: [l2_second_2014-2023]
+    SP2: [l2_second_2014-2023]
+    D2: [l2_second_2014-2023]
+    I2: [l2_second_2014-2023]
+    F2: [l2_second_2014-2023]
+  pooled:                     # 合在一起再算一次（组名: 包括的联赛）
+    次级联赛合计: [E1, SP2, D2, I2, F2]
+  models: [gb_l7, dyn_q1e5_b01]   # 算“差距之差”的模型（上线的 gb_l7 和它里面带的比分模型 dyn）
+  horizon: T-24
+  benchmark: pinnacle_close   # 平博收盘去水（按比例，backtest.benchmark_devig_method）
+  metrics: [log_loss, brier, hit]
+  min_season_n: 100           # 一季可比的场数少于这个，标“样本少”（和日职、中超一样）
+  min_total_n: 1000           # 一个联赛合计少于这么多场，只列数、不下结论
+  era_split: 2017             # 只看看：这个赛季以前 / 以后分开（次级联赛 2017/18 起才有射门数据）
+  output: data/reports/次级联赛_开发回测对比.md   # 报告放这里（data/ 不进 Git）
+  gap_reference:              # 和五大联赛比“差距之差”：同一段赛季、同样两个模型，在这个工作树里重跑一次
+    #   python -m src.evaluate.backtest --leagues E0 SP1 D1 I1 F1 --first 2014 --last 2023 --models dyn_q1e5_b01 gb_l7 --horizons 24 --name l2_top5_2014-2023
+    run: l2_top5_2014-2023
+    name: 五大联赛
+    codes: [E0, SP1, D1, I1, F1]
+    reproduce_tol: 0.0001     # 重跑的合计和第 4 节步骤 6 的数（下面 five_league_reference）差超过这个就报错
+    same_country: {E1: E0, SP2: SP1, D2: D1, I2: I1, F2: F1}   # 只看看：和同一国家的顶级联赛比
+  five_league_reference:      # 第 4 节步骤 6 结果（五大联赛 2014/15–2023/24，T-24），只用来核对重跑
+    dyn_q1e5_b01: {model: 0.98187, pinnacle: 0.9643, n: 18085}
+    gb_l7: {model: 0.97884, pinnacle: 0.96429, n: 18085}
+
+models:                  # 第 0 步模型 src/models（需求文档第 4 节步骤 0）
   min_matches: 200           # 拟合窗口里少于这么多场就不出预测（数据太少，猜的成分太大）
   frequency:                 # 历史频率基线：按联赛的主胜 / 平 / 客胜比例
     window_days: 1095        # 只看截止前最近 3 年（约 3 个赛季）的比赛。主场优势在变（2020/21 空场降到 40.8%），太久远的不用
