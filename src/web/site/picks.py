@@ -35,6 +35,9 @@ SCORE_TOP = 4                      # 比分给最可能的几个（规则的一�
 OU_LINE = 2.5                      # 大小球固定看这条线（picks_v1 定下的，存档里融合后只存了“大2.5球”）
 MARKETS = ("1x2", "ah", "ou", "score")
 MARKET_NAMES = {"1x2": "胜平负", "ah": "让球（亚盘）", "ou": "大小球 2.5", "score": f"比分 {SCORE_TOP} 个"}
+# 单场页“四个玩法的预测”表从上到下的顺序（只管显示，2026-11-05 你定的：亚盘放最前面当主结论）。
+# 算命中率、存参考、接口返回用的还是上面的 MARKETS（顺序不动，免得战绩页、历史参考、/api 跟着变）。
+DISPLAY_ORDER = ("ah", "1x2", "ou", "score")
 # 结算结果 → 算命中率用的分值（和期末考试算亚盘命中率的写法一样）：赢 1、赢半 0.5、走 0、输半 −0.5、输 −1
 VALUE = {"win": 1.0, "half_win": 0.5, "push": 0.0, "half_loss": -0.5, "loss": -1.0}
 OUTCOME_TEXT = {"win": "中", "half_win": "赢半", "push": "走盘", "half_loss": "输半", "loss": "没中"}
@@ -344,6 +347,41 @@ def pick_text(market: str, pick: dict | None, home: str, away: str) -> str:
     if market == "ou":
         return f"{'大' if pick['side'] == 'over' else '小'} {pick['line']:g} 球"
     return "、".join(f"{h}–{a}" for h, a in pick["scores"])
+
+
+def ah_sentence(pick: dict | None, home: str, away: str) -> str | None:
+    """亚盘倾向的一句话（未转义；调用的地方负责转义）。首页每场那一句、单场页的大字结论都用它（2026-11-05 起亚盘放最前面）。
+
+    pick 是 pick_ah 给的那个（主盘口上胜算较大的那一边）；没有合格的主盘口（pick 是 None）返回 None，
+    调用的地方退回原来的胜平负写法。盘口的中文叫法用预览页的 ah_text（和“比分概率和各玩法”里一样），
+    换成被看好那一队自己的盘口：主队 -0.5 是“主让半球”→ 主队“让半球”；客队那边是 +0.5 →“主受让半球”→ 客队“受让半球”。
+    例：
+      倾向利物浦让半球赢盘，胜算 53%
+      倾向阿森纳受让平半赢盘，胜算 55%
+      倾向利物浦赢盘（平手盘），胜算 54%（平手没有谁让谁）
+      利物浦让半球赢盘的胜算 51%，接近五五开（存档写着没到倾向门槛：lean 是 False，门槛不在这里重算）
+      利物浦让半球赢盘的胜算 51%（这一版没有存倾向）（接融合以前的旧存档：lean 是 None，不判断够不够倾向）
+    “胜算”= 赢一半算一半、走盘不算时这一边赢的机会（和需求文档第 3 节“方向怎么定”一样）。只说哪边更可能，不是值得买。
+    """
+    from src.web.preview_page import ah_text   # 放这里：只有这里用，免得顶上多一层导入
+
+    if pick is None:
+        return None
+    team = home if pick["side"] == "home" else away
+    # 被看好那一队自己的盘口：line 永远是主队的，客队那边正负号反过来
+    own = pick["line"] if pick["side"] == "home" else -pick["line"]
+    name = ah_text(own)                        # 例：主让半球、主受让平半、平手
+    level = name[1:] if name.startswith("主") else name   # 去掉“主”字，变成这一队自己“让半球”“受让平半”
+    p = pct0(pick["p"])
+    if level == "平手":
+        what, back = f"平手盘{team}赢盘", f"倾向{team}赢盘（平手盘），胜算 {p}"
+    else:
+        what, back = f"{team}{level}赢盘", f"倾向{team}{level}赢盘，胜算 {p}"
+    if pick.get("lean") is False:
+        return f"{what}的胜算 {p}，接近五五开"
+    if pick.get("lean") is None:
+        return f"{what}的胜算 {p}（这一版没有存倾向）"
+    return back
 
 
 def outcome_html(outcome: str | None) -> str:

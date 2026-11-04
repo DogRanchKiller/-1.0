@@ -1,8 +1,9 @@
 """单场页 match/<match_id>.html（需求文档第 3 节“输出”、第 8 节）。
 
 一页从上到下（2026-11-03 起精简：一眼要看的放上面，细节默认收起）：
-- 结论：一句大字（谁赢的可能更大）+ 一根大号三色概率条 + 信心等级。
-- 四个玩法的预测：胜平负、让球、大小球 2.5 各一个，比分 4 个，踢完写中没中（规则 picks_v2，src/web/site/picks.py）。
+- 结论：一句大字（2026-11-05 起先写亚盘倾向，例“倾向利物浦让半球赢盘，胜算 53%”；没有合格的主盘口才写谁赢的可能更大），
+  有亚盘那句时下面一行小一点的字写胜平负那句；再下面一根大号三色概率条 + 信心等级。
+- 四个玩法的预测：让球（亚盘）、胜平负、大小球 2.5 各一个，比分 4 个（2026-11-05 起亚盘排第一），踢完写中没中（规则 picks_v2，src/web/site/picks.py）。
 - 为什么这样看（src/web/site/story.py）：最多 3 句话；下面收起的是结论链 6 步、四块分析、影响最大的几类因素。
 - 更多数据（点标题展开，<details>，不用脚本）：比分概率热力图和各玩法、各版本对比（简表 + 完整记录）、
   赔率变动图、首发名单、赛后复盘；最后一块“流程记录和技术细节”里是各家公司价格、竞彩、逐场贡献解释完整版、流程记录。
@@ -64,13 +65,15 @@ def final_probs(row: dict) -> tuple[list[float], str]:
     return [float(row["p_home"]), float(row["p_draw"]), float(row["p_away"])], "模型"
 
 
-def leans(row: dict) -> list[str]:
-    """各玩法的倾向，一项一句（和预览页同一个写法）。存档里缺了某一项就不写那一项。"""
+def leans(row: dict, skip_ah: bool = False) -> list[str]:
+    """各玩法的倾向，一项一句（和预览页同一个写法）。存档里缺了某一项就不写那一项。
+    skip_ah=True：不写亚盘那一句（首页那一格最上面已经单独写了亚盘倾向，下面不重复）。
+    接口 /api/... 的 "leans" 字段用的是默认的 skip_ah=False，内容和以前一样。"""
     ln = fusion(row).get("倾向")
     if not isinstance(ln, dict):
         return []
     try:
-        return lean_texts({"leans": {k: ln.get(k) for k in LEAN_KEYS}})
+        return lean_texts({"leans": {k: (None if skip_ah and k == "ah" else ln.get(k)) for k in LEAN_KEYS}})
     except (KeyError, TypeError, IndexError):
         return []
 
@@ -103,8 +106,9 @@ def probs_text(p) -> str:
     return " / ".join(f"{OUTCOMES[i]} {pct0(x)}" for i, x in enumerate(p))
 
 
-def conclusion_html(row: dict) -> str:
-    """一版的结论：胜平负概率、信心等级、倾向（首页每场一格用）。"""
+def conclusion_html(row: dict, skip_ah: bool = False) -> str:
+    """一版的结论：胜平负概率、信心等级、倾向（首页每场一格用）。
+    skip_ah=True：倾向那一行不写亚盘（调用的地方已经把亚盘倾向写在最上面当主结论了，见 pages.latest_cell）。"""
     p, src = final_probs(row)
     st = fusion(row).get("状态")
     bits = [f"<span class='probs'>{e(probs_text(p))}</span> <span class='tag'>{e(level_name(level(row)))}</span>"]
@@ -112,7 +116,7 @@ def conclusion_html(row: dict) -> str:
         bits.append(" <span class='tag warn'>只有模型（没和赔率融合）</span>")
     elif st and st != "已融合":
         bits.append(f" <span class='tag warn'>{e(st)}</span>")
-    lt = leans(row)
+    lt = leans(row, skip_ah=skip_ah)
     if lt:
         bits.append("<br><span class='small'>" + "；".join(e(t) for t in lt) + "</span>")
     return "".join(bits)
@@ -579,7 +583,8 @@ def tags_html(row: dict) -> str:
 
 
 def picks_html(data: SiteData, mid: int, row: dict) -> str:
-    """结论卡片里的“四个预测”表：胜平负、让球、大小球 2.5 各一个，比分 4 个（规则 picks_v2，src/web/site/picks.py）。
+    """结论卡片里的“四个预测”表：让球（亚盘）、胜平负、大小球 2.5 各一个，比分 4 个（规则 picks_v2，src/web/site/picks.py）。
+    从上到下按 pk.DISPLAY_ORDER 排（2026-11-05 起亚盘排第一，只是显示顺序；算命中率、接口还是 pk.MARKETS 的顺序）。
     踢完了写中没中；“预测”只是哪个更可能，不是值得买。"""
     from src.web.site import picks as pk
 
@@ -596,7 +601,7 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
     else:
         late = "这一版是开球以后才出的，不算进战绩页的命中率。"
     rows = []
-    for k in pk.MARKETS:
+    for k in pk.DISPLAY_ORDER:
         q = mine[k]
         own = ("—" if q is None else f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>{pct0(q['p'])}</span>"
                + (f" {pk.outcome_html(pk.settle(k, q, score))}" if score else ""))

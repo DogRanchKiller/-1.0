@@ -1,7 +1,7 @@
 """单场页最上面“看得懂”的几块（需求文档第 3 节“结论链”“四块分析”、第 8 节）。
 
 给不看技术细节的人：
-- 一句话结论 + 一条三色概率条（绿 = 主胜，灰 = 平，蓝 = 客胜；只用样式画，不用图片和脚本）。
+- 一句话结论（有合格的亚盘主盘口时先写亚盘倾向，下面一行写胜平负）+ 一条三色概率条（绿 = 主胜，灰 = 平，蓝 = 客胜；只用样式画，不用图片和脚本）。
 - “为什么这样看”：最多 3 句话（最后的概率从哪来、模型自己怎么看、要注意什么），一直显示。
 - 下面三块默认收起（点标题展开）：
   - “结论是怎么得出来的”：6 步，每一步都填这场比赛自己的数字（模型猜几球 → 比分 → 胜平负 → 看赔率 → 合并 → 倾向和信心）。
@@ -25,7 +25,7 @@ from src.web.preview_page import ah_text
 from src.web.site.common import OUTCOMES, bar_html, bj_text, details, e, level_name, pct0, pct1
 from src.web.site.data import SiteData
 from src.web.site.match import final_probs, fusion, latest_lineup, lineup_schedule, uncertain, version_matrices
-from src.web.site.picks import used_odds
+from src.web.site.picks import ah_sentence, pick_ah, used_odds
 
 # 降级候选因素的中文名（src/predict 存的“降级候选因素”里的键）
 FACTOR_NAMES = {"gap": "模型和赔率分歧大", "early": "赛季前几轮", "promoted": "有升班马", "no_pinnacle": "没有平博赔率",
@@ -420,12 +420,21 @@ def factors_html(row: dict, hn: str, atol: float, n: int = 3) -> str:
 
 # ---------- 合起来 ----------
 def hero_html(data: SiteData, mid: int, row: dict) -> str:
-    """结论卡片最上面：一句话 + 大号概率条 + 颜色说明。"""
+    """结论卡片最上面：一句话 + 大号概率条 + 颜色说明。
+
+    2026-11-05 起（你定的，只改显示）：大字先写亚盘倾向（picks.ah_sentence，例“倾向利物浦让半球赢盘，胜算 53%”），
+    下面一行小一点的字写原来胜平负那句（headline，例“利物浦赢的可能更大（50%）”）；
+    没有合格的主盘口（picks.pick_ah 是 None）时大字照旧写胜平负那句，没有第二行。"""
     info = data.matches[mid]
     home, away = info["home_team"], info["away_team"]
     p, _ = final_probs(row)
-    return (f"<p class='headline'>{e(headline(data, row, home, away))}</p>"
-            f"{bar_html(p, big=True)}{bar_legend(data, home, away)}")
+    result = headline(data, row, home, away)
+    ah = ah_sentence(pick_ah(row), data.zh(home), data.zh(away))
+    if ah:
+        top = f"<p class='headline'>{e(ah)}</p><p class='subhead'>胜平负：{e(result)}</p>"
+    else:
+        top = f"<p class='headline'>{e(result)}</p>"
+    return f"{top}{bar_html(p, big=True)}{bar_legend(data, home, away)}"
 
 
 def why_points(data: SiteData, row: dict, home: str, away: str) -> list[str]:

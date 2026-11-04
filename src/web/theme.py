@@ -148,6 +148,9 @@ details.more > summary { font-size: 16.5px; }
 .points li { margin: 6px 0; }
 /* 结论卡片：一句话 + 大号概率条 */
 .hero .headline { font-size: clamp(20px, 2.6vw, 26px); font-weight: 650; margin: 0 0 12px; color: var(--text); }
+/* 2026-11-05：大字是亚盘倾向时，下面一行小一点的字写胜平负那句；首页每场那一格最上面的亚盘倾向（粗字，单独一行） */
+.hero .subhead { font-size: 17px; color: var(--sub); margin: -6px 0 12px; }
+b.lead { display: block; color: var(--text); font-weight: 650; }
 .pbar { display: flex; width: 100%; max-width: 220px; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 6px;
         background: var(--line); }
 .pbar.big { max-width: none; height: 30px; border-radius: 8px; margin: 4px 0 8px; }

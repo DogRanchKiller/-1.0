@@ -79,11 +79,18 @@ def latest_cell(data: SiteData, mid: int) -> str:
     if lt is None:
         return "<span class='muted'>还没有预测</span>"
     kind, row = lt
-    # 一格里：三色小条 + 概率和信心 + 各玩法倾向，最下面一行淡字写是哪一版。
+    # 一格里：最上面一句亚盘倾向（主结论，2026-11-05 起）+ 三色小条 + 概率和信心 + 其他玩法的倾向，最下面一行淡字写是哪一版。
+    # 亚盘那一句：picks_v2 的让球预测（pk.pick_ah，存档里写的亚盘倾向那一边），例“倾向利物浦让半球赢盘，胜算 53%”；
+    #   没到倾向门槛写“……的胜算 51%，接近五五开”（以存档为准，不重算门槛）。
+    #   没有合格的主盘口（pick_ah 是 None）时这一句不写，格子和以前一模一样（胜平负概率 + 各玩法倾向），就是退回胜平负的写法。
+    # 有亚盘那一句时，下面的倾向行不再重复亚盘（skip_ah），只写胜平负、平局风险、大小球、双方进球。
     # 模型版本、归档状态这些技术信息只放在鼠标悬停的提示里（title），点进单场页的“技术细节”能看到全部。
     p, _ = final_probs(row)
+    info = data.matches[mid]
+    ah = pk.ah_sentence(pk.pick_ah(row), data.zh(info["home_team"]), data.zh(info["away_team"]))
+    lead = f"<b class='lead'>{e(ah)}</b>" if ah else ""
     tip = f"{identity_text(row)}，{archive_name(row.get('archive_status'))}，{bj_text(row['cutoff_utc'])} 截止"
-    return (f"<div title='{e(tip)}'>{bar_html(p)}{conclusion_html(row)}"
+    return (f"<div title='{e(tip)}'>{lead}{bar_html(p)}{conclusion_html(row, skip_ah=bool(ah))}"
             f"<br><span class='small muted'>{e(version_name(kind))}这一版</span></div>")
 
 
@@ -106,6 +113,9 @@ def index_guide(settings: dict) -> str:
             "<li>彩色条：<span class='legend'><span><i class='s0'></i>主队赢</span><span><i class='s1'></i>平局</span>"
             "<span><i class='s2'></i>客队赢</span></span>，越长越可能。下面三个数就是三种结果的可能性，加起来 100%。"
             f"{e(source)}</li>"
+            "<li>每场最上面那句粗字是亚盘（让球）的倾向：在开的公司最多的那条盘口上，哪一队赢盘的胜算大一些，"
+            "例如“倾向主队让半球赢盘，胜算 53%”（赢一半算一半，走盘不算）；两边差不多时写“接近五五开”。"
+            "没有合适的盘口时不写这一句，看下面的胜平负。</li>"
             "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
             f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>"
             "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
