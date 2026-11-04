@@ -31,6 +31,7 @@ import argparse
 import errno
 import hashlib
 import html
+import importlib
 import ipaddress
 import json
 import logging
@@ -810,8 +811,9 @@ def start_live_poller(settings: dict, stop: threading.Event) -> threading.Thread
     if not (settings.get("live") or {}).get("live_poller", False):
         return None
     try:
-        from src.collect import dongqiudi_live
-        target = dongqiudi_live.run_forever
+        # 按完整名字到 sys.modules 里找（找不到才真去加载），这样测试换上的假程序一定会被用到；
+        # 写成 from src.collect import dongqiudi_live 的话，真程序已经被加载过时会绕开测试的假程序。
+        target = importlib.import_module("src.collect.dongqiudi_live").run_forever
     except Exception as err:   # noqa: BLE001 —— 故意的：即时比分程序有问题不能挡住网站启动
         LOG.warning("即时比分程序加载不了（%s），这次不开即时比分", type(err).__name__)
         return None
