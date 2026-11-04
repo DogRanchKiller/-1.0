@@ -23,10 +23,10 @@ def test_different_processes_cannot_refresh_the_same_database(tmp_path):
     settings = settings_for(tmp_path)
     command = [sys.executable, "-X", "utf8", "-c", child_code(settings)]
     with data_write_lock(settings):
-        failed = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        failed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=15)
         assert failed.returncode != 0 and "TimeoutError" in failed.stderr
         assert "acquired" not in failed.stdout
-    succeeded = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    succeeded = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=15)
     assert succeeded.returncode == 0, succeeded.stderr
     assert succeeded.stdout.strip() == "acquired"
 
@@ -73,7 +73,7 @@ def test_source_job_lock_blocks_duplicate_job_but_not_other_source(tmp_path):
         with data_write_lock(settings):
             pass
         failed = subprocess.run([sys.executable, "-X", "utf8", "-c", code],
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, encoding="utf-8", timeout=15)
         assert failed.returncode != 0 and 'TimeoutError' in failed.stderr
         with source_refresh_lock(settings, "football"):
             pass
