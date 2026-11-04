@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 import types
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +21,7 @@ from tests.test_serve import Clock, Running, make_config, tree  # noqa: F401（t
 from tests.test_site import NOW, env, write_review  # noqa: F401（env 是 pytest 的 fixture）
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-       "connect-src 'self'; frame-ancestors 'none'")
+       "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
 
 @pytest.fixture
@@ -34,8 +36,10 @@ def world(env, tree):
     con.commit()
     con.close()
     s["paths"]["database"] = str(db)
-    s["live"] = {"dynamic": True, "cache_seconds": 60, "stale_seconds": 600, "retry_seconds": 15,
-                 "scores_file": str(tmp / "live" / "scores.json"), "live_poller": False}
+    s["live"] = {"dynamic": True, "meta_refresh": True, "cache_seconds": 60, "min_reload_seconds": 60, "wait_seconds": 10,
+                 "stale_seconds": 600, "retry_seconds": 15, "live_poller": False, "poller_stop_seconds": 5}
+    dq = s.get("dongqiudi") or {}
+    s["dongqiudi"] = {**dq, "live": {**(dq.get("live") or {}), "output": str(tmp / "live" / "scores.json")}}
     return s, tmp
 
 
@@ -188,6 +192,7 @@ def test_dynamic_pages_csp_script_no_advice(world):
         h = srv.cookie()
         snap = srv.live.snapshot()
         team = next(iter(snap.team_by_file))
+        refresh = int(s["site"]["refresh_minutes"]) * 60
         for path in ("/", "/index.html", "/match/1.html", "/match/10.html", f"/team/{team}", "/record.html",
                      "/lifecycle.html", "/bots.html"):
             r, body = srv.req("GET", path, h)
@@ -196,7 +201,8 @@ def test_dynamic_pages_csp_script_no_advice(world):
             assert r.getheader("Content-Security-Policy") == CSP, path
             assert '<script src="/static/site.js" defer></script>' in html, path
             assert html.lower().count("<script") == 1, path          # 只有这一个，没有内联脚本
-            assert "http-equiv" not in html, path                   # 不自己整页重新加载
+            # site.js 还是空的：照样按 site.refresh_minutes 整页重新加载（live.meta_refresh: true）
+            assert f'<meta http-equiv="refresh" content="{refresh}">' in html, path
             assert "推荐" not in html, path
             assert "现场从数据库读出来生成的" in html and "退出登录" in html, path
             assert "首页INDEX" not in html                          # 不是静态文件
@@ -230,24 +236,55 @@ def test_static_files_and_traversal(world):
 
 # ---------- 内存里的数据：什么时候重新读 ----------
 
+def write_fetch_log(db):
+    """模拟即时比分程序往数据库写一行抓取记录（数据库的修改时间变了，但网页用的内容没变）。"""
+    con = sqlite3.connect(db)
+    con.execute("insert into fetch_log (url, source, data_type, fetched_at_utc, status) values ('u', 'dongqiudi', 'live', "
+                "'2026-11-06 12:00:00', 'saved')")
+    con.commit()
+    con.close()
+
+
 def test_cache_reload_rules(world):
     s, tmp = world
     clock, loader = Clock(), CountingLoader()
+    s["live"]["cache_seconds"], s["live"]["min_reload_seconds"] = 120, 30
     live = make_live(s, tmp, clock, loader)
+    db = s["paths"]["database"]
     first = live.snapshot()
     assert first is not None and loader.calls == 1
-    clock.t += 30
-    assert live.snapshot() is first and loader.calls == 1          # 60 秒以内、文件没变：不重新读
-    clock.t += 31
+    write_fetch_log(db)
+    clock.t += 10
+    assert live.snapshot() is first and loader.calls == 1          # 文件变了，但离上次读不到 min_reload_seconds（30）：不读
+    clock.t += 21
     second = live.snapshot()
-    assert second is not first and loader.calls == 2               # 超过 cache_seconds：重新读
-    db = s["paths"]["database"]
-    st = os.stat(db)
-    os.utime(db, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))   # 数据库改了（修改时间变了）
+    assert second is not first and loader.calls == 2               # 过了 30 秒、文件变过：重新读
+    assert second.version == first.version                         # 只多了抓取记录，内容没变：数据版本不变
+    clock.t += 31
+    assert live.snapshot() is second and loader.calls == 2         # 文件没再变、没到 cache_seconds（120）：不读
+    con = sqlite3.connect(db)
+    con.execute("update teams set name_zh = '阿森纳队' where team_id = 'Arsenal'")
+    con.commit()
+    con.close()
     third = live.snapshot()
-    assert loader.calls == 3 and third.version != second.version   # 不等 60 秒，马上重新读
+    assert loader.calls == 3 and third.version != second.version   # 内容真的变了：数据版本跟着变
+    clock.t += 31
     (tmp / "review" / "matches" / "10.json").write_text("{}", encoding="utf-8")   # 复盘文件夹多了一个文件
-    assert live.snapshot().version != third.version and loader.calls == 4
+    assert live.snapshot() is not third and loader.calls == 4
+    clock.t += 121
+    fourth = live.snapshot()
+    assert loader.calls == 5 and fourth.stamp == live.fingerprint()   # 超过 cache_seconds：文件没变也重新读一次
+
+
+def test_data_version_is_content_hash(world):
+    """数据版本只看内容：同一个数据库读两次（“现在”差一分钟）一样；和文件的修改时间无关。"""
+    s, tmp = world
+    times = iter([NOW, NOW + timedelta(minutes=1)])
+    live = live_site.LiveSite(s, tmp / "site", clock=Clock(), now=lambda: next(times))
+    a = live._build(live.fingerprint())
+    write_fetch_log(s["paths"]["database"])
+    b = live._build(live.fingerprint())
+    assert a.version == b.version and len(a.version) == 16 and a.stamp != b.stamp
 
 
 def test_concurrent_requests_load_once(world):
@@ -366,3 +403,149 @@ def test_live_poller_thread(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="site_server"):
         assert serve.start_live_poller({"live": {"live_poller": True}}, stop) is None
     assert "即时比分程序加载不了" in caplog.text
+
+
+def test_stop_live_poller_waits_with_timeout(monkeypatch, caplog):
+    """服务器关掉时：听话的线程马上停；正在联网、不理 stop 的线程最多等 timeout 秒，不挡着退出。"""
+    stop = threading.Event()
+    assert serve.stop_live_poller(None, stop, 5) is True and stop.is_set()
+    good_stop = threading.Event()
+    fake = types.ModuleType("src.collect.dongqiudi_live")
+    fake.run_forever = lambda settings, ev: ev.wait(30)
+    monkeypatch.setitem(sys.modules, "src.collect.dongqiudi_live", fake)
+    t = serve.start_live_poller({"live": {"live_poller": True}}, good_stop)
+    started = time.monotonic()
+    assert serve.stop_live_poller(t, good_stop, 5) is True and not t.is_alive()
+    assert time.monotonic() - started < 3
+    release = threading.Event()
+    fake.run_forever = lambda settings, ev: release.wait(30)          # 不理 stop（比如正在等懂球帝回话）
+    bad_stop = threading.Event()
+    t = serve.start_live_poller({"live": {"live_poller": True}}, bad_stop)
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="site_server"):
+        assert serve.stop_live_poller(t, bad_stop, 0.3) is False
+    assert 0.25 <= time.monotonic() - started < 3 and t.daemon and "没停下" in caplog.text
+    release.set()
+    t.join(5)
+
+
+# ---------- 网页自动刷新 ----------
+
+def test_static_and_dynamic_pages_keep_meta_refresh(world):
+    """site.js 还是空的：静态页、现读现出的页都还带 meta refresh；静态页没有脚本。"""
+    s, tmp = world
+    from src.web.site.common import LiveMinutes, page
+    minutes = int(s["site"]["refresh_minutes"])
+    tag = f'<meta http-equiv="refresh" content="{minutes * 60}">'
+    static = page("t", "<p>x</p>", "", NOW, minutes)
+    assert tag in static and "<script" not in static.lower() and "/static/site.css" not in static
+    live = page("t", "<p>x</p>", "", NOW, LiveMinutes(minutes))
+    assert tag in live and live.lower().count("<script") == 1 and "现场从数据库读出来生成的" in live
+    off = page("t", "<p>x</p>", "", NOW, LiveMinutes(0))
+    assert "http-equiv" not in off and '<script src="/static/site.js" defer></script>' in off
+    # 真的生成一次静态首页（和“生成网站”同一个函数）：有 meta refresh、没有脚本、带 data-*
+    data = live_site.load_from_db(s, Path(s["paths"]["database"]), NOW)[0]
+    from src.web.site import pages
+    from src.web.site.common import TeamFiles
+    teams = TeamFiles({data.matches[m][k] for m in data.page_ids for k in ("home_team", "away_team")})
+    html = pages.render_index(data, teams)
+    assert tag in html and "<script" not in html.lower() and "data-match-id='10'" in html
+
+
+def test_meta_refresh_switch_off(world):
+    """live.meta_refresh: false（以后 site.js 会自己更新时）：现读现出的页面不带 meta refresh，静态页照旧。"""
+    s, tmp = world
+    s["live"]["meta_refresh"] = False
+    with LiveRunning(s, tmp) as srv:
+        h = srv.cookie()
+        for path in ("/", "/match/10.html", "/record.html", "/bots.html", "/lifecycle.html"):
+            html = srv.req("GET", path, h)[1].decode("utf-8")
+            assert "http-equiv" not in html and '<script src="/static/site.js" defer></script>' in html, path
+
+
+# ---------- 刚启动、出错 ----------
+
+def test_first_load_wait_has_timeout(world):
+    """一份数据都没有、正在读的那个很慢：别的请求最多等 wait_seconds 秒，然后网页发静态文件、接口回 503。"""
+    s, tmp = world
+    s["live"]["wait_seconds"] = 0.3
+    gate = threading.Event()
+
+    def slow(settings, db_path, now):
+        gate.wait(10)
+        return live_site.load_from_db(settings, db_path, now)
+
+    with LiveRunning(s, tmp, loader=slow) as srv:
+        warm = threading.Thread(target=srv.live.snapshot, daemon=True)
+        warm.start()                                            # 像服务器启动时那样先在后台读
+        time.sleep(0.2)
+        h = srv.cookie()
+        started = time.monotonic()
+        r, body = srv.req("GET", "/", h)
+        assert r.status == 200 and "首页INDEX".encode() in body and time.monotonic() - started < 3
+        assert get_json(srv, "/api/matches", h) == (503, {"error": "data_unavailable"})
+        assert get_json(srv, "/api/match/1", h) == (503, {"error": "data_unavailable"})
+        assert get_json(srv, "/api/version", h)[1]["mode"] == "static"
+        gate.set()
+        warm.join(10)
+        r, body = srv.req("GET", "/", h)
+        assert "首页INDEX".encode() not in body and "现场从数据库读出来生成的" in body.decode("utf-8")
+
+
+def test_live_site_init_error_falls_back_to_static(world, monkeypatch, caplog):
+    """建 LiveSite 时出错（例如设置写错）：服务器照样起来，只发静态文件，日志记一行。"""
+    s, tmp = world
+
+    class Broken:
+        def __init__(self, *a, **k):
+            raise KeyError("site")
+
+    monkeypatch.setattr(live_site, "LiveSite", Broken)
+    with caplog.at_level(logging.WARNING, logger="site_server"):
+        with Running(make_config(tmp, live_settings=s)) as srv:
+            assert srv.server.app.live is None
+            h = srv.cookie()
+            r, body = srv.req("GET", "/", h)
+            assert r.status == 200 and "首页INDEX".encode() in body
+            assert srv.req("GET", "/api/version", h)[0].status == 404
+    assert "现读现出起不来（KeyError）" in caplog.text
+
+
+@pytest.mark.parametrize("text", [
+    "[" * 100_000 + "]" * 100_000,                                                   # 套得太深（json 自己会 RecursionError）
+    '{"status": "ok", "matches": ' + "[" * 50 + "]" * 50 + "}",                     # 套得比约定深
+    '{"status": "ok", "matches": [{"dqd_id": 9010, "minute": 1e999}]}',             # 无穷大
+    '{"status": "ok", "matches": [{"dqd_id": 9010, "minute": NaN}]}',
+    '{"status": "ok", "matches": [{"dqd_id": 9010, "minute": -Infinity}]}',
+    chr(0xFEFF) * 2 + "{}",                                                         # 两个 BOM：不是 JSON
+])
+def test_broken_scores_file_is_error_not_static(world, text):
+    """scores.json 怎么坏都只算“读不了”（status error），网页照样现读现出，不退回静态文件。"""
+    s, tmp = world
+    p = tmp / "live" / "scores.json"
+    p.parent.mkdir(exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    with LiveRunning(s, tmp) as srv:
+        h = srv.cookie()
+        status, body = get_json(srv, "/api/live", h)
+        assert status == 200 and body["status"] == "error" and body["matches"] == [] and body["match_ids"] == {}
+        r, page = srv.req("GET", "/", h)
+        assert r.status == 200 and "首页INDEX".encode() not in page and "现场从数据库读出来生成的" in page.decode("utf-8")
+
+
+def test_scores_file_location_from_dongqiudi_live_output(world):
+    s, tmp = world
+    assert live_site.scores_path(s) == tmp / "live" / "scores.json"
+    assert live_site.scores_path({}).parts[-3:] == ("data", "live", "scores.json")       # 没写时的默认位置
+    assert live_site.scores_path({"dongqiudi": {"live": {}}}).parts[-3:] == ("data", "live", "scores.json")
+    assert "scores_file" not in live_site.DEFAULTS
+
+
+def test_csp_on_static_only_server_too(world):
+    """live.dynamic: false 只发静态文件时，CSP 也是同一条。"""
+    _s, tmp = world
+    with Running(make_config(tmp)) as srv:
+        r, _ = srv.req("GET", "/login")
+        assert r.getheader("Content-Security-Policy") == CSP
+        r, _ = srv.req("GET", "/", srv.cookie())
+        assert r.getheader("Content-Security-Policy") == CSP

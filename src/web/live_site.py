@@ -7,17 +7,22 @@
 - 读一次数据库要好几秒，所以读出来的数据（SiteData）在内存里留一会儿（live.cache_seconds，默认 60 秒）。
   这段时间里打开网页都用内存里的，不再读数据库；生成一页只要零点几秒。
 - 数据库文件、data/review/（复盘）、虚拟投注结果文件夹、比分预测的历史参考文件一改（看文件的“修改时间”和大小），
-  不等 60 秒也马上重新读。
-- 几个人同时打开时只读一次（一把锁）：抢到锁的那个去读，别的请求先用内存里旧的那份；内存里一份都没有时排队等它读完。
+  不等 cache_seconds 就重新读；但两次读之间至少隔 live.min_reload_seconds 秒（默认 60）：
+  比赛期间即时比分程序每两分钟往数据库写一次抓取记录，数据库的修改时间老在变，不能每次都整个重读。
+- 几个人同时打开时只读一次（一把锁）：抢到锁的那个去读，别的请求先用内存里旧的那份；
+  内存里一份都没有时排队等它读完，最多等 live.wait_seconds 秒（默认 10），等不到就先发静态文件。
 - 读失败（数据库被别的程序锁着、文件坏了、任何意外）：继续用内存里上一次读成功的那份，日志里记原因（不记路径和密码）；
   一份都没有时返回 None，服务器改发 data/site/ 里的静态文件（和以前一样）。失败以后隔 live.retry_seconds 秒才再试。
 - 数据库只用只读方式打开（mode=ro），这里不写任何东西。
 
-即时比分：data/live/scores.json 是 WD3 的程序写的（懂球帝即时比分），这里只读、原样转发给 /api/live；
-页面上显示时，用数据库 match_sources 表（懂球帝导入时记的“懂球帝比赛编号 → 我们的 match_id”）对上我们的比赛，对不上的不显示。
+即时比分：scores.json（settings.yaml 的 dongqiudi.live.output，没写时是 data/live/scores.json）是 WD3 的程序写的（懂球帝即时比分），
+这里只读、原样转发给 /api/live；页面上显示时，用数据库 match_sources 表（懂球帝导入时记的“懂球帝比赛编号 → 我们的 match_id”）
+对上我们的比赛，对不上的不显示。
 
 几个词：
-- 指纹（fingerprint）：把一串文件的“修改时间 + 大小”算成一小段文字。哪个文件改了，指纹就变，前端靠它知道该刷新了。
+- 指纹（fingerprint）：把一串文件的“修改时间 + 大小”算成一小段文字。哪个文件改了，指纹就变，用来判断“该不该重新读”。
+- 数据版本（data_version）：把读出来的内容本身算成一小段文字（内容哈希）。重新读了但内容没变，它就不变，
+  前端看它没变就不用刷新（数据库只是多了几行抓取记录时就是这样）。
 - API（数据接口）：网址返回的不是网页，是 JSON 格式的数据，给网页里的脚本（/static/site.js）读。
 """
 from __future__ import annotations
@@ -37,19 +42,26 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote
 
+import pandas as pd
+
 from src.common import markets as site_markets
 from src.common.config import resolve_path
 from src.features import open_readonly
 from src.web.site import bots, lifecycle, match, pages
 from src.web.site import data as site_data
 from src.web.site import picks as pk
-from src.web.site.common import LIVE_REFRESH, TeamFiles, utc_iso
+from src.web.site.common import LiveMinutes, TeamFiles, utc_iso
 from src.web.site.match import final_probs, leans, level, uncertain, version_matrices, version_name
 
 LOG = logging.getLogger("site_server")
 # settings.yaml 里没写 live: 时用的数（写了以 settings.yaml 为准）
-DEFAULTS = {"dynamic": True, "cache_seconds": 60, "stale_seconds": 600, "retry_seconds": 15,
-            "scores_file": "data/live/scores.json", "live_poller": False}
+DEFAULTS = {"dynamic": True, "meta_refresh": True, "cache_seconds": 60, "min_reload_seconds": 60, "wait_seconds": 10,
+            "stale_seconds": 600, "retry_seconds": 15, "live_poller": False, "poller_stop_seconds": 5}
+# 即时比分文件的位置写在 settings.yaml 的 dongqiudi.live.output（WD3 的程序也读这一项，两边只认这一个地方）；没写时用这个
+DEFAULT_SCORES_FILE = "data/live/scores.json"
+LIFECYCLE_CLOCK_KEYS = ("generated_at_utc", "evaluation_cutoff_utc")   # 逐场验收报告里“现在几点”的两项，算数据版本时不算
+LIFECYCLE_SCOPE_CLOCK_KEYS = ("start_utc", "end_utc")                  # 报告 scope 里按“现在”推出来的窗口，也不算
+MAX_LIVE_DEPTH = 8                 # 即时比分文件最多套几层（正常是 3 层：最外面 → matches 列表 → 每场一个）；套得太深当坏文件
 # 懂球帝导入时在 match_sources 表里记的来源名（src/clean/dongqiudi_import.py、dongqiudi_kor_import.py），source_key = 懂球帝比赛编号
 DQD_SOURCES = ("dongqiudi", "dongqiudi-kor")
 MAX_LIVE_BYTES = 2_000_000          # 即时比分文件最大读多少（正常只有几十 KB；太大说明出问题了，不读）
@@ -63,6 +75,65 @@ def settings_live(settings: dict) -> dict:
     return {**DEFAULTS, **(settings.get("live") or {})}
 
 
+def scores_path(settings: dict) -> Path:
+    """即时比分文件 scores.json 在哪：settings.yaml 的 dongqiudi.live.output（WD3 加的那一项）；没写时 data/live/scores.json。"""
+    out = ((settings.get("dongqiudi") or {}).get("live") or {}).get("output")
+    return resolve_path(out if isinstance(out, str) and out else DEFAULT_SCORES_FILE)
+
+
+def _canon(x):
+    """把读出来的数据变成固定写法的一串（算数据版本用）：字典按键排好、表格按行列写出来，同样的内容永远写成同样的一串。"""
+    if isinstance(x, pd.DataFrame):
+        return ["df", [str(c) for c in x.columns], [[_canon(v) for v in row] for row in x.itertuples(index=False)]]
+    if isinstance(x, dict):
+        return ["dict", sorted(([repr(_canon(k)), _canon(v)] for k, v in x.items()), key=lambda kv: kv[0])]
+    if isinstance(x, (list, tuple)):
+        return [_canon(v) for v in x]
+    if isinstance(x, (set, frozenset)):
+        return ["set", sorted(repr(_canon(v)) for v in x)]
+    if isinstance(x, Path):
+        return ["path", x.name]                    # 只用文件名（完整路径和内容无关，换电脑也一样）
+    if isinstance(x, float) and not math.isfinite(x):
+        return ["float", repr(x)]                  # nan 和 nan 不相等，写成文字才比得了
+    if x is None or isinstance(x, (bool, int, float, str)):
+        return x
+    return ["obj", type(x).__name__, str(x)]       # 时间、numpy 数字等
+
+
+def content_version(data: site_data.SiteData, extra) -> str:
+    """数据版本：读出来的内容（不算“现在几点”和设置）+ extra（虚拟投注结果、比分参考文件的修改时间，这两样页面上直接用文件）
+    算成 16 位文字。内容没变，重新读多少次它都一样。"""
+    parts = {f.name: getattr(data, f.name) for f in dataclasses.fields(data)
+             if f.name not in ("now", "settings", "live_scores", "live_stale")}
+    # 逐场验收报告里记着“什么时候做的”和按“现在”往前往后推的窗口（每次读都不一样），这几项不算内容
+    report = {k: v for k, v in (data.lifecycle or {}).items() if k not in LIFECYCLE_CLOCK_KEYS}
+    if isinstance(report.get("scope"), dict):
+        report["scope"] = {k: v for k, v in report["scope"].items() if k not in LIFECYCLE_SCOPE_CLOCK_KEYS}
+    parts["lifecycle"] = report
+    text = json.dumps(_canon([parts, extra]), ensure_ascii=False, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _too_deep(obj, limit: int) -> bool:
+    """JSON 读出来的东西是不是套了超过 limit 层（一层层往下数，不用递归，套得再深也不会出错）。"""
+    stack = [(obj, 1)]
+    while stack:
+        cur, depth = stack.pop()
+        if isinstance(cur, (dict, list)):
+            if depth > limit:
+                return True
+            stack.extend((v, depth + 1) for v in (cur.values() if isinstance(cur, dict) else cur))
+    return False
+
+
+def _finite_float(text: str) -> float:
+    """读 JSON 里的小数：1e999 这种会变成无穷大，当作文件坏了。"""
+    v = float(text)
+    if not math.isfinite(v):
+        raise ValueError("JSON 里的数太大")
+    return v
+
+
 @dataclasses.dataclass
 class Snapshot:
     """内存里的一份数据：一次读数据库得到的全部东西，加上几样提前做好的（每次请求都要用、做一次就够）。"""
@@ -71,7 +142,8 @@ class Snapshot:
     team_by_file: dict[str, str]             # 反过来：页面文件名 → 球队
     bots_html: str                           # 虚拟投注页（要读好几个结果文件，提前做好）
     dqd: dict[str, int]                      # 懂球帝比赛编号（文字）→ 我们的 match_id，只留这次页面里有的比赛
-    version: str                             # 数据版本（指纹），/api/version 返回它
+    version: str                             # 数据版本（内容哈希，见 content_version），/api/version 返回它
+    stamp: str                               # 读之前那一刻的指纹（文件的修改时间和大小），判断“文件变了没有”用
     loaded_at: float                         # 什么时候读的（服务器时钟，秒）
     generated_at: str                        # 什么时候读的（UTC，ISO 写法）
 
@@ -178,15 +250,19 @@ class LiveSite:
                  now: Callable[[], datetime] | None = None, loader: Callable | None = None):
         live = settings_live(settings)
         site = settings["site"]
-        # 现读现出的页面不要 <meta http-equiv="refresh">，改用 /static/site.js（src/web/site/common.py 的 LIVE_REFRESH）
-        self.settings = {**settings, "site": {**site, "refresh_minutes": LIVE_REFRESH}}
+        # 现读现出的页面加载 /static/site.js（src/web/site/common.py 的 LiveMinutes）。live.meta_refresh 是 true 时
+        # 照样每 site.refresh_minutes 分钟整页重新加载（site.js 还是空的，先靠它）；以后 site.js 会自己更新了再改成 false
+        minutes = int(site["refresh_minutes"]) if live["meta_refresh"] else 0
+        self.settings = {**settings, "site": {**site, "refresh_minutes": LiveMinutes(minutes)}}
         self.site_dir = Path(site_dir)
         self.db_path = resolve_path(settings["paths"]["database"])
         self.review_dir = resolve_path(site["review_dir"])
         self.bots_dir = resolve_path(site["bots_dir"]) if site.get("bots_dir") else None
         self.picks_file = pk.reference_path(settings) if settings.get("picks") else None
-        self.scores_file = resolve_path(live["scores_file"])
+        self.scores_file = scores_path(settings)
         self.cache_seconds = float(live["cache_seconds"])
+        self.min_reload_seconds = float(live["min_reload_seconds"])
+        self.wait_seconds = float(live["wait_seconds"])
         self.stale_seconds = float(live["stale_seconds"])
         self.retry_seconds = float(live["retry_seconds"])
         self.clock = clock
@@ -211,8 +287,13 @@ class LiveSite:
 
     # ----- 取内存里的数据 -----
     def _fresh(self, snap: Snapshot) -> bool:
-        """内存里这份还能不能直接用：没超过 cache_seconds，而且文件都没变。"""
-        return self.clock() - snap.loaded_at < self.cache_seconds and self.fingerprint() == snap.version
+        """内存里这份还能不能直接用：
+        读了不到 min_reload_seconds 秒 → 能用（文件变了也先不读，免得数据库一直在写时每次都整个重读）；
+        不到 cache_seconds 秒、文件也都没变 → 能用；别的情况该重新读了。"""
+        age = self.clock() - snap.loaded_at
+        if age < self.min_reload_seconds:
+            return True
+        return age < self.cache_seconds and self.fingerprint() == snap.stamp
 
     def snapshot(self) -> Snapshot | None:
         """现在该用的那份数据；一份都拿不到时 None（服务器改发静态文件）。"""
@@ -226,7 +307,9 @@ class LiveSite:
         else:
             if self.clock() < self._retry_at:
                 return None
-            self._reload_lock.acquire()            # 一份都没有：排队等正在读的那个读完
+            # 一份都没有：排队等正在读的那个读完，最多等 wait_seconds 秒；等不到就先发静态文件（接口回 503）
+            if not self._reload_lock.acquire(timeout=self.wait_seconds):
+                return None
         try:
             cur = self._snap
             if cur is not None and cur is not snap:
@@ -239,20 +322,22 @@ class LiveSite:
 
     def _reload(self, old: Snapshot | None) -> Snapshot | None:
         """真的去读一次。失败时返回旧的那份（可能是 None），并且 retry_seconds 秒内不再试。"""
-        version = self.fingerprint()               # 先算指纹再读：读的时候文件又变了，下一次请求还会再读
+        stamp = self.fingerprint()                 # 先算指纹再读：读的时候文件又变了，下一次请求还会再读
         started = self.clock()
         try:
-            snap = self._build(version)
+            snap = self._build(stamp)
         except Exception as err:   # noqa: BLE001 —— 故意的：任何错误都不能让网站打不开，继续用旧数据或静态文件
             self._retry_at = self.clock() + self.retry_seconds
             LOG.warning("现读现出：读数据失败（%s），%s", _clean_error(err),
                         "继续用上一次读到的数据" if old is not None else "先发静态文件")
             return old
         self._snap, self._retry_at = snap, 0.0
-        LOG.info("现读现出：重新读了数据（%d 场比赛，用了 %.1f 秒）", len(snap.data.page_ids), self.clock() - started)
+        same = old is not None and old.version == snap.version
+        LOG.info("现读现出：重新读了数据（%d 场比赛，用了 %.1f 秒%s）", len(snap.data.page_ids), self.clock() - started,
+                 "，内容没变" if same else "")
         return snap
 
-    def _build(self, version: str) -> Snapshot:
+    def _build(self, stamp: str) -> Snapshot:
         now = self.now()
         data, dqd = self.loader(self.settings, self.db_path, now)
         bots_html, bots_error = bots.render_checked(data)
@@ -260,7 +345,11 @@ class LiveSite:
             data.notes.insert(0, f"虚拟投注页出错（{bots_error}），这一页先换成占位页；别的页照常。")
         teams = TeamFiles({data.matches[mid][k] for mid in data.page_ids for k in ("home_team", "away_team")})
         by_file = {teams.file(t): t for t in teams.names}
-        return Snapshot(data=data, teams=teams, team_by_file=by_file, bots_html=bots_html, dqd=dqd, version=version,
+        # 虚拟投注页、比分参考是直接读文件做的（不在 data 里），把这两样文件的修改时间也算进数据版本
+        extra = [_folder_stamps(self.bots_dir, "bots"), _stamp(self.picks_file) if self.picks_file else None,
+                 sorted(dqd.items()), bots_error]
+        return Snapshot(data=data, teams=teams, team_by_file=by_file, bots_html=bots_html, dqd=dqd,
+                        version=content_version(data, extra), stamp=stamp,
                         loaded_at=self.clock(), generated_at=now.astimezone(timezone.utc).isoformat(timespec="seconds"))
 
     # ----- 网页 -----
@@ -274,7 +363,8 @@ class LiveSite:
         try:
             return self._page(snap, route)
         except Exception as err:   # noqa: BLE001 —— 故意的：这一页生成出错，改发静态文件，不让网站打不开
-            LOG.warning("现读现出：生成 %s 出错（%s），改发静态文件", route[:80], _clean_error(err))
+            from src.web.serve import _clean_for_log   # 放在这里才导入：serve.py 也要导入这个文件，免得互相导入
+            LOG.warning("现读现出：生成 %s 出错（%s），改发静态文件", _clean_for_log(route), _clean_error(err))
             return None
 
     def _page(self, snap: Snapshot, route: str) -> tuple[int, str, str] | None:
@@ -325,7 +415,12 @@ class LiveSite:
             return {"matches": [], "status": "off"}
         with self._live_lock:
             if self._live_cache is None or self._live_cache[0] != st:
-                self._live_cache = (st, self._read_live(st))
+                try:
+                    body = self._read_live(st)
+                except Exception as err:   # noqa: BLE001 —— 故意的：比分文件怎么坏都只算“读不了”，页面照样现读现出
+                    LOG.warning("即时比分文件读不了（%s）", type(err).__name__)
+                    body = {"matches": [], "status": "error", "note": "即时比分文件读不了"}
+                self._live_cache = (st, body)
             body = self._live_cache[1]
         age = max(0.0, time.time() - st[0] / 1e9)        # 用电脑真实的时间比，文件的修改时间也是真实时间
         file_time = datetime.fromtimestamp(st[0] / 1e9, timezone.utc).isoformat(timespec="seconds")
@@ -341,11 +436,14 @@ class LiveSite:
         if st[1] > MAX_LIVE_BYTES:
             return bad("文件太大")
         try:
-            raw = json.loads(self.scores_file.read_bytes().decode("utf-8-sig"), parse_constant=_no_constant)
-        except (OSError, UnicodeDecodeError, ValueError) as err:
+            raw = json.loads(self.scores_file.read_bytes().decode("utf-8-sig"),
+                             parse_constant=_no_constant, parse_float=_finite_float)
+        except (Exception, RecursionError) as err:   # noqa: BLE001 —— 读不出来、不是 JSON、套得太深、有 NaN / 无穷大，都当坏文件
             return bad(type(err).__name__)
         if not isinstance(raw, dict):
             return bad("格式不对")
+        if _too_deep(raw, MAX_LIVE_DEPTH):
+            return bad("套得太深")
         matches = raw.get("matches")
         status = raw.get("status")
         note = raw.get("note")
@@ -358,6 +456,7 @@ class LiveSite:
         """/api/live：live_info 再加一项 match_ids = {"懂球帝比赛编号": 我们的 match_id}（只有对上了的，前端按它找页面上的那一行）。"""
         info = self.live_info()
         snap = self.snapshot()                     # 和别的接口一样：内存里的那份（过期了按规则重新读）
+        # 文件不在、对不上、还没有数据时都是 {}（match_ids 这一项一直都有）
         ids = {key: mid for key, mid, _item in _matched(snap, info)} if snap is not None else {}
         return {**info, "match_ids": ids}
 

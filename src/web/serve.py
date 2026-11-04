@@ -6,7 +6,10 @@
 它做什么：
 - 现读现出（settings.yaml 的 live.dynamic: true，src/web/live_site.py）：登录后打开网页时，现场用只读方式读数据库，
   用和“足球预测_生成网站”同一套函数生成网页（读到的数据在内存里留 live.cache_seconds 秒）。读不出来时继续用上一次的数据，
-  一次都没读到过就发 data/site/ 里生成好的静态文件。不跑模型、不写数据库、不联网。
+  一次都没读到过就发 data/site/ 里生成好的静态文件。网页本身不跑模型、不写数据库、不联网。
+- 即时比分（settings.yaml 的 live.live_poller，默认 false）：打开时服务器在后台开一个线程跑 WD3 的即时比分程序
+  （src.collect.dongqiudi_live），它会联网请求懂球帝，把比分写进 scores.json，并往 football.db 的 fetch_log 表里写抓取记录。
+  关着时服务器不联网、不写数据库。
 - 数据接口（/api/...，返回 JSON，也要登录）：/api/version、/api/live、/api/matches、/api/match/<编号>，字段见需求文档第 8 节。
 - /static/ 下发本站自己的脚本和样式（src/web/static/ 里的文件），网页只引用它们，不引用外部的东西。
 - live.dynamic: false 时和以前完全一样：只把 data/site/ 下已经生成好的网页文件发出去。
@@ -74,10 +77,13 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",               # 浏览器不许自己乱猜文件类型
     "X-Frame-Options": "DENY",                         # 别的网站不能把这里的页面嵌进去（防“点击劫持”）
     # 内容安全策略（CSP）：网页只能用本站自己的脚本文件（/static/site.js），不能用写在网页里的内联脚本、外部脚本；
-    # 只能连本站（connect-src 'self'）；图片只能是本站的或者网页里内嵌的；别的网站不能把这里嵌进去（frame-ancestors）。
-    # 'unsafe-inline' 只给样式：网页里的 <style> 和概率条宽度这种 style="..." 要用它，样式不能执行程序
+    # 只能连本站（connect-src 'self'）；图片只能是本站的或者网页里内嵌的；别的网站不能把这里嵌进去（frame-ancestors）；
+    # 网页里不能用 <base> 改掉链接的起点（base-uri 'none'）；表单只能提交给本站（form-action 'self'，登录表单就是）。
+    # 'unsafe-inline' 只给样式：网页里的 <style> 和概率条宽度这种 style="..." 要用它，样式不能执行程序。
+    # 所有响应都带（live.dynamic: false 只发静态文件时也一样）
     "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"),
+                                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+                                "base-uri 'none'; form-action 'self'"),
     "Referrer-Policy": "same-origin",                  # 点链接去别的网站时不告诉对方从哪来（网站里本来也没有外链）
     "Cache-Control": "no-store",                       # 不缓存：退出登录后按“返回”看不到旧页面
     "X-Site-Server": serve_auth.SERVER_MARK,           # 自己人的记号：用来认出端口上跑的是不是这个服务器
@@ -146,9 +152,13 @@ class SiteApp:
     def __post_init__(self):
         self._load_sessions()
         if self.config.live_settings is not None:
-            # 放在这里才导入：只发静态文件时不用加载 pandas 这些大库，启动快
-            from src.web.live_site import LiveSite
-            self.live = LiveSite(self.config.live_settings, self.config.site_dir, clock=self.clock)
+            try:
+                # 放在这里才导入：只发静态文件时不用加载 pandas 这些大库，启动快
+                from src.web.live_site import LiveSite
+                self.live = LiveSite(self.config.live_settings, self.config.site_dir, clock=self.clock)
+            except Exception as err:   # noqa: BLE001 —— 故意的：现读现出起不来（设置写错、库有问题）也要能发静态文件
+                self.live = None
+                LOG.warning("现读现出起不来（%s），这次只发 data/site/ 的静态文件", type(err).__name__)
 
     # ----- 密码 -----
     @property
@@ -794,7 +804,8 @@ def _port_busy(e: OSError) -> bool:
 
 def start_live_poller(settings: dict, stop: threading.Event) -> threading.Thread | None:
     """settings.yaml 的 live.live_poller 是 true 时，在后台开一个线程跑即时比分程序（WD3 写的 src.collect.dongqiudi_live 的
-    run_forever(settings, stop_event)），它把比分写进 data/live/scores.json。没有这个程序（导入失败）就记一行日志、不开。
+    run_forever(settings, stop_event)）。它会联网请求懂球帝，把比分写进 scores.json（dongqiudi.live.output），
+    并往 football.db 的 fetch_log 表写抓取记录。没有这个程序（导入失败）就记一行日志、不开。
     后台线程（daemon）：服务器关掉时它跟着结束；stop 被设上时它应该自己停。返回开起来的线程，没开是 None。"""
     if not (settings.get("live") or {}).get("live_poller", False):
         return None
@@ -815,6 +826,19 @@ def start_live_poller(settings: dict, stop: threading.Event) -> threading.Thread
     t.start()
     LOG.info("即时比分程序已在后台启动")
     return t
+
+
+def stop_live_poller(thread: threading.Thread | None, stop: threading.Event, timeout: float) -> bool:
+    """服务器关掉时叫即时比分线程停下：设上 stop，最多等 timeout 秒（live.poller_stop_seconds）。
+    它正在联网请求时可能一下停不了；它是后台线程，不等它，程序照样退出。返回它是不是已经停了。"""
+    stop.set()
+    if thread is None:
+        return True
+    thread.join(timeout)
+    if thread.is_alive():
+        LOG.warning("即时比分程序 %s 秒内没停下，不等它了", timeout)
+        return False
+    return True
 
 
 def run(settings: dict, host: str | None = None, port: int | None = None, ready: Callable | None = None) -> int:
@@ -856,7 +880,7 @@ def run(settings: dict, host: str | None = None, port: int | None = None, ready:
         LOG.warning("地址和密码文件写不进去：%s", type(e).__name__)
     LOG.info("网站服务器已启动：http://%s:%s（地址和密码见 %s）", host, real_port, serve_auth.INFO_FILE)
     stop = threading.Event()
-    start_live_poller(settings, stop)
+    poller = start_live_poller(settings, stop)
     if server.app.live is not None:
         # 现读现出：启动时先在后台读一次数据，第一个打开网页的人不用等好几秒
         threading.Thread(target=server.app.live.snapshot, name="live-warmup", daemon=True).start()
@@ -867,7 +891,8 @@ def run(settings: dict, host: str | None = None, port: int | None = None, ready:
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()                       # 告诉即时比分程序停下
+        # 告诉即时比分程序停下，最多等几秒
+        stop_live_poller(poller, stop, float((settings.get("live") or {}).get("poller_stop_seconds", 5)))
         server.server_close()
         LOG.info("网站服务器已关闭")
     return 0

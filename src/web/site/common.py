@@ -118,10 +118,15 @@ NOT_ADVICE = ("<b>只给自己看，不是下注建议。</b>页面只写“哪�
               "再扣掉抽水，多数“倾向”都没有利润空间，“倾向”不等于“值得买”。")
 
 
-# refresh_minutes 写成这个数 = “服务器现读现出”的页面（src/web/live_site.py 把 settings 里的 site.refresh_minutes 换成它）。
-# 这种页面不用 <meta http-equiv="refresh"> 自己整页重新加载，改成引用本站自己的脚本文件 /static/site.js
-# （它每 30 秒问一次服务器“数据变了没有”，脚本没加载也照样能看全部内容）。生成静态文件时（build_site）还是原来的样子。
-LIVE_REFRESH = 0
+class LiveMinutes(int):
+    """“服务器现读现出”的页面用的 refresh_minutes（src/web/live_site.py 把 settings 里的 site.refresh_minutes 换成它）。
+    它本身还是一个整数（分钟），各页面函数照原样把它传给 page()，不用改；page() 认出它是这一种，就另外引用本站自己的
+    脚本文件 /static/site.js 和 /static/site.css（见下面 LIVE_HEAD）。
+    数值大于 0：照样带 <meta http-equiv="refresh">，每这么多分钟整页重新加载（site.js 还是空的，先靠它让开着的页面跟着变）；
+    等于 0：不带（settings.yaml 的 live.meta_refresh: false，等 site.js 写好“数据变了才更新”以后再关）。
+    生成静态文件时（build_site）传的是普通整数，还是原来的样子：有 meta refresh、没有脚本。"""
+
+
 LIVE_HEAD = ('<link rel="stylesheet" href="/static/site.css">'
              '<script src="/static/site.js" defer></script>')
 
@@ -129,15 +134,16 @@ LIVE_HEAD = ('<link rel="stylesheet" href="/static/site.css">'
 def page(title: str, body: str, prefix: str, now: datetime, refresh_minutes: int) -> str:
     """一整页网页。prefix：从这一页到网站根目录的相对路径（首页 ""，match/、team/ 里的页面 "../"）。
 
-    静态文件（refresh_minutes 是正数）：页面开着时每 refresh_minutes 分钟浏览器自己重新加载一次
+    refresh_minutes 大于 0：页面开着时每 refresh_minutes 分钟浏览器自己重新加载一次
     （<meta http-equiv="refresh">，不是脚本），定时任务也是每 15 分钟重新生成一次，所以开着的页面会跟着变。
-    现读现出（refresh_minutes == LIVE_REFRESH）：不自己重新加载，引用 /static/site.js 和 /static/site.css（见上面 LIVE_HEAD）。
+    refresh_minutes 是 LiveMinutes（现读现出）：另外引用 /static/site.js 和 /static/site.css，页脚写“现场从数据库读出来生成的”。
     """
     nav = (f"<nav class='top'><span class='brand'>足球预测</span><a href='{e(prefix)}index.html'>即将开赛</a>"
            f"<a href='{e(prefix)}record.html'>战绩</a><a href='{e(prefix)}lifecycle.html'>逐场验收</a>"
            f"<a href='{e(prefix)}bots.html'>虚拟投注</a></nav>")
-    live = int(refresh_minutes) == LIVE_REFRESH
-    refresh = "" if live else f'<meta http-equiv="refresh" content="{int(refresh_minutes) * 60}">\n'
+    live = isinstance(refresh_minutes, LiveMinutes)
+    minutes = int(refresh_minutes)
+    refresh = f'<meta http-equiv="refresh" content="{minutes * 60}">\n' if minutes > 0 else ""
     origin = ("这一页是网站服务器打开时现场从数据库读出来生成的，不连外网"
               if live else "这是本机的静态文件，不连网")
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
