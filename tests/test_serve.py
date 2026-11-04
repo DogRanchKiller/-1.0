@@ -76,6 +76,8 @@ def make_settings(tree: Path, iterations: int = 1000) -> dict:
     ss["state_dir"] = str(tree / "state")
     ss["log_file"] = str(tree / "logs" / "site_server.log")
     ss["pbkdf2_iterations"] = iterations
+    # 这里的测试只测静态文件那一套；现读现出会去读 settings 里的真数据库，关掉（现读现出在 test_serve_live.py 里用假数据测）
+    s["live"] = {**(s.get("live") or {}), "dynamic": False, "live_poller": False}
     return s
 
 

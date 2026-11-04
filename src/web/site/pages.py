@@ -12,11 +12,11 @@ import pandas as pd
 from src.features.known_time import to_utc_text
 from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics, metric_text
 from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bar_html, bj_text, day_title, details,
-                                 e, kickoff_text, level_name, match_href, page, placeholder, table)
+                                 e, kickoff_text, level_name, match_attrs, match_href, page, placeholder, table)
 from src.web.site import picks as pk
 from src.web.site.data import SiteData
 from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text,
-                                score_text, side_of, version_name)
+                                live_html, score_text, side_of, version_name)
 
 
 def match_link(data: SiteData, mid: int, prefix: str) -> str:
@@ -34,7 +34,8 @@ def state_html(data: SiteData, mid: int) -> str:
         note = f" <span class='tag warn'>{e(data.result_notes[mid])}</span>" if mid in data.result_notes else ""
         return f"<span class='score'>{e(s)}</span>{note}"
     tag = STATUS_TAGS.get(data.matches[mid].get("status"))
-    return f"<span class='tag warn'>{e(tag)}</span>" if tag else ""
+    # 没有正式比分、也没有改期之类的标记时：服务器现读现出的页面上可能有懂球帝的即时比分（静态文件里永远没有）
+    return f"<span class='tag warn'>{e(tag)}</span>" if tag else live_html(data, mid)
 
 
 def latest_cell(data: SiteData, mid: int) -> str:
@@ -74,7 +75,9 @@ def index_guide(settings: dict) -> str:
             "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
 
 
-def render_index(data: SiteData, teams: TeamFiles) -> str:
+def index_lists(data: SiteData) -> tuple[list[dict], list[dict]]:
+    """首页列哪些比赛：(还没踢的, 最近踢完的)，各是 data.matches 里的那一条，按首页的顺序排好。
+    首页（render_index）和服务器的数据接口 /api/matches（src/web/live_site.py）都用它，两边列的比赛一样。"""
     cfg = data.settings["site"]
     now = to_utc_text(data.now)
     hi = to_utc_text(data.now + timedelta(days=cfg["days_ahead"]))
@@ -93,30 +96,40 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
     up_ids = {m["match_id"] for m in upcoming}
     recent = sorted([m for m in site if lo <= m["kickoff_earliest_utc"] < now and m["match_id"] not in up_ids],
                     key=lambda m: (m["kickoff_earliest_utc"], m["match_id"]), reverse=True)
+    return upcoming, recent
+
+
+def render_index(data: SiteData, teams: TeamFiles) -> str:
+    cfg = data.settings["site"]
+    upcoming, recent = index_lists(data)
     n_pred = sum(1 for m in upcoming if m["match_id"] in data.preds)
     stats = (f"<div class='stats'><div class='stat hi'><b>{len(upcoming)}</b><span>未来 {cfg['days_ahead']} 天的比赛</span></div>"
              f"<div class='stat'><b>{n_pred}</b><span>已经有预测</span></div>"
              f"<div class='stat'><b>{len(recent)}</b><span>最近 {cfg['days_back']} 天踢完的</span></div></div>")
-    groups: dict[str, tuple[str, list[str]]] = {}
+    # 每一组：(标题, 各行的格子, 各行 <tr> 上的 data-* 属性)
+    groups: dict[str, tuple[str, list[list[str]], list[str]]] = {}
     for m in upcoming:
         key, title = day_title(m)
         mid = m["match_id"]
         row = [e(kickoff_text(m, with_date=False) if key != "9999" else kickoff_text(m)), e(data.comp(m["competition"])),
                f"<td class='match'>{match_link(data, mid, '')}</td>", latest_cell(data, mid), state_html(data, mid)]
-        groups.setdefault(key, (title, []))[1].append(row)
+        g = groups.setdefault(key, (title, [], []))
+        g[1].append(row)
+        g[2].append(match_attrs(m))
     if groups:
-        blocks = "".join(f"<h2>{e(title)}</h2>" + table(["时间", "联赛", "比赛", "最新一版的结论", ""], rows, "list")
-                         for _, (title, rows) in sorted(groups.items()))
+        blocks = "".join(f"<h2>{e(title)}</h2>" + table(["时间", "联赛", "比赛", "最新一版的结论", ""], rows, "list", attrs)
+                         for _, (title, rows, attrs) in sorted(groups.items()))
     else:
         blocks = "<h2>即将开赛</h2>" + placeholder(f"未来 {cfg['days_ahead']} 天没有{'、'.join(data.settings['leagues'][cfg['leagues']].values())}的比赛")
-    rec_rows = []
+    rec_rows, rec_attrs = [], []
     for m in recent:
         mid = m["match_id"]
         lt = data.latest(mid)
         rec_rows.append([e(kickoff_text(m)), e(data.comp(m["competition"])), f"<td class='match'>{match_link(data, mid, '')}</td>",
                          state_html(data, mid) or "<span class='muted'>比分还没进来</span>", latest_cell(data, mid) if lt else "—",
                          hit_html(lt[1], data.results.get(mid)) if lt else "—"])
-    rec = (table(["开球", "联赛", "比赛", "赛果", "赛前最后一版", "胜平负猜中"], rec_rows, "list") if rec_rows
+        rec_attrs.append(match_attrs(m))
+    rec = (table(["开球", "联赛", "比赛", "赛果", "赛前最后一版", "胜平负猜中"], rec_rows, "list", rec_attrs) if rec_rows
            else placeholder(f"最近 {cfg['days_back']} 天没有踢完的比赛"))
     notes = "".join(f"<li>{e(n)}</li>" for n in data.notes[:10])
     body = (f"<h1>足球预测 <span class='accent'>即将开赛</span></h1><p class='muted'>"

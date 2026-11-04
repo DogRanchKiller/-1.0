@@ -23,7 +23,8 @@ from src.features.usage import season_label
 from src.web.explanation import EXPLANATION_CSS, render_explanation
 from src.web.preview_page import ah_text, lean_texts
 from src.web.site.common import (NOT_ADVICE, bar_html, OUTCOMES, STATUS_TAGS, TeamFiles, bj_text, details, e, heatmap_svg,
-                                 kickoff_text, level_name, line_chart_svg, page, pct0, pct1, placeholder, table)
+                                 kickoff_text, level_name, line_chart_svg, match_attrs, page, pct0, pct1, placeholder,
+                                 table)
 from src.web.site.data import SiteData, matrix
 
 VERSION_HOURS = {"T-24": 24, "T-6": 6, "T-1": 1}
@@ -120,6 +121,41 @@ def conclusion_html(row: dict) -> str:
 def score_text(data: SiteData, mid: int) -> str:
     s = data.results.get(mid)
     return f"{s[0]}–{s[1]}" if s else ""
+
+
+def _count(x) -> int | None:
+    """即时比分文件里的进球数、红牌数：只认真正的整数（不认 True/False、文字），别的当作没有。"""
+    return x if isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 100 else None
+
+
+def live_html(data: SiteData, mid: int) -> str:
+    """即时比分（懂球帝，data/live/scores.json）的一小块：“进行中 63' 2–1 红牌 0–1”或“完场 2–1（即时）”。
+    已经有正式赛果的比赛、没有对上即时比分的比赛都返回 ""（生成静态文件时 live_scores 是空的，所以静态页里永远没有这块）。
+    即时比分只是看个热闹：正式赛果还是以复盘对账（scores.csv、数据库）为准。"""
+    if mid in data.results:
+        return ""
+    m = data.live_scores.get(mid)
+    if not isinstance(m, dict):
+        return ""
+    state = m.get("state")
+    if state not in ("Playing", "Played"):
+        return ""                                   # Fixture（还没开踢）不显示
+    hg, ag = _count(m.get("home_goals")), _count(m.get("away_goals"))
+    score = f" {hg}–{ag}" if hg is not None and ag is not None else ""
+    if state == "Playing":
+        minute = str(m.get("minute") or "")[:8]
+        minute = f" {minute}'" if minute.isdigit() else (f" {minute}" if minute else "")
+        out = f"<span class='tag live' title='懂球帝即时比分，不是最后的赛果'>进行中{e(minute)}</span>"
+    else:
+        out = "<span class='tag live' title='懂球帝即时比分，正式赛果以复盘对账为准'>完场（即时）</span>"
+    if score:
+        out += f" <span class='score'>{e(score.strip())}</span>"
+    hr, ar = _count(m.get("home_red")), _count(m.get("away_red"))
+    if hr is not None and ar is not None and (hr or ar):
+        out += f" <span class='tag warn'>红牌 {hr}–{ar}</span>"
+    if data.live_stale:
+        out += " <span class='tag temp'>即时比分有一阵没更新了</span>"
+    return f"<span class='live-score'>{out}</span>"
 
 
 def planned_time(info: dict, kind: str) -> datetime | None:
@@ -597,10 +633,12 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
     tag = STATUS_TAGS.get(info.get("status"))
     score = score_text(data, mid)
     state = (f"<span class='score'>赛果 {e(score)}</span>" if score
-             else (f"<span class='tag warn'>{e(tag)}</span>" if tag else "<span class='tag'>还没踢</span>"))
+             else (f"<span class='tag warn'>{e(tag)}</span>" if tag else (live_html(data, mid) or "<span class='tag'>还没踢</span>")))
     if mid in data.result_notes:
         state += f" <span class='tag warn'>{e(data.result_notes[mid])}</span>"
-    head = (f"<h1>{teams.link(home, data.zh(home), pre)} <span class='accent'>对</span> {teams.link(away, data.zh(away), pre)}</h1>"
+    # 标题上的 data-match-id 等属性给 /static/site.js 用（看不见，没有脚本时不影响）
+    head = (f"<h1{match_attrs(info)}>{teams.link(home, data.zh(home), pre)} <span class='accent'>对</span> "
+            f"{teams.link(away, data.zh(away), pre)}</h1>"
             f"<p class='muted'>{e(data.comp(info['competition']))} {e(season_label(info['season']))} 赛季 · "
             f"{e(kickoff_text(info))}（北京时间） · {state}</p>")
     latest = data.latest(mid)

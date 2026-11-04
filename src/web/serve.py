@@ -4,8 +4,13 @@
 平时不用手动运行：定时任务“足球预测_网站服务”在你登录 Windows 时自动启动（src/jobs/register_tasks.ps1），不弹黑窗口。
 
 它做什么：
-- 只把 data/site/ 下已经生成好的网页文件发出去，/status 发 data/reports/status.html（数据状态页）。
-  不读数据库、不跑模型、不联网。网页还是“足球预测_生成网站”每 15 分钟重新生成，这里每次请求都读最新的文件。
+- 现读现出（settings.yaml 的 live.dynamic: true，src/web/live_site.py）：登录后打开网页时，现场用只读方式读数据库，
+  用和“足球预测_生成网站”同一套函数生成网页（读到的数据在内存里留 live.cache_seconds 秒）。读不出来时继续用上一次的数据，
+  一次都没读到过就发 data/site/ 里生成好的静态文件。不跑模型、不写数据库、不联网。
+- 数据接口（/api/...，返回 JSON，也要登录）：/api/version、/api/live、/api/matches、/api/match/<编号>，字段见需求文档第 8 节。
+- /static/ 下发本站自己的脚本和样式（src/web/static/ 里的文件），网页只引用它们，不引用外部的东西。
+- live.dynamic: false 时和以前完全一样：只把 data/site/ 下已经生成好的网页文件发出去。
+- /status 发 data/reports/status.html（数据状态页）。
 - 没登录的一律先跳到登录页；登录成功给浏览器一个随机“会话 cookie”（相当于一张临时通行证），30 天内不用再登。
 - 每个网页顶上插一条小栏“首页 · 数据状态 · 退出登录”（只在发出去时插，网页文件本身不改）。
 
@@ -48,6 +53,11 @@ LOG = logging.getLogger("site_server")
 COOKIE = "fp_session"                  # 会话 cookie 的名字
 ALLOW = "GET, HEAD, POST"              # 只接受这三种请求方法（POST 只用于登录）
 REPORTS_PREFIX = "/review/reports/"    # 周报、月报的网址前缀（战绩页的相对链接 ../review/reports/ 在服务器下就是这个）
+STATIC_PREFIX = "/static/"             # 本站自己的脚本、样式（src/web/static/ 里的文件）
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+API_PREFIX = "/api/"                   # 数据接口（JSON）
+MATCH_API = re.compile(r"/api/match/(\d{1,12})")
+JSON_TYPE = "application/json; charset=utf-8"
 # Windows 的设备名：文件名叫这些时会打开设备而不是文件，一律不认
 WIN_DEVICES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10))}
 # 文件类型。不靠系统注册表猜（Windows 上有时会把 .js、.css 认错）
@@ -63,7 +73,11 @@ CONTENT_TYPES = {
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",               # 浏览器不许自己乱猜文件类型
     "X-Frame-Options": "DENY",                         # 别的网站不能把这里的页面嵌进去（防“点击劫持”）
-    "Content-Security-Policy": "frame-ancestors 'none'",  # 同上，新写法
+    # 内容安全策略（CSP）：网页只能用本站自己的脚本文件（/static/site.js），不能用写在网页里的内联脚本、外部脚本；
+    # 只能连本站（connect-src 'self'）；图片只能是本站的或者网页里内嵌的；别的网站不能把这里嵌进去（frame-ancestors）。
+    # 'unsafe-inline' 只给样式：网页里的 <style> 和概率条宽度这种 style="..." 要用它，样式不能执行程序
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"),
     "Referrer-Policy": "same-origin",                  # 点链接去别的网站时不告诉对方从哪来（网站里本来也没有外链）
     "Cache-Control": "no-store",                       # 不缓存：退出登录后按“返回”看不到旧页面
     "X-Site-Server": serve_auth.SERVER_MARK,           # 自己人的记号：用来认出端口上跑的是不是这个服务器
@@ -88,6 +102,8 @@ class ServerConfig:
     max_login_body_bytes: int = 4096
     request_timeout_seconds: float = 20
     max_connections: int = 32
+    # 现读现出用的完整 settings（live.dynamic 是 true 时 from_settings 放进来）；None = 只发静态文件（和以前一样，测试里直接造的也是这样）
+    live_settings: dict | None = None
 
     @classmethod
     def from_settings(cls, settings: dict) -> "ServerConfig":
@@ -102,6 +118,7 @@ class ServerConfig:
             max_login_body_bytes=ss["max_login_body_bytes"],
             request_timeout_seconds=ss["request_timeout_seconds"],
             max_connections=ss["max_connections"],
+            live_settings=settings if (settings.get("live") or {}).get("dynamic", False) else None,
         )
 
 
@@ -124,9 +141,14 @@ class SiteApp:
     _cred_stamp: tuple | None = field(default=None, init=False)
     _sessions: dict = field(default_factory=dict, init=False)
     _failures: dict = field(default_factory=dict, init=False)   # IP → [连续输错几次, 锁到几点]
+    live: object | None = field(default=None, init=False)        # 现读现出（src/web/live_site.LiveSite）；None = 只发静态文件
 
     def __post_init__(self):
         self._load_sessions()
+        if self.config.live_settings is not None:
+            # 放在这里才导入：只发静态文件时不用加载 pandas 这些大库，启动快
+            from src.web.live_site import LiveSite
+            self.live = LiveSite(self.config.live_settings, self.config.site_dir, clock=self.clock)
 
     # ----- 密码 -----
     @property
@@ -488,6 +510,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self._send_body(body, ctype, extra)
 
+    def _send_json(self, code: int, obj):
+        """发 JSON（数据接口用）：中文原样写（ensure_ascii=False），不缓存（安全响应头里的 Cache-Control: no-store）。"""
+        body = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        self._send(code, body, JSON_TYPE)
+
     def _redirect(self, location: str, extra: dict | None = None):
         """跳到另一页（303：浏览器用 GET 打开新地址）。地址里的中文等先转成 %XX，响应头里只能放英文字符。"""
         self.send_response(303)
@@ -528,9 +555,25 @@ class Handler(BaseHTTPRequestHandler):
             self.app.end_session(self._token())
             self._redirect("/login", {"Set-Cookie": f"{COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"})
             return
+        live = self.app.live
         if not self._logged_in():
+            if live is not None and route.startswith(API_PREFIX):
+                # 数据接口是网页里的脚本在问，不跳转，直接说“没登录”（401），脚本自己决定怎么办
+                self._send_json(401, {"error": "not_logged_in"})
+                return
             # 没登录：跳到登录页，记下原来想看哪一页，登录后回去
             self._redirect("/login?next=" + quote(safe_next(self.path), safe=""))
+            return
+        if live is not None and route.startswith(API_PREFIX):
+            self._api(route)
+            return
+        if live is not None and route.startswith(STATIC_PREFIX):
+            # 本站自己的脚本、样式：只给 src/web/static/ 里的文件，挡路径穿越的办法和网站文件夹一样
+            path = resolve_static(STATIC_DIR, route[len(STATIC_PREFIX) - 1:])
+            if path is None:
+                self._send(404, message_page("找不到这个文件", ""))
+            else:
+                self._serve_file(path)
             return
         if route == "/status":
             self._serve_file(self.app.config.status_file, missing=(
@@ -545,6 +588,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._serve_file(path, ctype="text/plain; charset=utf-8")
             return
+        if live is not None:
+            got = live.page(route)          # 现读现出；None = 这一页不归它管，或者现在拿不到数据 → 下面发静态文件
+            if got is not None:
+                code, text, ctype = got
+                if code == 404:
+                    self._send(404, message_page("找不到这一页", "可能这场比赛已经不在列表里了。"))
+                elif ctype.startswith("text/html"):
+                    self._send(200, inject_bar(text.encode("utf-8")), ctype)
+                else:
+                    self._send(200, text.encode("utf-8"), ctype)
+                return
         site = self.app.config.site_dir
         if not site.is_dir():
             # “足球预测_生成网站”换新网站的那一瞬间文件夹可能不在
@@ -556,6 +610,31 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, message_page("找不到这一页", "可能这场比赛已经不在列表里了。"))
             return
         self._serve_file(path)
+
+    def _api(self, route: str):
+        """数据接口（只读）。出了意外的错回 500 和一句 JSON，不把错误细节发出去（细节只记日志，也不带路径）。"""
+        live = self.app.live
+        try:
+            if route == "/api/version":
+                self._send_json(200, live.version_info())
+            elif route == "/api/live":
+                self._send_json(200, live.live_api())
+            elif route == "/api/matches":
+                body = live.matches_api()
+                if body is None:
+                    self._send_json(503, {"error": "data_unavailable"})
+                else:
+                    self._send_json(200, body)
+            elif MATCH_API.fullmatch(route):
+                code, body = live.match_api(int(MATCH_API.fullmatch(route).group(1)))
+                self._send_json(code, body)
+            else:
+                self._send_json(404, {"error": "not_found"})
+        except (ConnectionError, TimeoutError):
+            raise
+        except Exception as err:   # noqa: BLE001 —— 故意的：接口出错不能让服务器线程崩掉
+            LOG.warning("数据接口 %s 出错（%s）", _clean_for_log(route), type(err).__name__)
+            self._send_json(500, {"error": "server_error"})
 
     def _serve_file(self, path: Path, missing: tuple[str, str] = ("找不到这一页", ""), ctype: str | None = None):
         """发一个文件。整个读进来再发（网页都很小），读完马上关掉文件，不挡着“生成网站”换新文件夹。"""
@@ -713,6 +792,31 @@ def _port_busy(e: OSError) -> bool:
     return e.errno in (errno.EADDRINUSE, errno.EACCES) or getattr(e, "winerror", None) in (10048, 10013)
 
 
+def start_live_poller(settings: dict, stop: threading.Event) -> threading.Thread | None:
+    """settings.yaml 的 live.live_poller 是 true 时，在后台开一个线程跑即时比分程序（WD3 写的 src.collect.dongqiudi_live 的
+    run_forever(settings, stop_event)），它把比分写进 data/live/scores.json。没有这个程序（导入失败）就记一行日志、不开。
+    后台线程（daemon）：服务器关掉时它跟着结束；stop 被设上时它应该自己停。返回开起来的线程，没开是 None。"""
+    if not (settings.get("live") or {}).get("live_poller", False):
+        return None
+    try:
+        from src.collect import dongqiudi_live
+        target = dongqiudi_live.run_forever
+    except Exception as err:   # noqa: BLE001 —— 故意的：即时比分程序有问题不能挡住网站启动
+        LOG.warning("即时比分程序加载不了（%s），这次不开即时比分", type(err).__name__)
+        return None
+
+    def body():
+        try:
+            target(settings, stop)
+        except Exception as err:   # noqa: BLE001
+            LOG.warning("即时比分程序出错停了（%s）；网站照常", type(err).__name__)
+
+    t = threading.Thread(target=body, name="live-poller", daemon=True)
+    t.start()
+    LOG.info("即时比分程序已在后台启动")
+    return t
+
+
 def run(settings: dict, host: str | None = None, port: int | None = None, ready: Callable | None = None) -> int:
     """启动服务器，一直运行到被关掉。返回值：0 = 正常（包括“已经有一个在运行”）；1 = 出错；2 = 端口被别的程序占了。
 
@@ -751,6 +855,11 @@ def run(settings: dict, host: str | None = None, port: int | None = None, ready:
     except (OSError, serve_auth.CredentialsError) as e:
         LOG.warning("地址和密码文件写不进去：%s", type(e).__name__)
     LOG.info("网站服务器已启动：http://%s:%s（地址和密码见 %s）", host, real_port, serve_auth.INFO_FILE)
+    stop = threading.Event()
+    start_live_poller(settings, stop)
+    if server.app.live is not None:
+        # 现读现出：启动时先在后台读一次数据，第一个打开网页的人不用等好几秒
+        threading.Thread(target=server.app.live.snapshot, name="live-warmup", daemon=True).start()
     if ready:
         ready(server)
     try:
@@ -758,6 +867,7 @@ def run(settings: dict, host: str | None = None, port: int | None = None, ready:
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()                       # 告诉即时比分程序停下
         server.server_close()
         LOG.info("网站服务器已关闭")
     return 0

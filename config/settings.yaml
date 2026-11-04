@@ -1035,3 +1035,13 @@ corners_cards:
   confidence_levels: [0.95, 0.99]  # 两个可信区间都要整个在“更准”一边才算更准（需求文档“判定规则”）
   calibration_bins: 10             # 校准：按预测均值分几档
   output_dir: data/reports/corners_cards   # 报告放这里（data/ 不进 Git）
+
+# 网站“现读现出”（需求文档第 8 节“现读现出”，工作树 WD1）：登录后打开网页时，网站服务器（src/web/serve.py）现场用只读方式读数据库、
+# 用和“生成网站”同一套函数做出网页；数据接口 /api/... 也用这里的数。读不出来时用上一次读到的，一次都没读到就发 data/site/ 的静态文件
+live:
+  dynamic: true                 # true = 现读现出；false = 和以前完全一样，只发 data/site/ 里定时生成好的静态文件（也没有 /api/、/static/）
+  cache_seconds: 60             # 读出来的数据在内存里最多留几秒；数据库、data/review/、虚拟投注结果文件一改就不等，马上重新读
+  stale_seconds: 600            # 即时比分文件超过几秒没更新，算“很久没更新”（/api/live 的 stale = true，页面上提醒）
+  retry_seconds: 15             # 读数据失败后，隔几秒再试（中间先用上一次的数据，不每个请求都去碰数据库）
+  scores_file: data/live/scores.json   # 即时比分文件（WD3 的程序写，这里只读；data/ 不进 Git）
+  live_poller: false            # true = 网站服务器启动时在后台开即时比分程序（src.collect.dongqiudi_live，WD3 写）；false = 不开

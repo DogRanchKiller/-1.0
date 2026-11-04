@@ -57,6 +57,10 @@ class SiteData:
     page_ids: set[int] = field(default_factory=set)               # 要做单场页的比赛（见 load 第 4 步）
     levels: dict[int, int | None] = field(default_factory=dict)   # scores.csv 里每个 prediction_id 当时的信心等级
     lifecycle: dict = field(default_factory=dict)                # 同一次生成的只读逐场周期证据
+    # 即时比分（只有服务器“现读现出”时才有，src/web/live_site.py 每次请求放进来；生成静态文件时一直是空的）：
+    # 我们的 match_id → data/live/scores.json 里对应的那一条（原样，没有改字段）
+    live_scores: dict[int, dict] = field(default_factory=dict)
+    live_stale: bool = False                                      # 即时比分是不是很久没更新了（页面上会提醒）
 
     def comp(self, code: str) -> str:
         return self.comp_names.get(code, code)

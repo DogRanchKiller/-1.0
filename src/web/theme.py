@@ -7,7 +7,8 @@
 - CSS：写“网页长什么样”的规则（颜色、字号、间距），和网页内容分开写。
 - 颜色写成变量（--green 这种），想整体换颜色时只改最上面的 :root 一处。
 - @media (max-width: 760px)：屏幕窄于 760 像素（手机）时另用的规则。
-- 只用样式，不用脚本（JavaScript）：页面是本机静态文件，不需要脚本，也更安全。
+- 脚本（JavaScript）：静态文件不用脚本；网站服务器“现读现出”的页面只引用本站自己的一个脚本文件 /static/site.js，
+  不用外部脚本、不用写在网页里的内联脚本（需求文档第 16 节）。页面不靠脚本也能完整看。
 """
 
 # 网页 <head> 里都要加的一行：告诉手机浏览器按手机屏幕宽度排版，不要把电脑版缩小显示
@@ -74,6 +75,7 @@ tbody tr:hover { background: rgba(52, 211, 153, .05); }
        border: 1px solid; vertical-align: 1px; white-space: nowrap; }
 .tag.temp { color: var(--amber); border-color: rgba(251, 191, 36, .4); background: rgba(251, 191, 36, .08); }
 .tag.warn { color: var(--red); border-color: rgba(248, 113, 113, .4); background: rgba(248, 113, 113, .08); }
+.tag.live { color: var(--lime); border-color: rgba(190, 242, 100, .45); background: rgba(190, 242, 100, .08); }   /* 即时比分（只在服务器现读现出的页面上有） */
 
 /* 顶部的几个数字 */
 .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0 6px; }

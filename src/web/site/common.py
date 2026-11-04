@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import numpy as np
@@ -118,22 +118,34 @@ NOT_ADVICE = ("<b>只给自己看，不是下注建议。</b>页面只写“哪�
               "再扣掉抽水，多数“倾向”都没有利润空间，“倾向”不等于“值得买”。")
 
 
+# refresh_minutes 写成这个数 = “服务器现读现出”的页面（src/web/live_site.py 把 settings 里的 site.refresh_minutes 换成它）。
+# 这种页面不用 <meta http-equiv="refresh"> 自己整页重新加载，改成引用本站自己的脚本文件 /static/site.js
+# （它每 30 秒问一次服务器“数据变了没有”，脚本没加载也照样能看全部内容）。生成静态文件时（build_site）还是原来的样子。
+LIVE_REFRESH = 0
+LIVE_HEAD = ('<link rel="stylesheet" href="/static/site.css">'
+             '<script src="/static/site.js" defer></script>')
+
+
 def page(title: str, body: str, prefix: str, now: datetime, refresh_minutes: int) -> str:
     """一整页网页。prefix：从这一页到网站根目录的相对路径（首页 ""，match/、team/ 里的页面 "../"）。
 
-    页面开着时每 refresh_minutes 分钟浏览器自己重新加载一次（<meta http-equiv="refresh">，不是脚本），
-    定时任务也是每 15 分钟重新生成一次，所以开着的页面会跟着变。
+    静态文件（refresh_minutes 是正数）：页面开着时每 refresh_minutes 分钟浏览器自己重新加载一次
+    （<meta http-equiv="refresh">，不是脚本），定时任务也是每 15 分钟重新生成一次，所以开着的页面会跟着变。
+    现读现出（refresh_minutes == LIVE_REFRESH）：不自己重新加载，引用 /static/site.js 和 /static/site.css（见上面 LIVE_HEAD）。
     """
     nav = (f"<nav class='top'><span class='brand'>足球预测</span><a href='{e(prefix)}index.html'>即将开赛</a>"
            f"<a href='{e(prefix)}record.html'>战绩</a><a href='{e(prefix)}lifecycle.html'>逐场验收</a>"
            f"<a href='{e(prefix)}bots.html'>虚拟投注</a></nav>")
+    live = int(refresh_minutes) == LIVE_REFRESH
+    refresh = "" if live else f'<meta http-equiv="refresh" content="{int(refresh_minutes) * 60}">\n'
+    origin = ("这一页是网站服务器打开时现场从数据库读出来生成的，不连外网"
+              if live else "这是本机的静态文件，不连网")
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 {VIEWPORT}
-<meta http-equiv="refresh" content="{int(refresh_minutes) * 60}">
-<title>{e(title)}</title><style>{BASE_CSS}{SITE_CSS}</style></head><body><div class="wrap">
+{refresh}<title>{e(title)}</title><style>{BASE_CSS}{SITE_CSS}</style>{LIVE_HEAD if live else ""}</head><body><div class="wrap">
 {nav}
 {body}
-<footer class="small">生成时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。这是本机的静态文件，不连网；
+<footer class="small">生成时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。{origin}；
 数据来源：赔率来自懂球帝（dongqiudi.com），比分来自 football-data.co.uk 和懂球帝。只供个人学习，不转发。</footer>
 </div></body></html>
 """
@@ -157,12 +169,40 @@ def placeholder(text: str) -> str:
     return f"<div class='placeholder'>{e(text)}</div>"
 
 
-def table(head: list[str], rows: list[list[str]], cls: str = "") -> str:
+def table(head: list[str], rows: list[list[str]], cls: str = "", row_attrs: list[str] | None = None) -> str:
     """一张表。head 是表头文字（会转义）；rows 里每格是已经排好的 HTML（调用的地方负责转义）。
-    某一格要带样式时，直接给一整格 "<td class='match'>...</td>"，这里就不再包一层。"""
+    某一格要带样式时，直接给一整格 "<td class='match'>...</td>"，这里就不再包一层。
+    row_attrs：每一行 <tr> 上额外的属性（已经转义好的，例如 match_attrs 给的 data-match-id），不给就没有。"""
     th = "".join(f"<th>{e(h)}</th>" for h in head)
-    body = "".join("<tr>" + "".join(c if c.startswith("<td") else f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+    attrs = row_attrs or []
+    body = "".join(f"<tr{attrs[i] if i < len(attrs) else ''}>"
+                   + "".join(c if c.startswith("<td") else f"<td>{c}</td>" for c in r) + "</tr>"
+                   for i, r in enumerate(rows))
     return f"<div class='card'><div class='scroll'><table class='{cls}'><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div></div>"
+
+
+def match_attrs(info: dict) -> str:
+    """一场比赛的 data-* 属性（给 /static/site.js 用：脚本按它们找到这一行，更新即时比分、按联赛筛选）。
+    data-match-id = 我们的比赛编号；data-league = 联赛代码（E0 这种）；data-kickoff = 开球时间（UTC，ISO 写法，没有具体时间就不写）。
+    只是属性，页面上看不见；没有脚本时什么都不影响。值都转义过。"""
+    out = f" data-match-id='{int(info['match_id'])}' data-league='{e(info.get('competition') or '')}'"
+    iso = utc_iso(info.get("kickoff_utc")) if info.get("date_precision") != "round" else None
+    if iso:
+        out += f" data-kickoff='{e(iso)}'"
+    return out
+
+
+def utc_iso(text) -> str | None:
+    """数据库里的 UTC 时间文字（'2026-11-08 15:00'）→ 标准写法 '2026-11-08T15:00:00+00:00'。空的、读不懂的返回 None。
+    数据库里没写时区的一律当作 UTC（项目约定）；写了时区的换算成 UTC。"""
+    if not text or not isinstance(text, str):
+        return None
+    try:
+        t = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    t = t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
+    return t.isoformat()
 
 
 # ---------- 内嵌 SVG：比分热力图 ----------
