@@ -1085,3 +1085,17 @@ line_clv_study:               # 亚盘、大小球收盘线研究 src/evaluate/l
   suspicious_b1: 0.5            # b₁ 超过这个先当作偷看未来去查
   site_lean: 0.02               # 只看看：网站倾向规则（胜算 − 0.5 不小于这个，和 lean.ah、lean.over25 一样）
   random_seed: 20261104         # 随机对照的种子：每场用（种子, match_id）定
+
+pick_tiers_study:             # 四个玩法的“把握”等级 src/evaluate/pick_tiers_study.py（需求文档第 5 节“四个玩法的‘把握’等级怎么定”，跑之前写下）
+  output_dir: data/backtest/pick_tiers   # 结果放这里（data/ 不进 Git）
+  run: w9_gb_l7                  # 读哪次回测（data/backtest/ 下，要有 predictions.csv、matrices_gb_l7.npz、fusion_odds.csv）
+  first_season: 2012             # 平博赛前赔率 2012/13 起才有
+  cut_last: 2019                 # 2012–2019 定切点（三等分）
+  test_last: 2023                # 2020–2023 检验；程序里再按 seasons.dev_last 检查，考试赛季不读
+  leagues: [E0, SP1, D1, I1, F1]
+  ou_lines: [0.5, 6.0, 0.25]     # 推“大小球主盘口”时试的线：从 0.5 到 6，每隔 0.25
+  check_first_season: 2018       # 推出来的主盘口和懂球帝真主盘口核对，从这季起（懂球帝 2018/19 起有大小球）
+  usage: 研究实验                 # 核对时取懂球帝变盘记录的用途（只在开发模式）
+  calib_tol: 0.03                # 校准：平均把握分和实际命中率差不超过 3 个百分点
+  boot: 2000                     # 按周成块 bootstrap 次数
+  random_seed: 20261104
