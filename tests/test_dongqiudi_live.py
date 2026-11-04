@@ -15,6 +15,18 @@ UTC = timezone.utc
 T0 = datetime(2026, 11, 8, 15, 0, tzinfo=UTC)   # 一个周六下午（标准时间）开球
 
 
+@pytest.fixture(autouse=True)
+def restore_log_handlers():
+    """run_forever 会给 dongqiudi_live 日志加文件输出：每个测试完了拿掉、关掉，不影响别的测试，临时文件夹也删得掉。"""
+    handlers, level = list(live.log.handlers), live.log.level
+    yield
+    for h in live.log.handlers[:]:
+        if h not in handlers:
+            live.log.removeHandler(h)
+            h.close()
+    live.log.setLevel(level)
+
+
 # ---------- 造数据 ----------
 def make_db(path, games):
     """造一个只有 matches、match_sources 两张表（只放用得到的列）的数据库。
@@ -36,7 +48,7 @@ def game(dqd, lg="E0", ko=T0, status="scheduled", precision="day"):
 
 def settings_for(tmp_path, games, **live_cfg):
     make_db(tmp_path / "t.db", games)
-    return {"paths": {"database": str(tmp_path / "t.db"), "raw": str(tmp_path / "raw")},
+    return {"paths": {"database": str(tmp_path / "t.db"), "raw": str(tmp_path / "raw"), "logs": str(tmp_path / "logs")},
             "dongqiudi": {"min_interval_seconds": 0, "league_ids": {"E0": 4, "SP1": 3},
                           "live": {"before_minutes": 5, "after_minutes": 150, "every_seconds": 120, "pause_minutes": 60,
                                    "show_played_minutes": 300, "idle_check_minutes": 10,
@@ -362,5 +374,182 @@ def test_bad_inputs_do_not_raise(tmp_path):
     assert r["status"] == "ok" and read_out(s)["matches"][0]["minute"] == "30"
     s["paths"]["database"] = str(tmp_path / "没有.db")
     r = tick(s, T0 + timedelta(minutes=40), f)
-    assert r["status"] == "off" and "FileNotFoundError" in r["note"] and len(f.calls) == 1
-    assert read_out(s)["status"] == "off"
+    assert "FileNotFoundError" in r["note"] and len(f.calls) == 1
+    out = read_out(s)                                        # 出错不清空：上一份的比分接着显示
+    assert out["status"] == "ok" and [g["minute"] for g in out["matches"]] == ["30"] and "上一次" in out["note"]
+    r = tick(s, T0 + timedelta(minutes=151), f)              # 过了窗口，旧的“进行中”也不显示了
+    assert r["status"] == "off" and read_out(s)["matches"] == [] and read_out(s)["status"] == "off"
+
+
+# ---------- 审查后补的 ----------
+def finish_in_db(s, dqd):
+    """像每小时任务那样，把数据库里这场改成 finished。"""
+    con = sqlite3.connect(s["paths"]["database"])
+    con.execute("update matches set status = 'finished' where match_id = (select match_id from match_sources"
+                " where source = 'dongqiudi' and source_key = ?)", (str(dqd),))
+    con.commit()
+    con.close()
+
+
+def test_db_finished_but_file_playing_checks_again(tmp_path):
+    """每小时任务先把数据库改成 finished、这里还没看到 Played：上一份文件里还是“进行中”，这个联赛照样再请求一次，
+    换成最后比分；确认踢完以后不再请求。"""
+    s = settings_for(tmp_path, [game(1, ko=T0)])
+    playing = FakeFetcher({"E0": {"list": [item(1, score=("1", "0"), minute="90", extra="3", period="2H")]}})
+    tick(s, T0 + timedelta(minutes=110), playing)
+    finish_in_db(s, 1)
+    f = FakeFetcher({"E0": {"list": [item(1, status="Played", score=("1", "0"), minute="90", period="FT")]}})
+    memory = {}
+    r = tick(s, T0 + timedelta(minutes=114), f, memory)
+    assert r["requests"] == 1 and [(g["state"], g["minute"]) for g in read_out(s)["matches"]] == [("Played", "")]
+    for minutes in (120, 200, 290):                        # 确认踢完：不再请求，最后比分接着显示到开球后 300 分钟
+        r = tick(s, T0 + timedelta(minutes=minutes), f, memory)
+        assert r["requests"] == 0 and [g["state"] for g in read_out(s)["matches"]] == ["Played"]
+    assert len(f.calls) == 1
+
+
+def test_stale_playing_not_shown_after_window(tmp_path):
+    """数据库已经 finished、懂球帝一直没拿到：旧的“进行中”最多显示到开球后 after_minutes（150），不会挂到 300 分钟。"""
+    s = settings_for(tmp_path, [game(1, ko=T0)])
+    tick(s, T0 + timedelta(minutes=110), FakeFetcher({"E0": {"list": [item(1, score=("1", "0"), minute="90", extra="3")]}}))
+    finish_in_db(s, 1)
+    f = FakeFetcher({"E0": FetchFailed("HTTP 500")})
+    r = tick(s, T0 + timedelta(minutes=114), f)
+    assert r["failed"] == ["E0"] and [g["state"] for g in read_out(s)["matches"]] == ["Playing"]
+    for minutes in (151, 200, 290):
+        r = tick(s, T0 + timedelta(minutes=minutes), f)
+        assert r["requests"] == 0 and r["status"] == "off" and read_out(s)["matches"] == []
+    cfg = live.live_cfg(s)
+    g = {"kickoff_utc": T0.isoformat(), "state": "Playing"}
+    assert live.in_window(g, T0 + timedelta(minutes=150), cfg) and not live.in_window(g, T0 + timedelta(minutes=151), cfg)
+    assert live.in_window({**g, "state": "Played"}, T0 + timedelta(minutes=300), cfg)
+    assert not live.in_window({"kickoff_utc": "2026-11-08T15:00:00", "state": "Playing"}, T0, cfg)   # 没时区：不显示
+
+
+def test_error_keeps_previous_scores(tmp_path):
+    """一轮出意外（例如数据库临时锁住）：不清空比分，上一份里还在窗口里的比赛接着显示，说明里写原因；下一轮照常。"""
+    s = settings_for(tmp_path, [game(1, ko=T0), game(2, "SP1", ko=T0 - timedelta(hours=3))])
+    good = FakeFetcher({"E0": {"list": [item(1, score=("1", "0"), minute="30")]}})
+    tick(s, T0 + timedelta(minutes=30), good)
+
+    class Locked(FakeFetcher):
+        def last_block(self, since):
+            raise sqlite3.OperationalError("database is locked")
+    r = tick(s, T0 + timedelta(minutes=33), Locked())
+    out = read_out(s)
+    assert out["status"] == "ok" and [(g["dqd_id"], g["home_goals"]) for g in out["matches"]] == [(1, 1)]
+    assert "OperationalError" in out["note"] and "上一次" in out["note"] and r["matches"] == 1
+    r = tick(s, T0 + timedelta(minutes=33), Locked())     # 连着两轮出错也一样
+    assert read_out(s)["matches"][0]["dqd_id"] == 1
+    r = tick(s, T0 + timedelta(minutes=45), good)
+    assert r["requests"] == 1 and "出错" not in read_out(s)["note"]
+
+
+def test_rescheduled_match_not_requested(tmp_path):
+    """改期：懂球帝返回的开球时间改到 3 天以后（数据库还没改过来）。这场不显示，到新时间前不再为它请求；
+    新时间进入窗口时照常再看。"""
+    s = settings_for(tmp_path, [game(1, ko=T0)])
+    new_ko = T0 + timedelta(days=3)
+    f = FakeFetcher({"E0": {"list": [item(1, ko=new_ko, status="Fixture")]}})
+    memory = {}
+    r = tick(s, T0 + timedelta(minutes=2), f, memory)
+    assert r["requests"] == 1 and read_out(s)["matches"] == []
+    for minutes in (5, 30, 100):
+        r = tick(s, T0 + timedelta(minutes=minutes), f, memory)
+        assert r["requests"] == 0 and r["status"] == "off"
+    assert memory["moved"] == {1: new_ko}
+    # 数据库改过来以后（每小时任务导入了新时间），新时间到了照常请求
+    con = sqlite3.connect(s["paths"]["database"])
+    con.execute("update matches set kickoff_utc = ? where match_id = 1", (new_ko.strftime("%Y-%m-%d %H:%M"),))
+    con.commit()
+    con.close()
+    f.pages["E0"] = {"list": [item(1, ko=new_ko, score=("0", "0"), minute="10")]}
+    r = tick(s, new_ko + timedelta(minutes=10), f, memory)
+    assert r["requests"] == 1 and read_out(s)["matches"][0]["minute"] == "10"
+
+
+def test_tick_closes_session_and_connection(tmp_path, monkeypatch):
+    """tick 自己建的 LiveFetcher：每轮结束关掉网络会话和数据库连接。"""
+    from tests.test_dongqiudi import FakeSite
+
+    class ClosingSite(FakeSite):
+        closed = False
+
+        def close(self):
+            self.closed = True
+    s = settings_for(tmp_path, [game(1, ko=T0)])
+    site, now = ClosingSite(), T0 + timedelta(minutes=30)
+    site.pages[live.live_url(4, now, live.live_cfg(s))] = (200, {"list": [item(1, minute="30")]})
+    opened = []
+    real_connect = live.connect
+    monkeypatch.setattr(live, "connect", lambda p: opened.append(real_connect(p)) or opened[-1])
+    real_fetcher = live.LiveFetcher
+    monkeypatch.setattr(live, "LiveFetcher",
+                        lambda st: real_fetcher(st, log_db=tmp_path / "log.db", session=site, sleep=lambda x: None))
+    r = live.tick(s, now)
+    assert r["requests"] == 1 and site.closed and len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):           # 连接已经关了
+        opened[0].execute("select 1")
+
+
+def test_collector_failure_closes_connection(tmp_path, monkeypatch):
+    """Collector 没建成（例如建表时数据库锁住）：刚打开的连接马上关掉；tick 不抛错，下一轮再建。"""
+    s = settings_for(tmp_path, [game(1, ko=T0)])
+    opened = []
+    real_connect = live.connect
+    monkeypatch.setattr(live, "connect", lambda p: opened.append(real_connect(p)) or opened[-1])
+
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(live, "Collector", broken)
+    fetcher = LiveFetcher(s, log_db=tmp_path / "log.db")
+    with pytest.raises(sqlite3.OperationalError):
+        fetcher.get("E0", T0)
+    assert fetcher.collector is None and len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("select 1")
+    fetcher.close()                                          # 没建成也可以照常 close
+    r = tick(s, T0 + timedelta(minutes=30), LiveFetcher(s, log_db=tmp_path / "log.db"))
+    assert "OperationalError" in r["note"] and len(opened) == 2
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[1].execute("select 1")
+
+
+def test_pause_remembered_in_memory(tmp_path):
+    """被拒绝时 fetch_log 那条记录没写进去（例如数据库锁住）：内存里记着 paused_until，60 分钟内照样一次都不请求。"""
+    s = settings_for(tmp_path, [game(1, ko=T0), game(2, "SP1", ko=T0)])
+
+    class NoLog(FakeFetcher):
+        def last_block(self, since):             # fetch_log 里什么都没有
+            return None
+    f = NoLog({"E0": Blocked("HTTP 429"), "SP1": {"list": [item(2, minute="10")]}})
+    memory = {}
+    t = T0 + timedelta(minutes=10)
+    r = tick(s, t, f, memory)
+    assert r["status"] == "paused" and len(f.calls) == 1
+    for minutes in (1, 30, 59):
+        r = tick(s, t + timedelta(minutes=minutes), f, memory)
+        assert r["status"] == "paused" and r["requests"] == 0 and "429" in r["note"] and "暂停" in r["note"]
+        assert read_out(s)["status"] == "paused"
+    assert r["next_check_utc"] == t + timedelta(minutes=60) and len(f.calls) == 1
+    f.pages["E0"] = {"list": [item(1, minute="70")]}
+    assert tick(s, t + timedelta(minutes=60), f, memory)["requests"] == 2
+
+
+def test_run_forever_writes_log_file_once(tmp_path):
+    """run_forever 第一次运行时给 dongqiudi_live 日志加文件输出（位置从 settings 的 paths.logs 取）；
+    再跑一次也不会重复加，出意外的记录写进这个文件。"""
+    s = settings_for(tmp_path, [game(1, ko=T0)])
+
+    class Broken(FakeFetcher):
+        def last_block(self, since):
+            raise RuntimeError("数据库坏了")
+    for _ in range(2):
+        live.run_forever(s, CountingStop(1), make_fetcher=Broken, clock=lambda: T0 + timedelta(minutes=30))
+    path = (tmp_path / "logs" / "dongqiudi_live.log").resolve()
+    files = [h for h in live.log.handlers if isinstance(h, live.logging.FileHandler)]
+    assert [live.Path(h.baseFilename).resolve() for h in files] == [path]
+    for h in files:
+        h.flush()
+    text = path.read_text(encoding="utf-8")
+    assert text.count("实时比分后台线程开始") == 2 and "RuntimeError: 数据库坏了" in text

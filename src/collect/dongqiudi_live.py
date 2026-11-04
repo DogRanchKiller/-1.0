@@ -11,6 +11,8 @@ r"""比赛进行中的实时比分（需求文档 6.2“比赛中实时比分”
 - 一个联赛只有在“有比赛处于开球前 before_minutes 分钟到开球后 after_minutes 分钟之间、而且还没确认踢完”时才请求。
   “确认踢完”有三种：数据库里已经是 finished（每小时任务导入的）；这一轮或以前几轮懂球帝已经写 Played（踢完）；
   懂球帝写的是延期、待定之类（不是“正在踢”也不是“未开赛”）。
+  上一份 scores.json 里还是“进行中 / 未开赛”的比赛，即使数据库已经 finished，也再请求一次确认踢完（换成最后比分）。
+  懂球帝把开球时间改到以后（新时间不在窗口里）：到新时间前不再为它请求。
 - 同一个联赛两次请求至少隔 every_seconds 秒（看 fetch_log 里这个联赛上一次实时请求的时间，几个程序一起跑也算得对）。
 
 遵守的规矩（和 src/collect/dongqiudi.py 一样，直接用它的 Collector 发请求，不另写一套）：
@@ -18,7 +20,10 @@ r"""比赛进行中的实时比分（需求文档 6.2“比赛中实时比分”
 - 每次请求都记进 fetch_log（来源 dongqiudi，数据类型 fixtures_live），以后可以数一共请求了几次。
 - 遇到 403、429 或拦截页：整个停下，scores.json 写 status=paused，pause_minutes（默认 60）分钟内不再请求。
   不重试绕过，不换 UA、不加 cookie、不登录。每小时任务被拒绝时（fetch_log 里有记录）这里也一样停。
+  后台线程内存里也记着“暂停到什么时候”，fetch_log 那条记录万一没写进去也照样停。
 - 返回的内容不存原始文件：只为显示，比分以后由每小时任务存的赛程快照和 football-data 正式记录。
+- 一轮出意外（例如数据库临时锁住）：不清空比分，上一份里还在窗口里的比赛接着显示，说明里写原因。
+- 日志写在日志文件夹（settings.yaml 的 paths.logs）里的 dongqiudi_live.log：后台线程第一次运行、手动 once 时都会加上。
 
 怎么运行：
     .venv\Scripts\python -m src.collect.dongqiudi_live once    # 手动跑一轮，打印摘要（中文）
@@ -39,6 +44,7 @@ from urllib.parse import quote
 from src.clean.dongqiudi_reader import BEIJING, parse_fixtures
 from src.collect.dongqiudi import FIXTURES_URL, SOURCE, Blocked, Collector, check_fixtures
 from src.common.config import PROJECT_ROOT, load_settings, resolve_path
+from src.common.db import connect
 
 DATA_TYPE = "fixtures_live"   # 记进 fetch_log 的数据类型（和每小时任务的 fixtures 分开，数次数、数据状态页都不会混）
 STATES = ("Playing", "Played", "Fixture")   # 懂球帝的状态：正在踢 / 踢完 / 未开赛。别的（延期、待定等）不显示
@@ -140,13 +146,17 @@ class LiveFetcher:
         """请求一个联赛的赛程接口，返回 JSON。不存原始文件，只在 fetch_log 记一行。
         403/429 或拦截页 → 抛 Blocked（调用的地方整个停下）；其他没拿到 → 抛 FetchFailed（只跳过这个联赛这一轮）。"""
         if self.collector is None:
-            from src.common.db import connect   # 用到时才打开可写连接
             kwargs = {"sleep": self.sleep}
             if self.session is not None:
                 kwargs["session"] = self.session
             if self.now is not None:
                 kwargs["now"] = self.now
-            self.collector = Collector(connect(self.log_db), self.raw_dir, self.cfg, **kwargs)
+            con = connect(self.log_db)   # 用到时才打开可写连接
+            try:
+                self.collector = Collector(con, self.raw_dir, self.cfg, **kwargs)
+            except Exception:
+                con.close()   # Collector 没建成（例如建 request_slots 表时数据库锁住）：刚打开的连接马上关掉，不留着
+                raise
         c = self.collector
         url = live_url(self.cfg["league_ids"][league], now, self.live)
         r = c._get(url)   # 和每小时任务同一个限速（每 5 秒最多一次，几个程序合起来算）；连不上时等 30 秒重试，最多 3 次
@@ -169,9 +179,15 @@ class LiveFetcher:
         return json.loads(r.content)
 
     def close(self):
+        """每轮结束时调用：关掉网络会话（requests 的连接池）和数据库连接，下一轮用到时再新开。"""
         if self.collector is not None:
-            self.collector.con.close()
-            self.collector = None
+            c, self.collector = self.collector, None
+            try:
+                close_session = getattr(c.session, "close", None)   # 测试里的假网站可能没有 close
+                if close_session:
+                    close_session()
+            finally:
+                c.con.close()
 
 
 # ---------- 读数据库：哪些比赛快开球 ----------
@@ -259,8 +275,8 @@ def parse_live(data: dict, league: str) -> tuple[list[dict], dict[int, str]]:
 
 def in_window(g: dict, now: datetime, cfg: dict) -> bool:
     """这场比赛现在该不该显示：
-    未开赛 → 开球前 before_minutes 到开球后 after_minutes（晚开球的也留着）；
-    正在踢 → 开球后 show_played_minutes 以内（防止旧数据一直挂着）；
+    未开赛、正在踢 → 开球前 before_minutes 到开球后 after_minutes（和“要不要请求”同一个窗口：
+        过了这个时间就不再请求，旧的“进行中”也不再显示，防止踢完了网站还一直显示“进行中”）；
     踢完 → 开球后 show_played_minutes 以内（默认 300 分钟 ≈ 踢完以后再留 3 小时左右）。
     格式不对的当作不显示。"""
     try:
@@ -268,9 +284,11 @@ def in_window(g: dict, now: datetime, cfg: dict) -> bool:
         state = g["state"]
     except (KeyError, TypeError, ValueError):
         return False
-    if state == "Fixture":
+    if ko.tzinfo is None:   # 没写时区（不是这个程序写的）：没法比较，当作不显示
+        return False
+    if state in ("Fixture", "Playing"):
         return ko - timedelta(minutes=cfg["before_minutes"]) <= now <= ko + timedelta(minutes=cfg["after_minutes"])
-    if state in ("Playing", "Played"):
+    if state == "Played":
         return ko - timedelta(minutes=cfg["before_minutes"]) <= now <= ko + timedelta(minutes=cfg["show_played_minutes"])
     return False
 
@@ -297,15 +315,19 @@ def write_scores(path: Path, payload: dict):
             os.remove(tmp)
 
 
-def read_previous(path: Path) -> list[dict]:
-    """上一次写的 scores.json 里的比赛（用来在“这一轮这个联赛没请求”时接着显示，以及记住哪些已经踢完）。
-    文件不在、坏了 → 当作没有。"""
+def read_file(path: Path) -> dict:
+    """上一次写的 scores.json 整个读出来。文件不在、坏了 → 当作空的。"""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        games = data.get("matches") if isinstance(data, dict) else None
-        return [g for g in games if isinstance(g, dict)] if isinstance(games, list) else []
     except (OSError, ValueError):
-        return []
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_previous(path: Path) -> list[dict]:
+    """上一次写的 scores.json 里的比赛（用来在“这一轮这个联赛没请求”时接着显示，以及记住哪些已经踢完）。"""
+    games = read_file(path).get("matches")
+    return [g for g in games if isinstance(g, dict)] if isinstance(games, list) else []
 
 
 def payload(now: datetime, status: str, note: str, matches: list[dict]) -> dict:
@@ -318,25 +340,37 @@ def tick(settings: dict, now: datetime | None = None, fetcher=None, memory: dict
     """做一轮：看哪些联赛要请求、请求、写 scores.json。返回摘要（字典）。任何意外都不往外抛：记日志、写 status。
 
     fetcher：发请求的东西，不给就用 LiveFetcher（真的请求）；测试里给假的。
-    memory：run_forever 每轮传同一个字典进来，记住“这一场已经确认踢完 / 不用再看”（只在内存里）。
+    memory：run_forever 每轮传同一个字典进来，只在内存里记住：
+        done：已经确认踢完 / 不用再看的比赛编号；
+        moved：懂球帝把开球时间改到以后的比赛 → 新的开球时间（数据库还没改过来时按新时间算）；
+        paused_until：被拒绝以后暂停到什么时候、为什么（fetch_log 那条记录万一没写进去，也照样停）。
     """
     now = now or datetime.now(timezone.utc)
     cfg = live_cfg(settings)
     out_path = resolve_path(cfg["output"])
     memory = memory if memory is not None else {}
-    done = memory.setdefault("done", set())   # 已经确认不用再看的比赛编号
+    memory.setdefault("done", set())
+    memory.setdefault("moved", {})
     own = fetcher is None
     summary = {"status": None, "note": "", "requests": 0, "requested": [], "waiting": [], "failed": [],
                "matches": 0, "next_check_utc": None, "output": out_path}
     try:
         fetcher = fetcher or LiveFetcher(settings)   # 放在 try 里：设置缺项等也算“这一轮出错”，不往外抛
-        _tick(settings, now, cfg, fetcher, done, out_path, summary)
-    except Exception as err:   # 意外（数据库读不了、磁盘满了等）：不让后台线程死掉，记下来，下一轮再来
+        _tick(settings, now, cfg, fetcher, memory, out_path, summary)
+    except Exception as err:   # 意外（数据库临时锁住、读不了、磁盘满了等）：不让后台线程死掉，记下来，下一轮再来
         log.exception("实时比分这一轮出错")
-        summary.update(status="off", note=f"这一轮出错（{type(err).__name__}），过一会儿自动再试",
+        # 比分不清空：上一份里还在时间窗口里的比赛接着显示，状态沿用上一份（上一份没有就写 off），说明里写原因
+        try:
+            prev = read_file(out_path)
+            kept = [g for g in read_previous(out_path) if in_window(g, now, cfg)]
+        except Exception:
+            prev, kept = {}, []
+        status = prev.get("status") if kept and prev.get("status") in ("ok", "off") else "off"
+        note = f"这一轮出错（{type(err).__name__}），过一会儿自动再试" + ("；比分是上一次拿到的" if kept else "")
+        summary.update(status=status, note=note, matches=len(kept),
                        next_check_utc=now + timedelta(seconds=max(60, cfg["every_seconds"])))
         try:
-            write_scores(out_path, payload(now, "off", summary["note"], []))
+            write_scores(out_path, payload(now, status, note, kept))
         except Exception:
             log.exception("scores.json 也写不了")
     finally:
@@ -345,21 +379,29 @@ def tick(settings: dict, now: datetime | None = None, fetcher=None, memory: dict
     return summary
 
 
-def _tick(settings, now, cfg, fetcher, done, out_path, summary):
+def _tick(settings, now, cfg, fetcher, memory, out_path, summary):
     leagues = list(settings["dongqiudi"]["league_ids"])   # 只看五大联赛
     every = timedelta(seconds=cfg["every_seconds"])
     before, after = timedelta(minutes=cfg["before_minutes"]), timedelta(minutes=cfg["after_minutes"])
+    done, moved = memory["done"], memory["moved"]
     previous = read_previous(out_path)
     # 上一份文件里已经“踢完”的，不用再看（程序重新启动、手动跑 once 时也记得）
     done.update(g["dqd_id"] for g in previous if g.get("state") == "Played" and isinstance(g.get("dqd_id"), int))
 
-    # 1. 最近被网站拒绝过：pause_minutes 内一次都不请求
+    # 1. 最近被网站拒绝过：pause_minutes 内一次都不请求。
+    #    两处都看：fetch_log 里的拒绝记录（任何程序的，重新启动也记得）；内存里的 paused_until
+    #    （这个线程自己被拒绝时记的，万一数据库锁住、fetch_log 那条没写进去，也照样停）
     pause = timedelta(minutes=cfg["pause_minutes"])
+    stops = []
     blocked = fetcher.last_block(now - pause)
     if blocked:
         t, why = blocked
-        resume = t + pause
-        note = f"懂球帝 {bj(t)} 拒绝访问或返回拦截页（{why}），暂停到 {bj(resume)}（北京时间），不绕过"
+        stops.append((t + pause, f"懂球帝 {bj(t)} 拒绝访问或返回拦截页（{why}）"))
+    if memory.get("paused_until") and now < memory["paused_until"][0]:
+        stops.append(memory["paused_until"])
+    if stops:
+        resume, why = max(stops)
+        note = f"{why}，暂停到 {bj(resume)}（北京时间），不绕过"
         summary.update(status="paused", note=note, next_check_utc=resume)
         write_scores(out_path, payload(now, "paused", note, []))
         return
@@ -369,10 +411,19 @@ def _tick(settings, now, cfg, fetcher, done, out_path, summary):
     for m in scheduled_matches(resolve_path(settings["paths"]["database"]), leagues, now, cfg):
         if m["dqd_id"] in done:
             continue
-        if m["kickoff"] - before <= now <= m["kickoff"] + after:
+        ko = moved.get(m["dqd_id"], m["kickoff"])   # 懂球帝改到以后、数据库还没改过来的：按懂球帝的新时间
+        if ko - before <= now <= ko + after:
             active.setdefault(m["league"], set()).add(m["dqd_id"])
-        elif m["kickoff"] - before > now:
-            upcoming.append(m["kickoff"] - before)
+        elif ko - before > now:
+            upcoming.append(ko - before)
+    # 上一份文件里还是“进行中 / 未开赛”、还在窗口里的比赛：即使数据库已经是 finished（每小时任务比这里先看到
+    # 懂球帝写踢完、先导入了），也把它的联赛算进“要看”，再请求一次确认踢完，换成最后比分。
+    # 不这样的话，这个联赛不再请求，网站会一直显示上一份里的“进行中 90+3”。
+    for g in previous:
+        mid = g.get("dqd_id")
+        if (g.get("state") in ("Playing", "Fixture") and g.get("league") in leagues and isinstance(mid, int)
+                and mid not in done and in_window(g, now, cfg)):
+            active.setdefault(g["league"], set()).add(mid)
 
     # 3. 每个要看的联赛：离上次请求够 every_seconds 才请求
     fresh, next_times = {}, []
@@ -389,7 +440,9 @@ def _tick(settings, now, cfg, fetcher, done, out_path, summary):
             data = fetcher.get(lg, now)
         except Blocked as err:
             resume = now + pause
-            note = f"懂球帝拒绝访问或返回拦截页（{err}），暂停到 {bj(resume)}（北京时间），不绕过"
+            why = f"懂球帝 {bj(now)} 拒绝访问或返回拦截页（{err}）"
+            memory["paused_until"] = (resume, why)   # 内存里也记一份（见第 1 步）
+            note = f"{why}，暂停到 {bj(resume)}（北京时间），不绕过"
             log.error("实时比分：%s", note)
             summary.update(status="paused", note=note, next_check_utc=resume)
             summary["requests"] += 1
@@ -403,12 +456,19 @@ def _tick(settings, now, cfg, fetcher, done, out_path, summary):
         summary["requests"] += 1
         summary["requested"].append(lg)
         games, states = parse_live(data, lg)
+        kickoffs = {g["dqd_id"]: datetime.fromisoformat(g["kickoff_utc"]) for g in games}
         for mid in active[lg]:
             if mid not in states:   # 返回的这一页里没有这场（一页约前一周到后四周，正常不会发生）
                 log.warning("实时比分：%s 第 %d 场不在返回的赛程里，这次不再看", lg, mid)
                 done.add(mid)
             elif states[mid] not in ("Playing", "Fixture"):   # 踢完了，或者延期、待定：不用再看
                 done.add(mid)
+            elif states[mid] == "Fixture" and mid in kickoffs and not (
+                    kickoffs[mid] - before <= now <= kickoffs[mid] + after):
+                # 改期：懂球帝返回的新开球时间已经不在窗口里（改到以后了）。记下新时间，到新时间前不再为它请求；
+                # 新时间进入窗口时照常再看（不记成永远“不用再看”）
+                log.info("实时比分：%s 第 %d 场开球时间改成 %s（北京时间），先不看", lg, mid, bj(kickoffs[mid]))
+                moved[mid] = kickoffs[mid]
         fresh[lg] = [g for g in games if in_window(g, now, cfg)]
 
     # 4. 拼出要显示的比赛：这一轮请求了的用新的；没请求的（等间隔、没拿到、已经踢完不用看）接着用上一份里还在窗口里的
@@ -440,6 +500,27 @@ def _tick(settings, now, cfg, fetcher, done, out_path, summary):
     summary.update(status=status, note=note, matches=len(shown), next_check_utc=min(candidates))
 
 
+# ---------- 日志文件 ----------
+LOG_FILE_NAME = "dongqiudi_live.log"
+
+
+def attach_log_file(settings: dict) -> Path:
+    """给 dongqiudi_live 这个日志加一个文件输出：日志文件夹（settings.yaml 的 paths.logs）里的 dongqiudi_live.log。
+    同一个文件已经加过就不再加（网站服务器重启线程、手动 once 都不会重复写两遍）。返回日志文件的位置。"""
+    log_dir = resolve_path(settings["paths"]["logs"])
+    path = (log_dir / LOG_FILE_NAME).resolve()
+    for h in log.handlers:
+        if isinstance(h, logging.FileHandler) and Path(h.baseFilename).resolve() == path:
+            return path
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%m-%d %H:%M:%S"))
+    log.addHandler(handler)
+    if log.level == logging.NOTSET:   # 没人设过级别时，一般消息（开始、停止、改期）也写进文件
+        log.setLevel(logging.INFO)
+    return path
+
+
 # ---------- 一直跑（网站服务器的后台线程用） ----------
 def run_forever(settings: dict, stop_event, make_fetcher=None, clock=None):
     """一轮接一轮：每轮做完睡到下一次该看的时间（stop_event.set() 可以马上叫醒、退出）。
@@ -447,17 +528,29 @@ def run_forever(settings: dict, stop_event, make_fetcher=None, clock=None):
     make_fetcher、clock 只给测试用：造假的请求程序、假的现在时间。"""
     cfg = live_cfg(settings)
     memory = {}
+    try:
+        attach_log_file(settings)   # 第一次运行时把日志也写进 logs/dongqiudi_live.log（已经加过就不再加）
+    except Exception:   # 日志文件开不了（设置缺项、没权限）：只是少了日志文件，照常跑
+        log.exception("实时比分日志文件打不开，日志只交给网站服务器")
     log.info("实时比分后台线程开始")
     while not stop_event.is_set():
         wait = 60.0
+        fetcher = None
         try:
             now = clock() if clock else datetime.now(timezone.utc)
-            summary = tick(settings, now, make_fetcher() if make_fetcher else None, memory)
+            fetcher = make_fetcher() if make_fetcher else None   # 不给就由 tick 自己建、自己关
+            summary = tick(settings, now, fetcher, memory)
             nxt = summary.get("next_check_utc")
             if nxt is not None:
                 wait = (nxt - (clock() if clock else datetime.now(timezone.utc))).total_seconds()
         except Exception:   # tick 自己已经接住了意外；这里再保险一次（例如造请求程序出错）
             log.exception("实时比分后台线程出错，60 秒后再试")
+        finally:
+            if fetcher is not None:   # 这一轮用完就关（网络会话、数据库连接）
+                try:
+                    fetcher.close()
+                except Exception:
+                    log.exception("实时比分关闭请求程序出错")
         wait = min(max(wait, MIN_SLEEP_SECONDS), cfg["idle_check_minutes"] * 60)
         stop_event.wait(wait)
     log.info("实时比分后台线程停止")
@@ -486,12 +579,10 @@ def main():
     parser.add_argument("mode", choices=["once"], help="once：手动跑一轮并打印摘要")
     parser.parse_args()
     s = load_settings()
-    log_dir = resolve_path(s["paths"]["logs"])
-    log_dir.mkdir(exist_ok=True)
-    handlers = [logging.FileHandler(log_dir / "dongqiudi_live.log", encoding="utf-8")]
-    if sys.stderr is not None:
-        handlers.append(logging.StreamHandler())
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%m-%d %H:%M:%S", handlers=handlers)
+    attach_log_file(s)   # 和后台线程写同一个日志文件
+    if sys.stderr is not None:   # 手动运行时日志也显示在屏幕上
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%m-%d %H:%M:%S",
+                            handlers=[logging.StreamHandler()])
     print(describe(tick(s)))
 
 
