@@ -156,6 +156,16 @@ dongqiudi:
   # 懂球帝“时间待定”（Uncertain）的比赛，开球时间是占位的（同一轮都写成同一个时间，常常是这一轮靠后的日子），
   # 所以日期往前挪几天，当作“这一轮从哪天开始”（date_precision = round），宁早勿晚，取数层就不会让赛前预测看到开球后的东西
   uncertain_back_days: 3
+  # 比赛进行中的实时比分（src/collect/dongqiudi_live.py，需求文档 6.2“比赛中实时比分”）。只写一个给网站看的小文件，
+  # 不存原始层、不进数据库的比赛表、不进模型。和上面同一个接口、同一个 5 秒限速；网站服务器设置 live.live_poller: true 时才在后台跑
+  live:
+    before_minutes: 5          # 开球前几分钟开始看（这个联赛有比赛进入“开球前 5 分钟到开球后 150 分钟”才请求）
+    after_minutes: 150         # 开球后几分钟还没确认踢完就继续看（90 分钟 + 中场 + 补时，再留些余量给晚开球的）
+    every_seconds: 120         # 同一个联赛两次请求至少隔几秒（所有懂球帝请求之间仍然至少隔 min_interval_seconds）
+    pause_minutes: 60          # 遇到 403、429 或拦截页后停多少分钟（不重试绕过，不换 UA、不加 cookie、不登录）
+    show_played_minutes: 300   # 踢完的比赛开球后几分钟内还显示（约等于踢完以后再留 3 小时）
+    idle_check_minutes: 10     # 后台线程最多隔几分钟醒来看一次（数据库可能刚导入了新的开球时间）
+    output: data/live/scores.json  # 写到哪个文件（先写临时文件再改名，网站不会读到写了一半的）
 
 # 韩K（K联赛 1 级）历史回补和导入（需求文档第 4 节“第 11 阶段：韩K 回补和开发回测”）。工作树 KR 里做，没接定时任务。
 # 采集 src/collect/dongqiudi_kor.py（用懂球帝采集程序的低频、停止规则），导入 src/clean/dongqiudi_kor_import.py。
