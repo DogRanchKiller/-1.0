@@ -1042,8 +1042,9 @@ corners_cards:
 live:
   # 改了这里（或改了代码）要重启“足球预测_网站服务”才生效
   dynamic: true                 # true = 现读现出；false = 和以前完全一样，只发 data/site/ 里定时生成好的静态文件（也没有 /api/、/static/）
-  meta_refresh: true            # true = 现读现出的页面也照样每 site.refresh_minutes 分钟整页重新加载（site.js 还是空的，先靠它）；
-                                # 等 site.js 会自己“数据变了才更新”以后改成 false
+  meta_refresh: false           # false = 现读现出的页面不带整页重新加载，靠 site.js 自己问服务器、数据变了才换内容（WD2 起）；
+                                # true = 另外每 site.refresh_minutes 分钟整页重新加载一次。静态文件（dynamic: false）不受这项影响，照样整页重新加载
+  poll_seconds: 30              # site.js 每几秒问一次 /api/version 和 /api/live（网页切到后台时不问；最少 5 秒）
   cache_seconds: 60             # 读出来的数据在内存里最多留几秒；数据库、data/review/、虚拟投注结果文件改了可以提前重读（见下一项）
   min_reload_seconds: 60        # 两次重读至少隔几秒：比赛期间数据库老在写抓取记录，不能每次都整个重读
   wait_seconds: 10              # 刚启动、一份数据都还没有时，请求最多等几秒；等不到就先发静态文件（接口回 503）

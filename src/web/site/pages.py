@@ -15,7 +15,7 @@ from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bar_html, b
                                  e, kickoff_text, level_name, match_attrs, match_href, page, placeholder, table)
 from src.web.site import picks as pk
 from src.web.site.data import SiteData
-from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text,
+from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text, level,
                                 live_html, score_text, side_of, version_name)
 
 
@@ -36,6 +36,42 @@ def state_html(data: SiteData, mid: int) -> str:
     tag = STATUS_TAGS.get(data.matches[mid].get("status"))
     # 没有正式比分、也没有改期之类的标记时：服务器现读现出的页面上可能有懂球帝的即时比分（静态文件里永远没有）
     return f"<span class='tag warn'>{e(tag)}</span>" if tag else live_html(data, mid)
+
+
+def row_attrs(data: SiteData, m: dict) -> str:
+    """首页一行 <tr> 上的 data-*（给 /static/site.js 筛选、排序、搜索用；看不见，没有脚本时什么都不影响）。
+    在 match_attrs（比赛编号、联赛代码、开球时间）之外再加：
+    data-league-name = 联赛中文名（筛选框里显示）；data-teams = 两队的原名（英文，搜索时英文名也能搜到）；
+    data-pred = 有没有预测（1 / 0）；data-level = 信心等级 1 / 2 / 3（没有就不写）；
+    data-p = 最新一版最后的概率“主胜,平,客胜”（三位小数，按概率排序用；没有预测就不写）。值都转义过。"""
+    mid = m["match_id"]
+    out = (match_attrs(m) + f" data-league-name='{e(data.comp(m['competition']))}'"
+           f" data-teams='{e(m['home_team'] + ' ' + m['away_team'])}'")
+    lt = data.latest(mid)
+    if lt is None:
+        return out + " data-pred='0'"
+    row = lt[1]
+    p, _ = final_probs(row)
+    out += " data-pred='1'"
+    lv = level(row)
+    if isinstance(lv, int) and lv in (1, 2, 3):
+        out += f" data-level='{lv}'"
+    if all(isinstance(x, (int, float)) and np.isfinite(x) for x in p):
+        out += f" data-p='{','.join(f'{float(x):.3f}' for x in p)}'"
+    return out
+
+
+def state_cell(data: SiteData, mid: int, empty: str = "") -> str:
+    """首页“状态 / 赛果”那一格。还没有正式比分、也没有改期之类标记的比赛，格子带 data-live-slot（我们的比赛编号）：
+    site.js 每 30 秒拿到懂球帝即时比分后只改这一格里的 .live-score（进行中 63'  2–1、红牌），别的不动。
+    empty 是没有即时比分时格子里写的字（最近踢完那张表写“比分还没进来”），带 data-live-placeholder：
+    有即时比分时它藏起来（hidden），即时比分没了脚本再把它露出来。"""
+    html = state_html(data, mid)
+    if mid in data.results or STATUS_TAGS.get(data.matches[mid].get("status")):
+        filler = f"<span class='muted'>{e(empty)}</span>" if empty else ""
+        return f"<td>{html or filler}</td>"
+    hold = (f"<span class='muted' data-live-placeholder{' hidden' if html else ''}>{e(empty)}</span>" if empty else "")
+    return f"<td data-live-slot='{int(mid)}'>{html}{hold}</td>"
 
 
 def latest_cell(data: SiteData, mid: int) -> str:
@@ -112,10 +148,10 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
         key, title = day_title(m)
         mid = m["match_id"]
         row = [e(kickoff_text(m, with_date=False) if key != "9999" else kickoff_text(m)), e(data.comp(m["competition"])),
-               f"<td class='match'>{match_link(data, mid, '')}</td>", latest_cell(data, mid), state_html(data, mid)]
+               f"<td class='match'>{match_link(data, mid, '')}</td>", latest_cell(data, mid), state_cell(data, mid)]
         g = groups.setdefault(key, (title, [], []))
         g[1].append(row)
-        g[2].append(match_attrs(m))
+        g[2].append(row_attrs(data, m))
     if groups:
         blocks = "".join(f"<h2>{e(title)}</h2>" + table(["时间", "联赛", "比赛", "最新一版的结论", ""], rows, "list", attrs)
                          for _, (title, rows, attrs) in sorted(groups.items()))
@@ -126,9 +162,9 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
         mid = m["match_id"]
         lt = data.latest(mid)
         rec_rows.append([e(kickoff_text(m)), e(data.comp(m["competition"])), f"<td class='match'>{match_link(data, mid, '')}</td>",
-                         state_html(data, mid) or "<span class='muted'>比分还没进来</span>", latest_cell(data, mid) if lt else "—",
+                         state_cell(data, mid, "比分还没进来"), latest_cell(data, mid) if lt else "—",
                          hit_html(lt[1], data.results.get(mid)) if lt else "—"])
-        rec_attrs.append(match_attrs(m))
+        rec_attrs.append(row_attrs(data, m))
     rec = (table(["开球", "联赛", "比赛", "赛果", "赛前最后一版", "胜平负猜中"], rec_rows, "list", rec_attrs) if rec_rows
            else placeholder(f"最近 {cfg['days_back']} 天没有踢完的比赛"))
     notes = "".join(f"<li>{e(n)}</li>" for n in data.notes[:10])
@@ -245,10 +281,14 @@ def picks_record(data: SiteData) -> str:
              "<p class='small'>“模型自己”：同样的四条规则，只用我们自己的模型、不看赔率。有赔率时，上面的预测用的是赔率算出来的概率"
              "（历史上赔率比我们的模型准，所以网站用赔率；没用上赔率的那几场两列一样），这一列用来看模型自己能猜中多少、和赔率差多少。"
              "下面每场的表里，模型自己的预测和上面不一样时，用淡字另写一行；模型那一版没法预测时也写一行。</p>")
-    # 每场的四个预测（最近 record_matches 场）
-    per = []
+    # 每场的四个预测（最近 record_matches 场）。每行带 data-match-id、data-league、data-league-name，
+    # 每个玩法那一格带 data-market（1x2 / ah / ou / score）、data-outcome（网站那一列的结果）、data-model-outcome（模型自己的结果）：
+    # win 中 / half_win 赢半 / push 走盘 / half_loss 输半 / loss 没中 / none 没预测。给 /static/site.js 按玩法、联赛、猜没猜中筛选用，看不见
+    per, per_attrs = [], []
     for x in items[:data.settings["site"]["record_matches"]]:
         info = data.matches.get(x["mid"]) or {}
+        comp = info.get("competition") or ""
+        per_attrs.append(f" data-match-id='{int(x['mid'])}' data-league='{e(comp)}' data-league-name='{e(data.comp(comp) if comp else '')}'")
         home_n, away_n = data.zh(info.get("home_team", "")), data.zh(info.get("away_team", ""))
         name = match_link(data, x["mid"], "") if x["mid"] in data.matches else e(str(x["mid"]))
         cells = [e(bj_text(x["kickoff"])), f"<td class='match'>{name}</td>",
@@ -261,7 +301,8 @@ def picks_record(data: SiteData) -> str:
                          f"{pk.outcome_html(x['model_outcomes'][k])}</span>")
             elif q is None and p is not None:
                 cell += "<br><span class='small muted'>模型：这一版没法预测</span>"
-            cells.append(cell)
+            cells.append(f"<td data-market='{k}' data-outcome='{e(x['outcomes'][k] or 'none')}'"
+                         f" data-model-outcome='{e(x['model_outcomes'][k] or 'none')}'>{cell}</td>")
         per.append(cells)
     shown = min(len(items), data.settings["site"]["record_matches"])
     return ("<h2>四个玩法的命中率</h2>"
@@ -270,7 +311,7 @@ def picks_record(data: SiteData) -> str:
             + table(["玩法", "场数", "结果", "命中率", ref_head, "模型自己"], rows) + guide
             + "".join(f"<p class='small muted'>{e(n)}</p>" for n in notes)
             + f"<h2>每场的四个预测（最近 {shown} 场）</h2>"
-            + table(["开球", "比赛", "比分", "胜平负", "让球", "大小球 2.5", "比分预测"], per))
+            + table(["开球", "比赛", "比分", "胜平负", "让球", "大小球 2.5", "比分预测"], per, "picks-record", per_attrs))
 
 
 def render_record(data: SiteData, out_dir: Path) -> str:

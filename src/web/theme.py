@@ -101,6 +101,7 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
 # ---------- 正式网站（src/web/site/，工作树 K3 加）：只加新样式，上面 BASE_CSS 原样不动 ----------
 # 几页共用：顶部导航、可以展开的“详细”块（<details>，不用脚本也能点开收起）、热力图和折线图的外框、单场页的版本对比
 SITE_CSS = """
+[hidden] { display: none !important; }   /* 带 hidden 的一律不显示（.tag 这种自己写了 display 的也一样） */
 nav.top { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin-bottom: 18px; font-size: 14px; }
 nav.top a { text-decoration: none; color: var(--sub); padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); }
 nav.top a:hover { color: var(--green); border-color: rgba(52, 211, 153, .45); }

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import html as _html
 import json
 import logging
 import math
@@ -55,7 +56,7 @@ from src.web.site.match import final_probs, leans, level, uncertain, version_mat
 
 LOG = logging.getLogger("site_server")
 # settings.yaml 里没写 live: 时用的数（写了以 settings.yaml 为准）
-DEFAULTS = {"dynamic": True, "meta_refresh": True, "cache_seconds": 60, "min_reload_seconds": 60, "wait_seconds": 10,
+DEFAULTS = {"dynamic": True, "meta_refresh": True, "poll_seconds": 30, "cache_seconds": 60, "min_reload_seconds": 60, "wait_seconds": 10,
             "stale_seconds": 600, "retry_seconds": 15, "live_poller": False, "poller_stop_seconds": 5}
 # 即时比分文件的位置写在 settings.yaml 的 dongqiudi.live.output（WD3 的程序也读这一项，两边只认这一个地方）；没写时用这个
 DEFAULT_SCORES_FILE = "data/live/scores.json"
@@ -238,6 +239,17 @@ def load_from_db(settings: dict, db_path: Path, now: datetime) -> tuple[site_dat
     return data, dqd
 
 
+def with_version(html: str, version: str) -> str:
+    """在网页 <head> 最后加一行 <meta name="site-data-version" content="数据版本">（和 /api/version 的 data_version 一样）。
+    site.js 拿它当“这一页是哪一版数据做的”：之后问 /api/version，版本不一样才去换内容（不会因为刚打开时的先后差一点就白换一次）。
+    版本只有 16 位字母数字，也再转义一次；找不到 </head> 就原样返回。"""
+    i = html.find("</head>")
+    if i < 0:
+        return html
+    tag = f'<meta name="site-data-version" content="{_html.escape(str(version))}">'
+    return html[:i] + tag + html[i:]
+
+
 class LiveSite:
     """服务器里的“现读现出”。一个服务器一个，几个请求线程一起用（内部有锁）。
 
@@ -251,9 +263,11 @@ class LiveSite:
         live = settings_live(settings)
         site = settings["site"]
         # 现读现出的页面加载 /static/site.js（src/web/site/common.py 的 LiveMinutes）。live.meta_refresh 是 true 时
-        # 照样每 site.refresh_minutes 分钟整页重新加载（site.js 还是空的，先靠它）；以后 site.js 会自己更新了再改成 false
+        # 另外每 site.refresh_minutes 分钟整页重新加载；false（现在的设置）时不带，靠 site.js 每 live.poll_seconds 秒问一次服务器、
+        # 数据变了才换内容
         minutes = int(site["refresh_minutes"]) if live["meta_refresh"] else 0
-        self.settings = {**settings, "site": {**site, "refresh_minutes": LiveMinutes(minutes)}}
+        poll = max(5, int(live["poll_seconds"]))          # 最少 5 秒，免得写错成 0 时脚本一直问
+        self.settings = {**settings, "site": {**site, "refresh_minutes": LiveMinutes(minutes, poll)}}
         self.site_dir = Path(site_dir)
         self.db_path = resolve_path(settings["paths"]["database"])
         self.review_dir = resolve_path(site["review_dir"])
@@ -361,11 +375,14 @@ class LiveSite:
         if snap is None:
             return None
         try:
-            return self._page(snap, route)
+            got = self._page(snap, route)
         except Exception as err:   # noqa: BLE001 —— 故意的：这一页生成出错，改发静态文件，不让网站打不开
             from src.web.serve import _clean_for_log   # 放在这里才导入：serve.py 也要导入这个文件，免得互相导入
             LOG.warning("现读现出：生成 %s 出错（%s），改发静态文件", _clean_for_log(route), _clean_error(err))
             return None
+        if got is not None and got[0] == 200 and got[2].startswith("text/html"):
+            got = (got[0], with_version(got[1], snap.version), got[2])
+        return got
 
     def _page(self, snap: Snapshot, route: str) -> tuple[int, str, str] | None:
         html_type = "text/html; charset=utf-8"

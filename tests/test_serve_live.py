@@ -201,7 +201,8 @@ def test_dynamic_pages_csp_script_no_advice(world):
             assert r.getheader("Content-Security-Policy") == CSP, path
             assert '<script src="/static/site.js" defer></script>' in html, path
             assert html.lower().count("<script") == 1, path          # 只有这一个，没有内联脚本
-            # site.js 还是空的：照样按 site.refresh_minutes 整页重新加载（live.meta_refresh: true）
+            # 这里的 world 故意写了 live.meta_refresh: true：另外按 site.refresh_minutes 整页重新加载
+            #（settings.yaml 现在是 false，那种情况见 test_meta_refresh_switch_off 和 test_site_js.py）
             assert f'<meta http-equiv="refresh" content="{refresh}">' in html, path
             assert "推荐" not in html, path
             assert "现场从数据库读出来生成的" in html and "退出登录" in html, path
@@ -432,7 +433,7 @@ def test_stop_live_poller_waits_with_timeout(monkeypatch, caplog):
 # ---------- 网页自动刷新 ----------
 
 def test_static_and_dynamic_pages_keep_meta_refresh(world):
-    """site.js 还是空的：静态页、现读现出的页都还带 meta refresh；静态页没有脚本。"""
+    """静态页照旧带 meta refresh、没有脚本；现读现出的页在 live.meta_refresh: true 时也带，refresh_minutes 是 0 时不带。"""
     s, tmp = world
     from src.web.site.common import LiveMinutes, page
     minutes = int(s["site"]["refresh_minutes"])
@@ -453,7 +454,7 @@ def test_static_and_dynamic_pages_keep_meta_refresh(world):
 
 
 def test_meta_refresh_switch_off(world):
-    """live.meta_refresh: false（以后 site.js 会自己更新时）：现读现出的页面不带 meta refresh，静态页照旧。"""
+    """live.meta_refresh: false（settings.yaml 现在的设置，site.js 自己更新）：现读现出的页面不带 meta refresh，静态页照旧。"""
     s, tmp = world
     s["live"]["meta_refresh"] = False
     with LiveRunning(s, tmp) as srv:

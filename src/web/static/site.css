@@ -1,1 +1,76 @@
-/* 本站自己的样式文件（给 /static/site.js 用的样子放这里）。现在是空的，页面的样子在 src/web/theme.py。 */
+/* 本站自己的样式文件：只给 /static/site.js 加出来的东西用（需求文档第 8 节“前端脚本”）。
+   页面本身的样子在 src/web/theme.py；这里的规则只管脚本新建的元素（class 名都以 js- 开头），
+   没有脚本时这些元素根本不存在，所以页面和以前一样。颜色用 theme.py 里定好的变量（--green 这种）。
+   @media (max-width: 760px)：手机（屏幕窄）时另用的规则。 */
+
+/* 被筛选藏起来的行：首页的表在手机上每行是一块（display:block），要明确写不显示 */
+tr[hidden], td[hidden], th[hidden] { display: none !important; }
+
+/* ---------- 自动更新那一行（“首页 / 数据状态 / 退出登录”下面） ---------- */
+.js-livebar { max-width: 1180px; margin: -6px auto 12px; display: flex; flex-wrap: wrap; gap: 4px 14px;
+              justify-content: flex-end; align-items: center; font-size: 12.5px; }
+.js-livenote { color: var(--amber); border: 1px solid rgba(251, 191, 36, .4); background: rgba(251, 191, 36, .08);
+               border-radius: 999px; padding: 1px 10px; }
+
+/* ---------- 筛选、排序的工具栏 ---------- */
+.js-toolbar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; margin: 22px 0 6px;
+              padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.js-field { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--sub); }
+.js-field select, .js-field input, .js-reset, .js-vbtn {
+  font: inherit; font-size: 14px; color: var(--text); background: var(--card-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px; min-height: 36px; }
+.js-field select:disabled { opacity: .45; }
+.js-search input { min-width: 200px; }
+.js-field select:focus, .js-field input:focus, .js-reset:focus, .js-vbtn:focus, .js-sort:focus, .js-clickable:focus {
+  outline: 2px solid var(--green); outline-offset: 1px; }
+.js-reset, .js-vbtn { cursor: pointer; }
+.js-reset:hover, .js-vbtn:hover { border-color: rgba(52, 211, 153, .45); color: var(--green); }
+.js-count { color: var(--sub); font-size: 13px; }
+.js-toolbar .js-count { margin-left: auto; align-self: center; }
+.js-empty { margin: 12px 0; }
+
+/* ---------- 虚拟投注页：表头按钮、小图、每个赛季的小表 ---------- */
+.js-sort { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; text-align: left;
+           white-space: nowrap; }
+.js-sort:hover { color: var(--green); }
+.js-arrow { color: var(--green); }
+.js-clickable { cursor: pointer; display: inline-block; border-radius: 6px; }
+.js-clickable:hover { background: rgba(52, 211, 153, .06); }
+.js-curve-panel { margin-top: 6px; }
+table.js-mini { width: auto; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+table.js-mini th, table.js-mini td { padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.js-mini tr.on td { background: rgba(52, 211, 153, .08); color: var(--text); }
+
+/* ---------- 单场页：各版本切换 ---------- */
+.js-versions { margin-top: 14px; }
+.js-vbtns { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 12px; }
+.js-vbtn.on { border-color: var(--green); color: var(--green); background: rgba(52, 211, 153, .1); }
+.js-vprobs { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 22px; }
+.js-up { color: var(--green); }
+.js-down { color: var(--red); }
+
+/* ---------- 有变化的地方闪一下 ---------- */
+.js-changed { animation: js-flash 2.4s ease-out; }
+@keyframes js-flash { 0% { background-color: rgba(190, 242, 100, .22); } 100% { background-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .js-changed { animation: none; outline: 1px solid var(--lime); } }
+
+/* ---------- 概率条、热力图上的提示框 ---------- */
+.js-tips .pbar, .js-tips svg.chart rect { cursor: pointer; }   /* 手机上要有它，“点一下”才会交给网页 */
+/* 热力图格子里写着概率的那行字盖在格子上面：让鼠标、手指“穿过”这行字点到下面的格子（不然指着数字时没有提示） */
+.js-tips svg.chart text { pointer-events: none; }
+.js-tip { position: fixed; z-index: 50; pointer-events: none; background: var(--card-2); color: var(--sub);
+          border: 1px solid rgba(52, 211, 153, .45); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+          line-height: 1.5; box-shadow: 0 6px 20px rgba(0, 0, 0, .45); max-width: 260px; }
+.js-tip .on { color: var(--text); font-weight: 650; }
+
+/* ---------- 手机 ---------- */
+@media (max-width: 760px) {
+  .js-livebar { justify-content: flex-start; margin-top: -4px; }
+  .js-toolbar { padding: 10px; gap: 8px 10px; }
+  .js-field { flex: 1 1 calc(50% - 10px); min-width: 0; }
+  .js-search { flex-basis: 100%; }
+  .js-search input { min-width: 0; }
+  .js-field select, .js-field input { width: 100%; font-size: 16px; }   /* 16 像素：iPhone 点输入框时不自动放大 */
+  .js-toolbar .js-count { margin-left: 0; flex-basis: 100%; }
+  .js-vbtn { flex: 1 1 auto; }
+}

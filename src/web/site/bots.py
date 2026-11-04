@@ -256,10 +256,15 @@ def curve_svg(points: list[tuple[int, float]], seasons: list[int], lo: float, hi
     end = points[-1][1]
     color = "#34d399" if end >= 0 else "#f87171"
     tip = f"{name}：{season_name(first)} 到 {season_name(points[-1][0])} 累计 {money(end)}"
-    return (f"<svg class='chart' viewBox='0 0 {w} {h}' style='max-width:{w}px' role='img' aria-label='{e(tip)}'>"
+    # data-curve：每个赛季 [赛季, 这个赛季的盈亏, 到这个赛季末的累计]（JSON 文字，转义过）。/static/site.js 点小图时用它列出每个赛季的数；
+    # 没有脚本时看不见、不影响（鼠标放在线上照样有一句累计的提示）
+    seasons_data = [[season_name(s), round(v - (points[i - 1][1] if i else 0.0), 2), round(v, 2)] for i, (s, v) in enumerate(points)]
+    curve = json.dumps({"name": name, "seasons": seasons_data}, ensure_ascii=False, allow_nan=False)
+    return (f"<span class='curve' data-curve='{e(curve)}'>"
+            f"<svg class='chart' viewBox='0 0 {w} {h}' style='max-width:{w}px' role='img' aria-label='{e(tip)}'>"
             f"<line x1='{pad}' x2='{w - pad}' y1='{y(0):.1f}' y2='{y(0):.1f}' stroke='#5f7468' stroke-dasharray='3 3'/>"
             f"<polyline fill='none' stroke='{color}' stroke-width='1.8' points='{' '.join(xy)}'><title>{e(tip)}</title></polyline>"
-            f"</svg><span class='small'>{e('累计 ' + money(end))}</span>")
+            f"</svg><span class='small'>{e('累计 ' + money(end))}</span></span>")
 
 
 # ---------- 最上面的结论（按结果文件里的数算，不写死） ----------
@@ -432,6 +437,17 @@ def guide(settings: dict, summary: pd.DataFrame, bank: pd.DataFrame | None) -> s
             "</ul></div>")
 
 
+def sort_td(inner: str, value) -> str:
+    """一格 <td>，带排序用的数 data-sort（空值不写，排序时放最后）。inner 是已经转义好的格子内容。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = None
+    if v is None or not np.isfinite(v):
+        return f"<td>{inner}</td>"
+    return f"<td data-sort='{v:.6g}'>{inner}</td>"
+
+
 def _sort_key(r: dict):
     rank = r["名次"]
     return (0, rank) if _ok(rank) else (1, -(r["CLV平均"] if _ok(r["CLV平均"]) else -9.0))
@@ -491,7 +507,7 @@ def _render(data) -> str:
     bank_by = {str(r["机器人"]): r for r in bank.to_dict("records")} if bank is not None else {}
     cv, seasons, lo, hi = curves(season)
     ref = random_clv(summary)          # “对照_随机_平博”的 CLV，CLV 格子里拿来对比
-    rows = []
+    rows, attrs = [], []
     for r in sorted(summary.to_dict("records"), key=_sort_key):
         name = str(r["机器人"])
         tag = " <span class='tag'>对照组</span>" if str(r.get("对照组")) == "是" else ""
@@ -500,12 +516,20 @@ def _render(data) -> str:
         hit = (f"{r['命中率'] * 100:.1f}%<br><span class='small muted'>平均赔率 {r['平均赔率']:.2f}</span>"
                if _ok(r["命中率"]) and _ok(r["平均赔率"]) else "—")
         book = txt(r["价格"])
-        rows.append([rank, f"<b>{e(name)}</b>{tag}", e(rule_text(r, bots_cfg.get(name))),
-                     e(BOOK_TEXT.get(book, book)), e(count(r["投注场数"])), hit,
-                     roi_cell(r), clv_cell(r, ref), curve_svg(cv.get(name, []), seasons, lo, hi, name),
-                     bank_cell(bank_by.get(name))])
+        pts = cv.get(name, [])
+        bk = bank_by.get(name)
+        # 每一格的 data-sort 是排序用的数（/static/site.js 点表头排序时用，看不见）；没名次的排在有名次的后面
+        rows.append([sort_td(rank, int(r["名次"]) if _ok(r["名次"]) else 9999), f"<b>{e(name)}</b>{tag}",
+                     e(rule_text(r, bots_cfg.get(name))),
+                     e(BOOK_TEXT.get(book, book)), sort_td(e(count(r["投注场数"])), r["投注场数"]), sort_td(hit, r["命中率"]),
+                     sort_td(roi_cell(r), r["ROI"]), sort_td(clv_cell(r, ref), r["CLV平均"]),
+                     sort_td(curve_svg(pts, seasons, lo, hi, name), pts[-1][1] if pts else None),
+                     sort_td(bank_cell(bk), bk.get("最后资金") if bk else None)])
+        # 每行的 data-*：给 /static/site.js 按价格、是不是对照组筛选（看不见；按名字搜索时脚本直接看这一行的字）
+        attrs.append(f" data-book='{e(BOOK_TEXT.get(book, book))}'"
+                     f" data-control='{'1' if str(r.get('对照组')) == '是' else '0'}'")
     board = table(["名次", "机器人", "规则（一句话）", "价格", "下了几注", "命中率", "ROI（95% 区间）", "CLV（95% 区间）",
-                   "按赛季累计盈亏", "资金模拟"], rows)
+                   "按赛季累计盈亏", "资金模拟"], rows, "bots-board", attrs)
     n = len(summary)
     pos = int((summary["ROI下限"] > 0).sum())
     stopped = int((bank["停了没有"].astype(str) == "停了").sum()) if bank is not None else None

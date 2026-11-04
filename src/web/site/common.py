@@ -122,13 +122,26 @@ class LiveMinutes(int):
     """“服务器现读现出”的页面用的 refresh_minutes（src/web/live_site.py 把 settings 里的 site.refresh_minutes 换成它）。
     它本身还是一个整数（分钟），各页面函数照原样把它传给 page()，不用改；page() 认出它是这一种，就另外引用本站自己的
     脚本文件 /static/site.js 和 /static/site.css（见下面 LIVE_HEAD）。
-    数值大于 0：照样带 <meta http-equiv="refresh">，每这么多分钟整页重新加载（site.js 还是空的，先靠它让开着的页面跟着变）；
-    等于 0：不带（settings.yaml 的 live.meta_refresh: false，等 site.js 写好“数据变了才更新”以后再关）。
+    数值大于 0：照样带 <meta http-equiv="refresh">，每这么多分钟整页重新加载；
+    等于 0：不带（settings.yaml 的 live.meta_refresh: false：site.js 每 live.poll_seconds 秒问一次服务器，数据变了才换内容）。
+    poll_seconds：site.js 多少秒问一次服务器（live.poll_seconds），写进页面里的 <meta name="site-poll-seconds">，脚本读它。
     生成静态文件时（build_site）传的是普通整数，还是原来的样子：有 meta refresh、没有脚本。"""
+
+    poll_seconds: int = 30
+
+    def __new__(cls, minutes: int, poll_seconds: int = 30):
+        obj = super().__new__(cls, minutes)
+        obj.poll_seconds = int(poll_seconds)
+        return obj
 
 
 LIVE_HEAD = ('<link rel="stylesheet" href="/static/site.css">'
              '<script src="/static/site.js" defer></script>')
+
+
+def live_head(minutes: LiveMinutes) -> str:
+    """现读现出的页面 <head> 里加的东西：本站的样式、脚本，和一个写着“几秒问一次服务器”的 <meta>（数字，不是脚本）。"""
+    return f'<meta name="site-poll-seconds" content="{int(minutes.poll_seconds)}">' + LIVE_HEAD
 
 
 def page(title: str, body: str, prefix: str, now: datetime, refresh_minutes: int) -> str:
@@ -148,7 +161,7 @@ def page(title: str, body: str, prefix: str, now: datetime, refresh_minutes: int
               if live else "这是本机的静态文件，不连网")
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 {VIEWPORT}
-{refresh}<title>{e(title)}</title><style>{BASE_CSS}{SITE_CSS}</style>{LIVE_HEAD if live else ""}</head><body><div class="wrap">
+{refresh}<title>{e(title)}</title><style>{BASE_CSS}{SITE_CSS}</style>{live_head(refresh_minutes) if live else ""}</head><body><div class="wrap">
 {nav}
 {body}
 <footer class="small">生成时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。{origin}；

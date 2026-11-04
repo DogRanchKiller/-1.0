@@ -632,8 +632,16 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
     title = f"{data.zh(home)} 对 {data.zh(away)}"
     tag = STATUS_TAGS.get(info.get("status"))
     score = score_text(data, mid)
-    state = (f"<span class='score'>赛果 {e(score)}</span>" if score
-             else (f"<span class='tag warn'>{e(tag)}</span>" if tag else (live_html(data, mid) or "<span class='tag'>还没踢</span>")))
+    if score:
+        state = f"<span class='score'>赛果 {e(score)}</span>"
+    elif tag:
+        state = f"<span class='tag warn'>{e(tag)}</span>"
+    else:
+        # 还没有正式赛果：这一块带 data-live-slot，/static/site.js 每 30 秒用懂球帝即时比分只更新这里（进行中 63'  2–1、红牌）；
+        # “还没踢”带 data-live-placeholder，有即时比分时藏起来。没有脚本时就是服务器生成时的样子
+        now_live = live_html(data, mid)
+        state = (f"<span data-live-slot='{int(mid)}'>{now_live}"
+                 f"<span class='tag' data-live-placeholder{' hidden' if now_live else ''}>还没踢</span></span>")
     if mid in data.result_notes:
         state += f" <span class='tag warn'>{e(data.result_notes[mid])}</span>"
     # 标题上的 data-match-id 等属性给 /static/site.js 用（看不见，没有脚本时不影响）
@@ -647,9 +655,12 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         summary = f"<div class='card pad'>{placeholder('这场还没有预测')}</div>"
     else:
         kind, row = latest
+        # version-switch：空的格子（没有脚本时什么都不显示）。/static/site.js 从 /api/match/<编号> 取各版本，
+        # 在这里放“开球前 24 / 6 / 1 小时”几个按钮，点一下看那一版的概率和前后怎么变
         summary = (f"<h2>结论</h2><div class='card pad hero'>{hero_html(data, mid, row)}<p>{tags_html(row)}</p>"
                    f"<p class='small muted'>最新一版：{e(version_name(kind))}，用 {e(bj_text(row['cutoff_utc']))}（北京时间）"
-                   f"之前的数据。</p></div><h2>四个玩法的预测</h2>{picks_html(data, mid, row)}")
+                   f"之前的数据。</p></div><div class='version-switch' data-version-switch='{int(mid)}'></div>"
+                   f"<h2>四个玩法的预测</h2>{picks_html(data, mid, row)}")
         story = story_html(data, mid, row)
     has_review = mid in data.review_notes or data.reviews.get(mid) is not None or (
         data.scores is not None and bool((data.scores["match_id"] == mid).any()))
