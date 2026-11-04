@@ -52,7 +52,9 @@ def test_site_js_has_no_banned_constructs():
     # 连服务器只用本站的相对地址
     urls = re.findall(r"""(?:getJSON|request|fetch)\(\s*["']([^"']+)""", JS)
     assert urls and all(u.startswith("/") and not u.startswith("//") for u in urls), urls
-    assert set(re.findall(r'"(/api/[a-z]+)', JS)) == {"/api/version", "/api/live", "/api/match"}
+    # 数据接口只读这几个；/api/actions（按钮进度）和 /api/action/（点按钮，只用 POST）是数据状态页上的操作按钮用的（WD4）
+    assert set(re.findall(r'"(/api/[a-z]+)', JS)) == {"/api/version", "/api/live", "/api/match", "/api/actions", "/api/action"}
+    assert re.findall(r'method:\s*"([A-Z]+)"', JS) == ["POST"]                  # 只有点按钮那一处是 POST
 
 
 def test_site_css_has_no_external_things():

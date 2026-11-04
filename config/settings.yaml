@@ -1099,3 +1099,18 @@ pick_tiers_study:             # 四个玩法的“把握”等级 src/evaluate/p
   calib_tol: 0.03                # 校准：平均把握分和实际命中率差不超过 3 个百分点
   boot: 2000                     # 按周成块 bootstrap 次数
   random_seed: 20261104
+# 网站上的操作按钮（src/web/actions.py，需求文档第 8 节“网站上的操作按钮”、第 16 节“安全”）
+# 只在 live.dynamic: true 时有；改了这里要重启“足球预测_网站服务”才生效
+actions:
+  enabled: true                 # 总开关：false = 数据状态页上没有按钮，/api/action/<名字> 和 /api/actions 都回 404
+  log_file: logs/site_actions.log   # 每次按钮运行的输出（脱敏后）写在这里，网页上不显示（logs/ 不进 Git）
+  log_max_bytes: 1000000        # 日志满 1 MB 换一个新文件
+  log_backups: 3                # 旧日志留几个
+  log_tail_chars: 4000          # 每次运行最多记输出的最后多少个字（刷新数据的输出很长，只留结尾）
+  poll_seconds: 3               # 按了按钮以后，网页上的脚本每几秒问一次 /api/actions，直到跑完
+  busy_minutes: 15              # 生成网站、推送的心跳文件“结束”是空的、开始不到这么多分钟，算那个定时任务正在跑
+  timeout_minutes:              # 每个按钮最多跑多久（分钟），到点结束子程序；和定时任务的上限一样
+    refresh_data: 50
+    predict: 30
+    build_site: 10
+    test_push: 2

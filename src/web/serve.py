@@ -13,7 +13,9 @@
 - 数据接口（/api/...，返回 JSON，也要登录）：/api/version、/api/live、/api/matches、/api/match/<编号>，字段见需求文档第 8 节。
 - /static/ 下发本站自己的脚本和样式（src/web/static/ 里的文件），网页只引用它们，不引用外部的东西。
 - live.dynamic: false 时和以前完全一样：只把 data/site/ 下已经生成好的网页文件发出去。
-- /status 发 data/reports/status.html（数据状态页）。
+- /status 发 data/reports/status.html（数据状态页）。现读现出时上面另插一块“操作”：四个按钮（src/web/actions.py，
+  需求文档第 8 节“网站上的操作按钮”）。按钮用 POST /api/action/<名字>，进度用 GET /api/actions；都要登录，
+  POST 还要过同源检查和防伪口令（CSRF，serve_auth.csrf_token）。settings.yaml 的 actions.enabled: false 时没有按钮、两个地址都 404。
 - 没登录的一律先跳到登录页；登录成功给浏览器一个随机“会话 cookie”（相当于一张临时通行证），30 天内不用再登。
 - 每个网页顶上插一条小栏“首页 · 数据状态 · 退出登录”（只在发出去时插，网页文件本身不改）。
 
@@ -50,17 +52,20 @@ from typing import Callable
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from src.common.config import load_settings, resolve_path
+from src.web import actions as site_actions
 from src.web import serve_auth
 from src.web.theme import VIEWPORT
 
 LOG = logging.getLogger("site_server")
 COOKIE = "fp_session"                  # 会话 cookie 的名字
-ALLOW = "GET, HEAD, POST"              # 只接受这三种请求方法（POST 只用于登录）
+ALLOW = "GET, HEAD, POST"              # 只接受这三种请求方法（POST 只用于登录 /login 和操作按钮 /api/action/<名字>）
 REPORTS_PREFIX = "/review/reports/"    # 周报、月报的网址前缀（战绩页的相对链接 ../review/reports/ 在服务器下就是这个）
 STATIC_PREFIX = "/static/"             # 本站自己的脚本、样式（src/web/static/ 里的文件）
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 API_PREFIX = "/api/"                   # 数据接口（JSON）
 MATCH_API = re.compile(r"/api/match/(\d{1,12})")
+ACTION_PREFIX = "/api/action/"         # 操作按钮：POST /api/action/<名字>（名字要在 src/web/actions.py 的白名单里）
+ACTIONS_API = "/api/actions"           # 操作按钮的进度（GET，JSON）
 JSON_TYPE = "application/json; charset=utf-8"
 # Windows 的设备名：文件名叫这些时会打开设备而不是文件，一律不认
 WIN_DEVICES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10))}
@@ -149,6 +154,10 @@ class SiteApp:
     _sessions: dict = field(default_factory=dict, init=False)
     _failures: dict = field(default_factory=dict, init=False)   # IP → [连续输错几次, 锁到几点]
     live: object | None = field(default=None, init=False)        # 现读现出（src/web/live_site.LiveSite）；None = 只发静态文件
+    # 操作按钮（src/web/actions.ActionRunner）；None = 没有按钮（只发静态文件，或 actions.enabled: false），按钮的地址都 404
+    actions: object | None = field(default=None, init=False)
+    # 防伪口令的密钥：服务器启动时随机生成，只在内存里（serve_auth.csrf_token）
+    csrf_key: bytes = field(default_factory=serve_auth.new_csrf_key, init=False, repr=False)
 
     def __post_init__(self):
         self._load_sessions()
@@ -160,6 +169,12 @@ class SiteApp:
             except Exception as err:   # noqa: BLE001 —— 故意的：现读现出起不来（设置写错、库有问题）也要能发静态文件
                 self.live = None
                 LOG.warning("现读现出起不来（%s），这次只发 data/site/ 的静态文件", type(err).__name__)
+            try:
+                # 按钮只在现读现出时有（需求文档第 8 节）；和现读现出分开起，那边起不来按钮照样能用
+                self.actions = site_actions.runner_from_settings(self.config.live_settings)
+            except Exception as err:   # noqa: BLE001 —— 故意的：按钮的设置写错了，网站照样能看，只是没有按钮
+                self.actions = None
+                LOG.warning("操作按钮起不来（%s），这次没有按钮", type(err).__name__)
 
     # ----- 密码 -----
     @property
@@ -470,13 +485,17 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch()
 
     def do_POST(self):
-        if self._route() == "/login":
+        route = self._route()
+        if route == "/login":
             self._login_post()
+        elif route is not None and route.startswith(ACTION_PREFIX) and self.app.config.live_settings is not None:
+            # 操作按钮（只在现读现出时有这个地址；只发静态文件时和以前一样，下面回 405）
+            self._action_post(route[len(ACTION_PREFIX):])
         else:
             self._not_allowed()
 
     def _not_allowed(self):
-        """GET、HEAD、POST(登录) 以外的请求方法，一律 405。"""
+        """GET、HEAD 以外的请求方法一律 405；POST 只收 /login 和 /api/action/<名字>，别的地址 POST 也是 405。"""
         self._drain_body()
         self.send_response(405)
         self.send_header("Allow", ALLOW)
@@ -568,17 +587,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         live = self.app.live
         if not self._logged_in():
-            if live is not None and route.startswith(API_PREFIX):
+            if (live is not None or self.app.actions is not None) and route.startswith(API_PREFIX):
                 # 数据接口是网页里的脚本在问，不跳转，直接说“没登录”（401），脚本自己决定怎么办
                 self._send_json(401, {"error": "not_logged_in"})
                 return
             # 没登录：跳到登录页，记下原来想看哪一页，登录后回去
             self._redirect("/login?next=" + quote(safe_next(self.path), safe=""))
             return
+        acts = self.app.actions
+        if acts is not None and (route == ACTIONS_API or route.startswith(ACTION_PREFIX)):
+            if route == ACTIONS_API:
+                self._send_json(200, acts.status())          # 每个按钮的情况（只有写死的话和退出码，没有程序输出）
+            else:
+                # 按钮只能用 POST 点（GET 打开一个网址不能让电脑跑程序）；不管名字对不对都回 405，不透露有哪些按钮
+                self.send_response(405)
+                self.send_header("Allow", "POST")
+                self._send_body(json.dumps({"error": "method_not_allowed"}).encode("utf-8"), JSON_TYPE)
+            return
         if live is not None and route.startswith(API_PREFIX):
             self._api(route)
             return
-        if live is not None and route.startswith(STATIC_PREFIX):
+        if (live is not None or acts is not None) and route.startswith(STATIC_PREFIX):
+            # （按钮在时也发：数据状态页要用 site.js；现读现出起不来、按钮还在时也一样）
             # 本站自己的脚本、样式：只给 src/web/static/ 里的文件，挡路径穿越的办法和网站文件夹一样
             path = resolve_static(STATIC_DIR, route[len(STATIC_PREFIX) - 1:])
             if path is None:
@@ -587,8 +617,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_file(path)
             return
         if route == "/status":
-            self._serve_file(self.app.config.status_file, missing=(
-                "数据状态页还没生成", "数据状态页每小时自动生成一次，过一会儿再来看。"))
+            if acts is not None:
+                self._status_with_actions()
+            else:
+                self._serve_file(self.app.config.status_file, missing=(
+                    "数据状态页还没生成", "数据状态页每小时自动生成一次，过一会儿再来看。"))
             return
         reports = self.app.config.review_reports_dir
         if route.startswith(REPORTS_PREFIX) and reports is not None:
@@ -658,6 +691,109 @@ class Handler(BaseHTTPRequestHandler):
         if ctype.startswith("text/html"):
             data = inject_bar(data)
         self._send(200, data, ctype)
+
+    # ----- 操作按钮（需求文档第 8 节“网站上的操作按钮”、第 16 节“安全”） -----
+    def _status_with_actions(self):
+        """数据状态页 + 上面一块“操作”（文件本身不改，发出去时插）。状态页还没生成时，给一个只有按钮的简单页面。"""
+        acts = self.app.actions
+        try:
+            data = self.app.config.status_file.read_bytes()
+        except OSError:
+            data = site_actions.missing_status_page()
+        try:
+            query = parse_qs(urlsplit(self.path).query, max_num_fields=5)
+        except ValueError:
+            query = {}
+        # 跳回来时网址里的 done、action 只用来从固定的几句话里挑一句，本身不放进页面
+        notice = site_actions.notice_text((query.get("done") or [None])[0], (query.get("action") or [None])[0], acts)
+        csrf = serve_auth.csrf_token(self.app.csrf_key, self._token())
+        page = site_actions.inject_panel(data, site_actions.panel_html(acts, csrf, notice))
+        self._send(200, inject_bar(page), "text/html; charset=utf-8")
+
+    def _same_origin_strict(self) -> bool:
+        """按钮用的同源检查，比登录那里严：必须带 Origin 或 Referer，主机和端口要等于这次请求的 Host。
+        Origin 是 "null"、是别的网站、两样都没带，一律不行；浏览器自己标了 Sec-Fetch-Site 是 cross-site / same-site 的也不行。
+        （本网站自己的页面提交时，浏览器会带 Origin；响应头 Referrer-Policy: same-origin 也让同站的 Referer 照常带上。）"""
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return False
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() in ("cross-site", "same-site"):
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            return origin != "null" and urlsplit(origin).netloc.lower() == host
+        referer = self.headers.get("Referer")
+        return bool(referer) and urlsplit(referer).netloc.lower() == host
+
+    def _action_refused(self, code: int, error: str, title: str, text: str, wants_json: bool):
+        """按钮请求被挡下：脚本发来的回 JSON（error 代号 + 一句话），表单发来的回一个简单的提示页。都没有程序输出、路径。"""
+        if wants_json:
+            self._send_json(code, {"error": error, "text": (title + "：" + text) if text else title})
+        else:
+            self._send(code, message_page(title, text, link=("/status", "回数据状态页")))
+
+    def _read_small_form(self, wants_json: bool) -> dict | None:
+        """读按钮表单：只收 application/x-www-form-urlencoded，最多 max_login_body_bytes（4 KB）。不对就回错、返回 None。"""
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        try:
+            length = int(self.headers.get("Content-Length") or "")
+        except ValueError:
+            length = -1
+        if length < 0 or length > self.app.config.max_login_body_bytes:
+            self._drain_body(limit=65536)          # 不太大的先读掉，再大的不读、断开
+            self.close_connection = True
+            self._action_refused(413, "too_large", "提交的内容太长", "", wants_json)
+            return None
+        body = self.rfile.read(length) if length else b""
+        if ctype != "application/x-www-form-urlencoded":
+            self._action_refused(415, "bad_type", "提交的格式不对", "", wants_json)
+            return None
+        try:
+            return parse_qs(body.decode("utf-8"), max_num_fields=5)
+        except (UnicodeDecodeError, ValueError):
+            return {}
+
+    def _action_post(self, name: str):
+        """点按钮：POST /api/action/<名字>。一道道检查，哪一道不过都不启动程序：
+        总开关 → 登录 → 同源 → 名字在白名单里 → 表单格式和大小 → 防伪口令 → 有没有撞车（ActionRunner.start 里）。
+        脚本发来的（Accept 里有 application/json）回 JSON；没有脚本时的表单回 303 跳回 /status?done=<结果代号>。"""
+        acts = self.app.actions
+        wants_json = "application/json" in (self.headers.get("Accept") or "").lower()
+        if acts is None:                       # actions.enabled: false：当作没有这个地址
+            self._drain_body()
+            self._send_json(404, {"error": "not_found"})
+            return
+        if not self._logged_in():
+            self._drain_body()
+            if wants_json:
+                self._send_json(401, {"error": "not_logged_in"})
+            else:
+                self._redirect("/login?next=" + quote("/status", safe=""))
+            return
+        if not self._same_origin_strict():
+            self._drain_body()
+            LOG.warning("%s 按钮请求不是从本网站发的，没理它", self.client_address[0])
+            self._action_refused(403, "cross_origin", "不能这样点", "请在本网站的数据状态页上点按钮。", wants_json)
+            return
+        if not site_actions.NAME.fullmatch(name) or name not in acts.actions:
+            self._drain_body()
+            self._action_refused(404, "not_found", "没有这个按钮", "", wants_json)
+            return
+        form = self._read_small_form(wants_json)
+        if form is None:
+            return
+        if not serve_auth.csrf_valid(self.app.csrf_key, self._token(), (form.get(serve_auth.CSRF_FIELD) or [None])[0]):
+            LOG.warning("%s 按钮请求的防伪口令不对，没理它", self.client_address[0])
+            self._action_refused(403, "bad_csrf", "页面过期了",
+                                 "刷新一下数据状态页再点（网站服务器重启过，或者这一页是退出登录以前打开的）。", wants_json)
+            return
+        result = acts.start(name)
+        LOG.info("%s 点了按钮 %s（%s）", self.client_address[0], name, result)
+        if wants_json:
+            code = {"started": 202, "running": 409, "busy": 409, "failed": 500}[result]
+            self._send_json(code, {"result": result, "text": site_actions.RESULT_TEXT[result], **acts.status()})
+        else:
+            self._redirect(f"/status?done={result}&action={name}#actions")
 
     # ----- 登录 -----
     def _same_origin(self) -> bool:

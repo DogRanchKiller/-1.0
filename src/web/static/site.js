@@ -1173,7 +1173,143 @@
   };
 
   // ======================================================================
-  // 第十二部分：开始
+  // 第十二部分：数据状态页上的操作按钮（需求文档第 8 节“网站上的操作按钮”）
+  // ======================================================================
+  // 服务器在数据状态页上插了一块“操作”（.act-panel），每个按钮是一个普通表单，没有脚本时照样能交（交完跳回这一页）。
+  // 有脚本时：拦下表单，用 fetch 发同样的 POST（同样的表单字段，带着 csrf 防伪口令），不用整页跳转；
+  // 有在跑的按钮就每隔 data-poll-seconds 秒问一次 /api/actions，都跑完了就停。所有字都用 textContent 放。
+  function actionRow(name) {
+    var rows = document.querySelectorAll(".act-row");
+    for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute("data-action") === name) return rows[i];
+    return null;
+  }
+
+  // 按钮下面那一句（state：idle / running / done / error，样式按它换颜色）；正在跑时按钮点不了
+  function setActionState(name, state, text) {
+    var row = actionRow(name);
+    if (!row) return;
+    var span = row.querySelector(".act-state");
+    var btn = row.querySelector("button");
+    if (span) { span.textContent = String(text); span.setAttribute("data-state", String(state)); }
+    if (btn) btn.disabled = state === "running";
+  }
+
+  // 用服务器给的每个按钮的情况更新页面；返回“还有没有在跑的”
+  function applyActions(list) {
+    var running = false;
+    each(list || [], function (a) {
+      if (!a || typeof a.name !== "string") return;
+      setActionState(a.name, a.state, typeof a.text === "string" ? a.text : "");
+      if (a.state === "running") running = true;
+    });
+    return running;
+  }
+
+  // “操作”标题下面的一句提示（和没有脚本时跳回来写的那句一样）
+  function showActionNotice(text) {
+    var panel = document.querySelector(".act-panel");
+    if (!panel) return;
+    var p = panel.querySelector(".act-notice");
+    if (!p) {
+      p = el("p", "act-notice");
+      p.setAttribute("role", "status");
+      var h = panel.querySelector("h2");
+      panel.insertBefore(p, h ? h.nextSibling : panel.firstChild);
+    }
+    p.textContent = String(text);
+  }
+
+  // 发按钮的表单（POST）。只发到本站 /api/action/ 开头的地址；最多等 15 秒。返回 {status, body}
+  function postAction(url, body) {
+    var ctl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, 15000) : null;
+    return fetch(url, { method: "POST", credentials: "same-origin", cache: "no-store",
+                        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+                        body: body, signal: ctl ? ctl.signal : undefined })
+      .then(function (res) {
+        if (timer) clearTimeout(timer);
+        var type = res.headers.get("Content-Type") || "";
+        if (type.indexOf("application/json") < 0) return { status: res.status, body: null };
+        return res.json().then(function (b) { return { status: res.status, body: b }; },
+                               function () { return { status: res.status, body: null }; });
+      }, function (err) {
+        if (timer) clearTimeout(timer);
+        throw err;
+      });
+  }
+
+  // 有按钮在跑时隔几秒问一次 /api/actions；网页切到后台时隔久一点（10 倍）；都跑完了、登录过期了就停
+  var actionPoll = {
+    every: 3, timer: null, busy: false, fails: 0,
+    schedule: function () {
+      clearTimeout(this.timer);
+      var self = this;
+      var ms = this.every * 1000 * (document.hidden ? 10 : 1) * Math.min(4, 1 + this.fails);
+      this.timer = setTimeout(function () { self.tick(); }, ms);
+    },
+    tick: function () {
+      if (this.busy) return;
+      this.busy = true;
+      var self = this;
+      getJSON("/api/actions").then(function (got) {
+        self.busy = false;
+        if (got.status === 401) { showActionNotice("登录已经过期：刷新网页会转到登录页，登录后再看。"); return; }
+        if (got.status === 200 && got.body) {
+          self.fails = 0;
+          if (applyActions(got.body.actions)) self.schedule();
+          return;
+        }
+        if (got.status >= 500 && ++self.fails < 20) self.schedule();      // 服务器一时出错：过一会儿再问；别的（404 等）停下
+      }, function () {
+        self.busy = false;
+        if (++self.fails < 20) self.schedule();                            // 连不上：过一会儿再问
+      });
+    }
+  };
+
+  function enhanceActions() {
+    var panel = document.querySelector(".act-panel");
+    if (!panel || panel.getAttribute("data-js-actions")) return;
+    panel.setAttribute("data-js-actions", "1");
+    var n = Number(panel.getAttribute("data-poll-seconds"));
+    actionPoll.every = isFinite(n) && n >= 1 ? n : 3;
+    each(panel.querySelectorAll("form.act-form"), function (form) {
+      form.addEventListener("submit", function (ev) {
+        var row = form.parentNode;
+        var name = row && row.getAttribute ? row.getAttribute("data-action") : null;
+        var url = form.getAttribute("action") || "";
+        if (!name || url !== "/api/action/" + name) return;               // 对不上就不拦，让浏览器照常提交
+        ev.preventDefault();
+        var input = form.querySelector("input[name='csrf']");
+        var btn = form.querySelector("button");
+        var label = btn ? btn.textContent : name;
+        if (btn) btn.disabled = true;
+        setActionState(name, "running", "正在发给服务器……");
+        postAction(url, "csrf=" + encodeURIComponent(input ? input.value : "")).then(function (got) {
+          var b = got.body;
+          if (got.status === 401) {
+            setActionState(name, "idle", "登录已经过期：刷新网页会转到登录页，登录后再点。");
+            return;
+          }
+          var text = b && typeof b.text === "string" ? b.text : "没能启动（服务器回 " + got.status + "）。";
+          showActionNotice("“" + label + "”：" + text);
+          if (b && b.actions) {
+            if (applyActions(b.actions)) actionPoll.schedule();
+          } else {
+            actionPoll.tick();                                             // 没带每个按钮的情况（例如页面过期）：问一次，恢复成真实的样子
+          }
+        }, function () {
+          showActionNotice("“" + label + "”：连不上网站，不知道点没点成；过一会儿刷新这一页看看。");
+          actionPoll.tick();
+        });
+      });
+    });
+    // 页面打开时就有在跑的（刚才点过、刷新了页面）：接着问
+    if (panel.querySelector(".act-state[data-state='running']")) actionPoll.schedule();
+  }
+
+  // ======================================================================
+  // 第十三部分：开始
   // ======================================================================
   // 每一块单独做、单独 try/catch。换正文以后也再调一次（工具栏这些会重新加上，按刚才选的恢复）
   function enhancePage() {
@@ -1186,6 +1322,9 @@
   function init() {
     if (!document.querySelector(".wrap")) return;               // 不是本站的网页（比如登录页）：什么都不做
     safely("提示框", setupTips);
+    safely("操作按钮", enhanceActions);
+    // 数据状态页没有 site-poll-seconds 这个 meta：它不是现读现出的页面（本来每 10 分钟整页刷新），不开下面“自动更新”那一套
+    if (!document.querySelector("meta[name='site-poll-seconds']")) return;
     safely("自动更新那一行", function () { livebar.make(); });
     // 先读网页里写的数据版本（版本切换的缓存用它）
     var v = document.querySelector("meta[name='site-data-version']");

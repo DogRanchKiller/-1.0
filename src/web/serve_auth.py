@@ -115,6 +115,33 @@ def verify_password(password: str, record: dict) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
+# ---------- 操作按钮的防伪口令（CSRF，需求文档第 16 节“安全”“网站上的操作按钮”） ----------
+# CSRF：别的网站在你登录着的时候，偷偷让你的浏览器往本网站发一个“点按钮”的请求。
+# 防法之一：本网站自己的页面里放一个口令，提交时带回来；别的网站看不到本网站的页面，就拿不到这个口令。
+# 口令 = HMAC-SHA256(服务器启动时随机生成的密钥, "actions:" + 这次登录的会话 cookie)：
+#   - 和登录绑定：换了登录（别的设备、退出再登）口令就不一样，一个人的口令给别人用不了；
+#   - 服务器不用另外存口令，每次现算；密钥只在内存里（new_csrf_key），服务器重启后旧口令作废，刷新页面就有新的。
+
+CSRF_FIELD = "csrf"                    # 表单里那个隐藏字段的名字
+
+
+def new_csrf_key() -> bytes:
+    """服务器启动时生成一次：32 字节随机数，只放内存，不写文件、不进日志。"""
+    return secrets.token_bytes(32)
+
+
+def csrf_token(key: bytes, session_token: str) -> str:
+    """这次登录对应的防伪口令（64 个十六进制字符）。"""
+    return hmac.new(key, ("actions:" + session_token).encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def csrf_valid(key: bytes, session_token: str | None, given: str | None) -> bool:
+    """提交来的口令对不对。没登录、没带、格式不对都算不对；比较用 hmac.compare_digest（花的时间和错在第几位无关）。"""
+    if not session_token or not isinstance(given, str) or not re.fullmatch(r"[0-9a-f]{64}", given):
+        return False
+    return hmac.compare_digest(csrf_token(key, session_token), given)
+
+
 def load_credentials(path: Path) -> dict | None:
     """读密码哈希。文件不存在返回 None；文件坏了抛 CredentialsError（不当作“没有密码”，免得被自动覆盖）。"""
     if not path.exists():
