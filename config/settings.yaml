@@ -47,6 +47,9 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
   # 第 11 阶段（2026-11-03）：football-data “新联赛”文件里的亚洲联赛。一年一个赛季（2024 = 2024 赛季），
   # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响。还没接进实时预测、定时任务、网页
   asia: {JPN: 日职, CHN: 中超, KOR: 韩K}   # KOR：懂球帝来源（2026-11-03 工作树 KR 加，第 4 节“韩K 回补和开发回测”）
+  # 第 11 阶段（2026-11-05，工作树 INA）：国家队比赛（martj42），所有国家队一个代码、一个评分池；赛季 = 比赛日期那一年。
+  # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响（和 asia 一样）。只做开发回测，没接实时预测
+  intl: {INT: 国际赛}
 
 football_data:
   timezone: Europe/London    # football-data 的开球时间是英国当地时间（已核对，见需求文档 6.1）
@@ -67,6 +70,30 @@ football_data_new:
   # 文件里混着升降级附加赛（例如 J1 2018 有东京绿茵 3 场、J2 球队之间的附加赛），这些队只踢 1–3 场，低于门槛；
   # 有它们参加的比赛不导入，列进质量报告（附加赛不是联赛比赛，主客场、战意都不一样）
   league_team_min_share: 0.5
+
+# 国家队比赛比分（需求文档第 4 节“第 11 阶段：国际赛进数据库和开发回测”、6.1“国际赛来源调查”）。工作树 INA 加，没接定时任务。
+# 下载 src/collect/martj42.py（只访问 raw.githubusercontent.com，各下一次），导入 src/clean/martj42_import.py
+martj42:
+  base_url: https://raw.githubusercontent.com/martj42/international_results/master   # 仓库 CC0（公有领域）
+  robots_url: https://raw.githubusercontent.com/robots.txt   # 下载前先看一次（2026-11-05 是 404：没有限制）
+  files:                     # 只下这两个（进球者文件用不到，不下）；值 = 文件开头应该是的列名，不是的话当“内容可疑”
+    results: date,home_team,away_team,home_score,away_score,tournament,city,country,neutral
+    shootouts: date,home_team,away_team,winner
+  raw_folder: martj42        # 存到 data/raw/martj42/<下载日期>/results.csv、shootouts.csv
+  db_source: martj42         # 数据库里的来源名
+  competition: INT           # 赛事代码（leagues.intl 里登记）
+  team_suffix: " NT"         # 球队编号 = 英文名 + 这个后缀（例如 “England NT”），免得和同名俱乐部混在一起
+  last_date: "2023-12-31"    # 只导这一天及以前的（开发赛季）；程序里还会按 season_role 再查每个赛季
+  # 同一天同一对队两场：一律报错，只有这里登记过的不报错、这一对这一天的几场都不导入（列进报告）。
+  # 2026-11-05 核对 results.csv：下面 5 对都是真的同一天踢了两场（阿根廷、乌拉圭同一天在两国首都各踢一场杯赛或友谊赛；
+  # 1974 年塔希提、新喀里多尼亚同一天两场友谊赛）。唯一键靠 round = 日期 分开，同一天的分不开，导哪一场都是猜
+  same_day_pairs:
+    - ["1916-08-15", Argentina, Uruguay]
+    - ["1916-10-01", Argentina, Uruguay]
+    - ["1924-05-25", Argentina, Uruguay]
+    - ["1929-06-16", Argentina, Uruguay]
+    - ["1974-02-17", Tahiti, New Caledonia]
+  report_file: 国际赛_比分导入报告.md   # 导入报告，放 paths.reports
 
 # 自动维护只更新已登记来源。北京时间每天运行，错过时开机补跑；不触发预测、研究或消息发送。
 data_refresh:
@@ -282,6 +309,10 @@ features:                    # 取数层 src/features（需求文档第 16、17 
   date_only_timezone: Europe/London
   # 只知道“这一轮从哪天开始”的杯赛（date_precision = round），按这一轮最长持续几天算最晚开球（比分晚知道，不偷看）
   round_date_window_days: 7
+  # 只知道“比赛当地的日期”、不知道时区的国际赛（date_precision = day_world，martj42）：按全世界最东、最西的时区算
+  # 最早开球 = 这一天 00:00（UTC+14）= 前一天 10:00 UTC；最晚开球 = 这一天 24:00（UTC−12）= 第二天 12:00 UTC
+  day_world_earliest_utc_offset_hours: 14
+  day_world_latest_utc_offset_hours: -12
   # 同一场比赛有几个来源的统计时，每一类数据（比分、射门和 xG……，按数据用途字典分）各挑一个来源：
   # 先挑这类数据填得最全的来源，一样全的按这个顺序。例如 2025/26 的比分用 football-data、xG 用懂球帝（football-data 没有）。
   # 懂球帝的比分在 football-data 还没更新的当前赛季比赛上补；xG、射门来自懂球帝的比赛详情页（2025-12 起有 xG）

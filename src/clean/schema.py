@@ -43,6 +43,7 @@ create table if not exists matches (
                                               -- 重赛后面加 _replay（代码含义见 src/clean/wikipedia_import.py 的 ROUND_RULES）
     leg            integer not null default 0,-- 第几回合：0 = 单场；1、2 = 两回合的第 1、2 回合
     date_precision text not null default 'day',-- 日期精确到：day 具体哪一天 / round 只知道这一轮从哪天开始（match_date 记这一轮的第一天）
+                                               -- / day_world 只知道比赛当地的哪一天、不知道时区（国际赛 martj42）
     unique (competition, season, home_team, away_team, round, leg)
 );
 
@@ -191,6 +192,19 @@ create table if not exists match_source_state (
     restored_at_utc   text,
     missing_reason    text,           -- 缺源时为 no_current_match_sources；恢复后为空
     last_sources_json text not null   -- 缺源前最后已知的来源、原始文件和抓取时间；未知时为 []
+);
+
+-- 比赛场地（需求文档第 4 节“第 11 阶段：国际赛进数据库和开发回测”；2026-11-05 加的新表，现有的表一个都没改）。
+-- 一场比赛一个来源一行。现在只有国际赛（来源 martj42）有：是不是中立场、在哪个城市和国家踢、什么赛事。
+-- 赛前就知道（数据字典“比赛场地”：什么时候能知道 = 赛程），取数层 FeatureStore.match_venues 取。
+create table if not exists match_venue (
+    match_id   integer not null references matches(match_id),
+    source     text not null,
+    neutral    integer not null,     -- 1 = 中立场（两队都不在本国踢，不该加主场优势）；0 = 不是
+    city       text,                 -- 比赛城市（来源写的英文名）
+    country    text,                 -- 比赛所在国家（来源写的英文名）
+    tournament text not null,        -- 赛事名（例如 FIFA World Cup、Friendly），INT 一个代码下分不同赛事靠它
+    primary key (match_id, source)
 );
 """
 

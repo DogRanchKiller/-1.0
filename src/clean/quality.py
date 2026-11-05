@@ -175,10 +175,12 @@ def run_checks(con: sqlite3.Connection, settings: dict, today: date | None = Non
          "select competition, match_date, home_team from matches where home_team = away_team")])
 
     add("同一天同一队踢两场", "一支球队同一天出现在两场比赛里（联赛、杯赛一起查；多半是队名对照表合并错了，或者重复记录）。"
-        "杯赛里只知道是哪一轮、日期是这一轮的日子的比赛不查",
+        "杯赛里只知道是哪一轮、日期是这一轮的日子的比赛不查；国际赛（只知道当地日期，day_world）也查"
+        "（早年国家队偶尔真的一天踢两场，例如同一天派两套阵容，列出来人看）",
         [f"{d} {t}：{n} 场" for d, t, n in _rows(con,
          "select match_date, team, count(*) from (select match_date, home_team team, date_precision from matches "
-         "union all select match_date, away_team, date_precision from matches) where date_precision = 'day' "
+         "union all select match_date, away_team, date_precision from matches) "
+         "where date_precision in ('day', 'day_world') "
          "group by match_date, team having count(*) > 1")])
 
     seasons = _rows(con, "select competition, season, count(*), count(distinct home_team) from matches "

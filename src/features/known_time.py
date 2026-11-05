@@ -21,6 +21,12 @@ match_date 是这一轮的第一天，比赛可能是这一轮里的任何一天
 - 最早开球：这一轮第一天 00:00（同上）。
 - 最晚开球：这一轮第 round_date_window_days 天（默认第 7 天）的 24:00。比分要到那以后才能用，宁可晚知道，不偷看。
 
+只知道“比赛当地的日期”、不知道在哪个时区的国际赛（matches.date_precision = 'day_world'，martj42 国家队比赛）：
+英国的这一天只适合欧洲（美洲晚上的比赛英国已经是第二天，大洋洲中午的比赛英国还是前一天），所以换成全世界最宽的范围：
+- 最早开球：这一天 00:00（UTC+14，最东的时区）= 前一天 10:00 UTC。
+- 最晚开球：这一天 24:00（UTC−12，最西的时区）= 第二天 12:00 UTC。比分 = 最晚开球 + 缓冲。
+两个时差写在 settings.yaml 的 features.day_world_earliest_utc_offset_hours / day_world_latest_utc_offset_hours。
+
 所有时间都是 UTC，写成文字 'YYYY-MM-DD HH:MM:SS'。这种写法按文字排序就是按时间排序，数据库里可以直接比大小。
 """
 import pandas as pd
@@ -59,7 +65,7 @@ def compute_known_times(matches: pd.DataFrame, feature_settings: dict) -> pd.Dat
     """给每场比赛算出几个关键时间点。
 
     输入：matches 表的 match_id、match_date（当地日期）、kickoff_utc（可能为空），
-         可以带 date_precision（'day' / 'round'；没有这一列时都当 'day'）。
+         可以带 date_precision（'day' / 'round' / 'day_world'；没有这一列时都当 'day'）。
     输出（每场一行，都是 UTC 文字）：
       kickoff_earliest_utc  最早可能的开球时间 —— “开球前”的判断、赛前赔率的时间都从它算
       kickoff_latest_utc    最晚可能的开球时间 —— “比赛已经踢了”、收盘赔率从它算
@@ -78,6 +84,17 @@ def compute_known_times(matches: pd.DataFrame, feature_settings: dict) -> pd.Dat
         extra_days = float(feature_settings.get("round_date_window_days", 7)) - 1
         is_round = (matches["date_precision"] == "round").to_numpy()
         day_end = day_end.where(~is_round, day_end + pd.Timedelta(days=extra_days))
+        # 只知道“世界上某个时区的这一天”的（国际赛 martj42，'day_world'）：换成全世界最早、最晚的时区。
+        # 最早开球 = 这一天 00:00（UTC+14）= 前一天 10:00 UTC；最晚开球 = 这一天 24:00（UTC−12）= 第二天 12:00 UTC。
+        # 只改 'day_world' 的行，'day'、'round' 的行上面算的一点不动；没有 'day_world' 的行时连设置都不读。
+        is_world = (matches["date_precision"] == "day_world").to_numpy()
+        if is_world.any():
+            date0 = pd.to_datetime(matches["match_date"], format="%Y-%m-%d")
+            east = pd.Timedelta(hours=float(feature_settings["day_world_earliest_utc_offset_hours"]))   # +14
+            west = pd.Timedelta(hours=float(feature_settings["day_world_latest_utc_offset_hours"]))     # -12
+            # 当地 00:00 换成 UTC 要减去时差：UTC+14 的 00:00 = UTC 前一天 10:00；UTC−12 的 24:00 = UTC 第二天 12:00
+            day_start = day_start.where(~is_world, date0 - east)
+            day_end = day_end.where(~is_world, date0 + pd.Timedelta(days=1) - west)
     earliest = kick.fillna(day_start)
     latest = kick.fillna(day_end)
 
