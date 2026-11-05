@@ -43,7 +43,9 @@ def row_attrs(data: SiteData, m: dict) -> str:
     在 match_attrs（比赛编号、联赛代码、开球时间）之外再加：
     data-league-name = 联赛中文名（筛选框里显示）；data-teams = 两队的原名（英文，搜索时英文名也能搜到）；
     data-pred = 有没有预测（1 / 0）；data-level = 信心等级 1 / 2 / 3（没有就不写）；
-    data-p = 最新一版最后的概率“主胜,平,客胜”（三位小数，按概率排序用；没有预测就不写）。值都转义过。"""
+    data-p = 最新一版最后的概率“主胜,平,客胜”（三位小数，按概率排序用；没有预测就不写）；
+    data-tier-1x2 / data-tier-ou / data-tier-score = 最新一版这三个玩法的把握等级 high / mid / low（picks_v3，“只看高把握”筛选用；
+    不分档、不是赔率算的就不写）。值都转义过。"""
     mid = m["match_id"]
     out = (match_attrs(m) + f" data-league-name='{e(data.comp(m['competition']))}'"
            f" data-teams='{e(m['home_team'] + ' ' + m['away_team'])}'")
@@ -58,6 +60,9 @@ def row_attrs(data: SiteData, m: dict) -> str:
         out += f" data-level='{lv}'"
     if all(isinstance(x, (int, float)) and np.isfinite(x) for x in p):
         out += f" data-p='{','.join(f'{float(x):.3f}' for x in p)}'"
+    for k, v in pk.tier_codes(pk.match_picks_v3(row, data.settings)).items():
+        if v in pk.TIERS:
+            out += f" data-tier-{k}='{e(v)}'"
     return out
 
 
@@ -84,26 +89,34 @@ def latest_cell(data: SiteData, mid: int) -> str:
     #   没到倾向门槛写“……的胜算 51%，接近五五开”（以存档为准，不重算门槛）。
     #   没有合格的主盘口（pick_ah 是 None）时这一句不写，格子和以前一模一样（胜平负概率 + 各玩法倾向），就是退回胜平负的写法。
     # 有亚盘那一句时，下面的倾向行不再重复亚盘（skip_ah），只写胜平负、平局风险、大小球、双方进球。
+    # 再下面一行淡字写“把握”（picks_v3）：胜平负、大小球（主盘口）、比分各是哪一档、这一档的历史命中率，让球不分档；
+    #   这一版不是赔率算的（没有赔率、接融合以前的旧版）写“不分档”。
     # 模型版本、归档状态这些技术信息只放在鼠标悬停的提示里（title），点进单场页的“技术细节”能看到全部。
     p, _ = final_probs(row)
     info = data.matches[mid]
     ah = pk.ah_sentence(pk.pick_ah(row), data.zh(info["home_team"]), data.zh(info["away_team"]))
     lead = f"<b class='lead'>{e(ah)}</b>" if ah else ""
     tip = f"{identity_text(row)}，{archive_name(row.get('archive_status'))}，{bj_text(row['cutoff_utc'])} 截止"
+    tiers = pk.tier_line(pk.match_picks_v3(row, data.settings), data.settings,
+                         data.zh(info["home_team"]), data.zh(info["away_team"])) or "把握：这一版不是赔率算的，不分档"
     return (f"<div title='{e(tip)}'>{lead}{bar_html(p)}{conclusion_html(row, skip_ah=bool(ah))}"
-            f"<br><span class='small muted'>{e(version_name(kind))}这一版</span></div>")
+            f"<span class='small muted tierline'>{e(tiers)}</span>"
+            f"<span class='small muted'>{e(version_name(kind))}这一版</span></div>")
 
 
 # ---------- 首页 ----------
 # 首页表格上面的“怎么看”：颜色条、概率、倾向、信心各是什么意思
 def index_guide(settings: dict) -> str:
     """首页表格上面的“怎么看”。信心那一条按 settings.yaml 的 confidence 写：现在一个降级因素都不用时，说明几乎都是 ●●● 高。
-    概率那一条按 settings.yaml 的 fusion.w 写：w = 1 时三个数全部来自赔率，模型只作对照（不然读的人会以为是模型算的）。"""
+    概率那一条按 settings.yaml 的 fusion.w 写：w = 1 时三个数全部来自赔率，模型只作对照（不然读的人会以为是模型算的）。
+    “把握”那一条按 settings.yaml 的 picks_v3 写（哪几季、几场、大小球三档差多少、让球的总命中率）。"""
     w = (settings.get("fusion") or {}).get("w")
     source = ("现在这三个数全部来自博彩公司的赔率（去掉抽水后平均），因为回测里赔率比我们的模型准；"
               "模型自己算的概率在单场页里作对照。没有赔率的比赛才用模型的，会标“只有模型”。"
               if w is not None and float(w) == 1.0 else "")
     conf = settings.get("confidence") or {}
+    tiers = tier_guide(settings)
+    tier_li = f"<li>{e(tiers)}</li>" if tiers else ""
     if conf.get("downgrade_factors"):
         level = "按规则碰上提醒因素会降级，规则在单场页“结论是怎么得出来的”最后一步。"
     else:
@@ -116,9 +129,24 @@ def index_guide(settings: dict) -> str:
             "<li>每场最上面那句粗字是亚盘（让球）的倾向：在开的公司最多的那条盘口上，哪一队赢盘的胜算大一些，"
             "例如“倾向主队让半球赢盘，胜算 53%”（赢一半算一半，走盘不算）；两边差不多时写“接近五五开”。"
             "没有合适的盘口时不写这一句，看下面的胜平负。</li>"
+            f"{tier_li}"
             "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
             f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>"
             "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
+
+
+def tier_guide(settings: dict) -> str | None:
+    """“怎么看这张表”里“把握”那一条（纯文字，调用的地方转义）。数字都从 settings.yaml 的 picks_v3 来；
+    settings 里没有 picks_v3 块（只给了一部分设置）时是 None，不写这一条。"""
+    c = settings.get("picks_v3")
+    if not c:
+        return None
+    ou = c["tiers"]["ou"]
+    gap = (float(ou["high"]["rate"]) - float(ou["low"]["rate"])) * 100
+    return (f"“把握 高 / 中 / 低”：同样这么写的预测，历史上（{pk.test_seasons_text(settings)}、{int(c['test_n']):,} 场）中了几成，"
+            "括号里是这一档的历史命中率，不是这一场的可能性。胜平负、比分分得开；"
+            f"大小球按主盘口算，三档只差 {gap:.0f} 个百分点；让球分不开，不分档（历史命中 {pk.rate1(c['ah_all']['rate'])}）。"
+            "这一版不是赔率算的不分档。把握只说明以前中了几成，不说明赔率划算。")
 
 
 def index_lists(data: SiteData) -> tuple[list[dict], list[dict]]:

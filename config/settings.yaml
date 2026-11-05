@@ -866,6 +866,39 @@ picks:                           # 规则名写在 src/web/site/picks.py 的 RUL
   reference_dir: data/backtest/picks_reference   # 历史参考（期末考试存下的结果按同一规则算，只是描述统计）放这里的 <规则名>/ 下面；picks_v1 的在这个文件夹本身
   reference_run: final_exam      # 用哪一次回测存下的结果（data/backtest/<这个>/）
 
+# 四个玩法的预测 picks_v3：把握等级上网站（src/web/site/picks.py 的 v3 部分，需求文档第 5 节“四个玩法的预测 picks_v3”，写代码之前写下）。
+# 数字全部照抄 SEL 的结果 data/backtest/pick_tiers/summary.json（“市场”那一块），不重新调。picks_v2 照留，战绩页照旧按 picks_v2 算
+picks_v3:
+  ou_lines: [0.5, 6.0, 0.25]     # 大小球主盘口可用的线：0.5 到 6，每隔 0.25（存档的主盘口不在里面就不用；推主盘口时也只试这些线）
+  cut_seasons: [2012, 2019]      # 切点用这几季定的（三等分点）
+  test_seasons: [2020, 2023]     # 下面的命中率是这几季的（检验季）
+  test_n: 7228                   # 检验季几场（五大联赛，开球前 24 小时那一版）
+  tiers:                         # 每个分档的玩法：cuts = [下切点, 上切点]（把握分 ≥ 上 = 高，≥ 下 = 中，其余 = 低）；
+                                 # high/mid/low = 检验季这一档的 rate 命中率、n 场数、mean_p 平均写的可能性；all = 这个玩法全部的命中率
+    1x2:
+      cuts: [0.447, 0.574]
+      high: {rate: 0.6943, n: 2388, mean_p: 0.6794}
+      mid: {rate: 0.5122, n: 2380, mean_p: 0.5061}
+      low: {rate: 0.4085, n: 2460, mean_p: 0.3998}
+      all: {rate: 0.5371, n: 7228}
+    ou:
+      cuts: [0.512, 0.524]
+      high: {rate: 0.5285, n: 2021, mean_p: 0.5297}
+      mid: {rate: 0.5105, n: 2548, mean_p: 0.5180}
+      low: {rate: 0.4966, n: 2659, mean_p: 0.5061}
+      all: {rate: 0.5103, n: 7228}
+    score:
+      cuts: [0.405, 0.443]
+      high: {rate: 0.4890, n: 1636, mean_p: 0.4726}
+      mid: {rate: 0.4567, n: 2284, mean_p: 0.4232}   # 写出来偏低（不准）：页面以实际命中率为准，旁边写明
+      low: {rate: 0.3836, n: 3308, mean_p: 0.3748}
+      all: {rate: 0.4305, n: 7228}
+  ah_all: {rate: 0.5285, n: 7228}   # 让球分不开，不分档，只写这个总的历史命中率
+  calib_tol: 0.03                # 平均写的可能性和实际命中率差超过这个，页面上写明“写出来偏低 / 偏高”（和 pick_tiers_study.calib_tol 一样）
+  model_overstated:              # “模型自己”一列让球、大小球写高了（模型自己高档：写的胜算 → 实际命中率），页面上只写方向，旁边写这两个数
+    ah: {written: 0.6106, actual: 0.4988}
+    ou: {written: 0.5740, actual: 0.5058}
+
 # 局域网网站：带登录的网站服务器 src/web/serve.py（需求文档第 8 节“局域网网站”、第 16 节“安全”，工作树 W1）
 # live.dynamic 是 true 时登录后的网页现读现出（只读方式读数据库，见下面 live:）；false 时只发 site.output_dir 里生成好的网页。
 # 另外发 paths.reports 里的 status.html。live.live_poller 关着时不联网。只在局域网用，不对公网开放

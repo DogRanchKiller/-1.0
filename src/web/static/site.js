@@ -97,13 +97,25 @@
     return null;
   }
 
-  // 首页一行要不要显示。row = {league, pred, level, text}（text = 这一行的字 + 两队原名，小写），
-  // f = 筛选条件 {league: 联赛代码或 "", pred: "" / "1" / "0", level: "" / "1" / "2" / "3" / "none", q: 搜索的字}
+  // 首页一行要不要显示。row = {league, pred, level, tiers, text}（text = 这一行的字 + 两队原名，小写；
+  //   tiers = {"1x2": ..., ou: ..., score: ...}，每个是 "high" / "mid" / "low" 或 ""（行上的 data-tier-*，picks_v3 的把握等级）），
+  // f = 筛选条件 {league: 联赛代码或 "", pred: "" / "1" / "0", level: "" / "1" / "2" / "3" / "none",
+  //   tier: "" / "any" / "1x2" / "ou" / "score" / "none", q: 搜索的字}
+  //   tier："any" = 只看高把握（胜平负或比分是高档；大小球的高档只比低档高 3 个百分点，不算进来），
+  //         "1x2" / "ou" / "score" = 这个玩法是高档，"none" = 三个玩法都没有把握等级（不是赔率算的、还没预测）
   function rowMatches(row, f) {
     if (f.league && row.league !== f.league) return false;
     if (f.pred && row.pred !== f.pred) return false;
     if (f.level) {
       if (f.level === "none" ? row.level : row.level !== f.level) return false;
+    }
+    if (f.tier) {
+      var t = row.tiers || {};
+      if (f.tier === "any") {
+        if (t["1x2"] !== "high" && t.score !== "high") return false;
+      } else if (f.tier === "none") {
+        if (t["1x2"] || t.ou || t.score) return false;
+      } else if (t[f.tier] !== "high") return false;
     }
     var q = String(f.q || "").toLowerCase().trim();
     if (q) {
@@ -304,7 +316,8 @@
   // ======================================================================
   // 首页每一场是表格（table.list）里的一行，行上有服务器写好的 data-*：
   //   data-league（联赛代码）、data-league-name（联赛中文名）、data-teams（两队原名）、
-  //   data-pred（有没有预测 1 / 0）、data-level（信心 1 / 2 / 3）、data-p（主胜,平,客胜 的概率）。
+  //   data-pred（有没有预测 1 / 0）、data-level（信心 1 / 2 / 3）、data-p（主胜,平,客胜 的概率）、
+  //   data-tier-1x2 / data-tier-ou / data-tier-score（把握等级 high / mid / low，不分档的没有这个属性）。
   // “即将开赛”按日期分成好几张表，每张表前面是一个 <h2> 日期标题；最后一张是“最近踢完的”。
   // 筛选只是把不要的行藏起来（hidden），排序只在每张表里面调换行的顺序。数据不动，刷新网页就回到原样。
   function enhanceIndex() {
@@ -327,7 +340,7 @@
         if (code && !seen[code]) { seen[code] = true; leagues.push([code, r.getAttribute("data-league-name") || code]); }
       });
     });
-    var st = loadState("index", { league: "", day: "", pred: "", level: "", sort: "time", q: "" });
+    var st = loadState("index", { league: "", day: "", pred: "", level: "", tier: "", sort: "time", q: "" });
     var bar = toolbar("index");
     var info = el("span", "js-count");
     info.setAttribute("aria-live", "polite");
@@ -343,18 +356,21 @@
       selectField("预测", "index-pred", [["", "有没有都看"], ["1", "只看有预测的"], ["0", "只看还没预测的"]], st.pred, set("pred")),
       selectField("信心", "index-level", [["", "全部"], ["3", LEVEL_NAMES[3]], ["2", LEVEL_NAMES[2]], ["1", LEVEL_NAMES[1]], ["none", "没有信心等级"]],
         st.level, set("level")),
+      selectField("把握", "index-tier", [["", "全部"], ["any", "只看高把握（胜平负或比分）"], ["1x2", "胜平负把握高"],
+        ["score", "比分把握高"], ["ou", "大小球把握高（三档差得很小）"], ["none", "没有把握等级"]], st.tier, set("tier")),
       selectField("排序", "index-sort", [["time", "按开球时间"], ["home", "主队赢的可能从大到小"], ["draw", "平局的可能从大到小"],
         ["away", "客队赢的可能从大到小"], ["max", "最明显的在前（三项里最大的那个）"]], st.sort, set("sort")),
       searchField("搜索球队", "index-q", st.q, "输入球队名，中文英文都行", set("q"))
     ];
     // 下拉框的值可能被换成了第一项（记住的那一天已经没有了）：按实际显示的改回来
-    st.league = fields[0].input.value; st.day = fields[1].input.value; st.sort = fields[4].input.value;
+    st.league = fields[0].input.value; st.day = fields[1].input.value; st.tier = fields[4].input.value;
+    st.sort = fields[5].input.value;
     fields.forEach(function (f) { bar.appendChild(f.wrap); });
     bar.appendChild(button("全部显示", "js-reset", function () {
-      st = { league: "", day: "", pred: "", level: "", sort: "time", q: "" };
+      st = { league: "", day: "", pred: "", level: "", tier: "", sort: "time", q: "" };
       saveState("index", st);
       fields[0].input.value = ""; fields[1].input.value = ""; fields[2].input.value = "";
-      fields[3].input.value = ""; fields[4].input.value = "time"; fields[5].input.value = "";
+      fields[3].input.value = ""; fields[4].input.value = ""; fields[5].input.value = "time"; fields[6].input.value = "";
       apply();
     }));
     bar.appendChild(info);
@@ -370,8 +386,10 @@
         var n = 0;
         g.rows.forEach(function (r) {
           var text = (r.textContent + " " + (r.getAttribute("data-teams") || "")).toLowerCase();
+          var tiers = { "1x2": r.getAttribute("data-tier-1x2") || "", ou: r.getAttribute("data-tier-ou") || "",
+            score: r.getAttribute("data-tier-score") || "" };
           var ok = dayOk && rowMatches({ league: r.getAttribute("data-league") || "", pred: r.getAttribute("data-pred") || "",
-            level: r.getAttribute("data-level") || "", text: text }, st);
+            level: r.getAttribute("data-level") || "", tiers: tiers, text: text }, st);
           r.hidden = !ok;
           if (ok) n++;
         });
