@@ -332,13 +332,14 @@ def test_match_venues_without_table(tmp_path, settings):
 
 # ---------- 数据检查 ----------
 def test_quality_same_day_checks_day_world_and_int_not_cup(env, settings):
-    """“同一天同一队踢两场”也查 'day_world'；INT 在 leagues 里，round 不空也不当杯赛查。"""
+    """“同一天同一队踢两场”也查 'day_world'；“日期不在赛季范围内”不查 'day_world'；INT 在 leagues 里，round 不空也不当杯赛查。"""
     from datetime import date
     con, folder = env
     extra = ["2011-03-29,Ghana,Togo,0,0,Friendly,Accra,Ghana,FALSE"]          # 加纳同一天又踢一场（对手不同）
     imp.run(con, settings, write_raw(folder.parent / "x", RESULTS + extra))
     found = {c["名称"]: c["rows"] for c in run_checks(con, settings, today=date(2026, 11, 5))}
     assert found["同一天同一队踢两场"] == ["2011-03-29 Ghana NT：2 场"]
+    assert found["日期不在赛季范围内"] == []          # 国际赛赛季就是比赛那一年（3 月的比赛按俱乐部赛季算会“不在范围内”），不查
     assert all(not r for _n, _e, r in cup_checks(con, all_league_codes(settings)))
 
 

@@ -109,7 +109,11 @@ def collect(fs, data, teams: set[str]) -> dict:
     """算 teams 每队的四块，返回 {"teams": {队: {...}}, "tables": {"联赛|赛季": {...}}}。"""
     cfg = data.settings["site"]
     n_form, n_h2h = int(cfg["team_form_matches"]), int(cfg["team_h2h_matches"])
-    hist = fs.historical_matches(data.now, USAGE, competition=None, data=("比分",))
+    # 只读网站要的联赛：site.team_skip_league_groups 里的联赛组（国际赛 intl：国家队不在网站上）不读，
+    # 否则 Elo 要多算 4 万多场国家队比赛，整站读数据慢约 2.5 秒（2026-11-05 工作树 INA 量过）
+    skip = set(cfg.get("team_skip_league_groups") or [])
+    comps = [c for g, codes in data.settings["leagues"].items() if g not in skip for c in codes]
+    hist = fs.historical_matches(data.now, USAGE, competition=comps, data=("比分",))
     hist = hist.dropna(subset=["home_goals", "away_goals"]).sort_values(["kickoff_earliest_utc", "match_id"])
     tracks = elo_tracks(hist, data.settings, teams)
     can_table = set(standings_leagues(data.settings))

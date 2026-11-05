@@ -882,6 +882,7 @@ site:
   team_form_matches: 6           # 近期状态列最近几场联赛（Elo 那张表也列这几场）
   team_h2h_matches: 10           # 历史交锋列两队最近几场联赛交锋（对手 = 接下来第一场联赛的对手）
   team_elo_matches: 38           # Elo 折线图画现在这个联赛最近几场（38 ≈ 英超一个赛季）
+  team_skip_league_groups: [intl] # 球队页四块不读这些联赛组（国际赛：国家队不在网站上，读了只会变慢）
   versions: [T-24, T-6, T-1, preview]   # 单场页对比哪几个版本（predictions 表的 kind），按这个顺序排
   heatmap_goals: 5               # 比分热力图显示 0–5 球（第 3 节：0-0 到 5-5）；更多的并进“6+”
   top_scores: 5                  # 列最可能的几个比分

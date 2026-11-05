@@ -133,6 +133,20 @@ def test_table(con, settings):
     assert set(st["tables"]) == {"E0|2026"}                              # 四队同一个联赛赛季，只算一次
 
 
+def test_skip_league_groups(con, settings):
+    """site.team_skip_league_groups 里的联赛组（国际赛 intl）不读：A 多踢一场国际赛，球队页四块都不算它。"""
+    con.execute("insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc, status)"
+                " values (11, 'INT', 2026, 'A', 'B', '2026-09-05', '2026-09-05 15:00', 'finished')")
+    con.execute("insert into match_stats (match_id, source, home_goals, away_goals, result) values (11, 'football-data', 4, 0, 'H')")
+    s2 = copy.deepcopy(settings)
+    s2["leagues"]["intl"] = {"INT": "国际赛"}
+    s2["site"]["team_skip_league_groups"] = ["intl"]
+    a = make_data(con, s2).team_stats["teams"]["A"]
+    assert [r["match_id"] for r in a["form"]] == [6, 4, 3, 2, 1] and a["elo_other_league"] is False
+    s2["site"]["team_skip_league_groups"] = []                           # 不跳过：11 号进了近期状态（对照，证明上面真是跳过的作用）
+    assert make_data(con, s2).team_stats["teams"]["A"]["form"][0]["match_id"] == 11
+
+
 def test_league_without_rules_has_note(con, settings):
     s = copy.deepcopy(settings)
     s["standings"]["league_groups"] = ["second"]                         # E0 不在能算积分榜的联赛里

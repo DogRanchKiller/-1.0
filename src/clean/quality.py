@@ -198,11 +198,11 @@ def run_checks(con: sqlite3.Connection, settings: dict, today: date | None = Non
          (now, *leagues))])
 
     add("日期不在赛季范围内", "联赛比赛日期应该在 赛季开始年 7 月 1 日 到 次年 8 月 31 日之间；"
-        "杯赛、欧战的资格赛 6 月就开始，从 6 月 1 日算",
+        "杯赛、欧战的资格赛 6 月就开始，从 6 月 1 日算。国际赛（day_world）不查：赛季就是比赛日期那一年，导入时就这样定的",
         [f"{c} {season_label(se)} {d} {h} - {a}" for c, se, d, h, a in _rows(con,
          "select competition, season, match_date, home_team, away_team from matches "
-         f"where match_date < (season || case when {is_league} then '-07-01' else '-06-01' end) "
-         "or match_date > ((season + 1) || '-08-31')", leagues)])
+         f"where date_precision != 'day_world' and (match_date < (season || case when {is_league} then '-07-01' else '-06-01' end) "
+         "or match_date > ((season + 1) || '-08-31'))", leagues)])
 
     add("开球时间缺失", "football-data 从 2019/20 起有开球时间，这之后的联赛比赛应该都有（杯赛不查：维基百科常常不写）",
         [f"{c} {d} {h} - {a}" for c, d, h, a in _rows(con,
