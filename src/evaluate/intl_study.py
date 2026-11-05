@@ -351,6 +351,11 @@ def build_report(out: dict) -> str:
         mm = (pred['season'] >= y0) & (pred['season'] <= y1) & pred['result'].notna()
         L.append(f'- 主比较那几年有答案的正式比赛 {int(mm.sum())} 场，其中有多家平均收盘的 '
                  f'{int((mm & pred[PB].notna().all(axis=1)).sum())} 场（没有的：懂球帝没有这场、比分和懂球帝不一样、收盘价不合格）。')
+    # 审查时加（需求文档第 11 阶段 INB、INC 的“实际做法”）：martj42 和懂球帝的比分都含加时，加时分出胜负（没踢点球）的淘汰赛
+    # 在这里按加时后的胜负打分，可收盘胜平负是按 90 分钟算的。两边吃同样的亏，场数很少，但读结果时要知道
+    L.append('- 要知道：比分含加时。加时分出胜负（没踢点球）的少数淘汰赛（例如 2021 欧洲杯半决赛英格兰 2-1 丹麦，90 分钟 1-1）'
+             '按加时后的胜负打分，收盘胜平负却是按 90 分钟算的；两边吃同样的亏，场数很少。'
+             '分赛事表里的“欧国联”含中北美国联（和它的预选）。')
     L.append('')
     L += pair_section(out['main'], '一、主比较：intl_elo vs 懂球帝多家平均收盘（去水）', cfg)
     L += pair_section(out['neutral'], '二、中立场比较：intl_elo（中立场不加主场优势）vs intl_elo_home（一律加）', cfg)
