@@ -129,6 +129,32 @@ def test_merge_into_one(env):
     assert body.index("（T-6）") < body.index("阿森纳 对 切尔西**（T-24）")                # 按开球时间排
 
 
+def test_ah_line_first(env):
+    """亚盘打头（2026-11-05 起，和网站同一句）：开球时间下面第一行是亚盘，倾向那一串里不再重复亚盘；没有主盘口就不写。"""
+    s, con, tmp = env
+    ah = {"side": "away", "line": -0.5, "p": 0.55, "lean": True}            # 主让半球，看好客队受让半球
+    near = {"side": "home", "line": 0.0, "p": 0.51, "lean": False}          # 平手盘，没到倾向门槛
+    with_ah = json.loads(json.dumps(DETAIL))
+    with_ah["融合"]["倾向"]["ah"] = ah
+    with_near = json.loads(json.dumps(DETAIL))
+    with_near["融合"]["倾向"]["ah"] = near
+    add_pred(con, 1, "T-24", NOW + timedelta(hours=24), detail=with_ah)
+    add_pred(con, 2, "T-24", NOW + timedelta(hours=25), home="Valencia", away="Chelsea", comp="SP1", detail=with_near)
+    add_pred(con, 3, "T-24", NOW + timedelta(hours=26), home="Chelsea", away="Arsenal")   # DETAIL 里 ah 是 None
+    cp.compose(s, NOW)
+    [m] = messages(s)
+    blocks = m["正文"].split("\n\n")
+    first = blocks[0].split("  \n")
+    assert first[2] == "亚盘：倾向切尔西受让半球赢盘，胜算 55%"                 # 紧跟开球时间
+    assert first[3].startswith("融合结论：")
+    assert "倾向 客队" not in blocks[0] and "亚盘 无明显倾向" not in blocks[0]   # 不重复
+    assert "倾向 主胜 50%" in blocks[0]                                     # 其余倾向照旧
+    assert blocks[1].split("  \n")[2] == "亚盘：平手盘瓦伦西亚赢盘的胜算 51%，接近五五开"
+    assert "亚盘" not in blocks[2]                                           # 没有合格主盘口：不写
+    for word in ("推荐", "下注", "投注"):
+        assert word not in m["正文"]
+
+
 def test_no_repeat_and_latest_row(env):
     """推过的不再推；同一场同一版只认 prediction_id 最大的；开过球的、preview 不推；改期重出的新行再推。"""
     s, con, tmp = env

@@ -6,7 +6,7 @@
    - 只推还没开球的比赛（第一次运行时不会把以前所有的预测都推一遍）。
    - 这一次运行找到的多场比赛合并成一条消息（周末几十场，一场一条会超过每天的条数上限）。太长才拆成几条。
    - 推过的 prediction_id 记在状态文件（settings 的 notify.state_file）里，不重复推。
-   - 内容只有比赛、开球时间（北京时间）、概率和结论，不写任何下注建议。
+   - 内容只有比赛、开球时间（北京时间）、概率和结论，不写任何下注建议。每场开球时间下面先写亚盘那一句（和网站一样），再写胜平负。
 2. 故障：读定时任务的心跳文件（接口 2），用 watch.py 判断。新出现的故障推一条；同一个故障没恢复前不再推；
    恢复了推一条“已恢复”。一次运行里的几个故障合并成一条。
 
@@ -129,14 +129,33 @@ def _probs(p) -> str | None:
     return " / ".join(f"{n} {_pct(v)}" for n, v in zip(OUTCOMES, vals))
 
 
-def _lean_lines(fusion: dict) -> list[str]:
-    """结论里的倾向（和预测页同一套说法，用 src/web/preview_page.py 的 lean_texts）。格式不对就不写。"""
+def _ah_line(r: dict) -> str | None:
+    """亚盘那一句，放在每场最前面（2026-11-05 起，和网站首页、单场页大字同一句：src/web/site/picks.py 的 ah_sentence）。
+
+    例：“亚盘：倾向阿森纳让半球赢盘，胜算 54%”。没有合格的主盘口（pick_ah 给 None）、格式不对时返回 None，这场就不写这一行。
+    """
+    from src.web.site.picks import ah_sentence, pick_ah   # 放这里：只有这里用，免得顶上多一层导入
+    try:
+        text = ah_sentence(pick_ah(r), r["home_zh"], r["away_zh"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return f"亚盘：{text}" if text else None
+
+
+def _lean_lines(fusion: dict, skip_ah: bool = False) -> list[str]:
+    """结论里的倾向（和预测页同一套说法，用 src/web/preview_page.py 的 lean_texts）。格式不对就不写。
+
+    skip_ah=True：亚盘已经在最前面单独写了一行，这里不再重复写亚盘那一句。
+    """
     from src.web.preview_page import lean_texts
     leans = fusion.get("倾向")
     if not isinstance(leans, dict):
         return []
+    picked = {k: leans.get(k) for k in ("result", "draw", "over25", "btts", "ah")}
+    if skip_ah:
+        picked["ah"] = None                   # None = lean_texts 不写这一项
     try:
-        return lean_texts({"leans": {k: leans.get(k) for k in ("result", "draw", "over25", "btts", "ah")}})
+        return lean_texts({"leans": picked})
     except (KeyError, TypeError, IndexError, ValueError):
         return []
 
@@ -147,6 +166,9 @@ def match_block(r: dict, leagues: dict) -> str:
     league = leagues.get(r["competition"], r["competition"])
     lines = [f"**{league}　{r['home_zh']} 对 {r['away_zh']}**（{r['kind']}）",
              f"开球：{ko.month} 月 {ko.day} 日 星期{WEEKDAYS[ko.weekday()]} {ko:%H:%M}（北京时间）"]
+    ah = _ah_line(r)
+    if ah:
+        lines.append(ah)                      # 亚盘打头（你 2026-11-05 定的，和网站一样）
     d = r["detail"]
     fusion = d.get("融合") if isinstance(d.get("融合"), dict) else {}
     model = _probs([r["p_home"], r["p_draw"], r["p_away"]])
@@ -155,7 +177,7 @@ def match_block(r: dict, leagues: dict) -> str:
         level = fusion.get("信心等级")
         level_name = {3: "●●● 高", 2: "●●○ 中", 1: "●○○ 低"}.get(level)
         lines.append(f"融合结论：{fused}" + (f"，信心 {level_name}" if level_name else ""))
-        lines += _lean_lines(fusion)
+        lines += _lean_lines(fusion, skip_ah=bool(ah))
         unsure = fusion.get("不确定因素")
         if isinstance(unsure, list) and unsure:
             lines.append("要注意：" + "、".join(str(x) for x in unsure))
