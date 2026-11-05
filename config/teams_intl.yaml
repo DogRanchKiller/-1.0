@@ -1,0 +1,216 @@
+# 国际赛：懂球帝球队编号 → 中文名、martj42 英文名（需求文档第 4 节“第 11 阶段”的“对上 martj42 的比赛”）。
+# 导入程序 src/clean/dongqiudi_intl_import.py 只按这个表认球队，不猜；数据库里的球队编号 = martj42 英文名 + “ NT”。
+# 怎么来的（2026-11-05）：先用 `-m src.clean.dongqiudi_intl_import --suggest results.csv` 按“日期差 ≤ 1 天、比分一样”
+# 给每个懂球帝球队配候选（2021–2023 年 18 个赛季页里出现的 209 个队），再由 Claude 逐个看过中文名和英文名是不是同一个国家/地区。
+# 候选票数没过半、要人工看比赛的 6 个（圣卢西亚、塔希提、斯威士兰、老挝、荷属圣马丁、莱索托）逐场和 martj42 对过：
+# 每场日期差 ≤ 1 天、比分一样。拿不准的一个都没有写进来（拿不准就不写，这些队的比赛不导入）。
+teams:
+  "50000001": {zh: "阿富汗", martj42: "Afghanistan"}
+  "50000012": {zh: "阿尔巴尼亚", martj42: "Albania"}
+  "50000013": {zh: "阿尔及利亚", martj42: "Algeria"}
+  "50000023": {zh: "安道尔", martj42: "Andorra"}
+  "50000024": {zh: "安哥拉", martj42: "Angola"}
+  "50000025": {zh: "安圭拉", martj42: "Anguilla"}
+  "50000026": {zh: "安提瓜和巴布达", martj42: "Antigua and Barbuda"}
+  "50000067": {zh: "阿根廷", martj42: "Argentina"}
+  "50000074": {zh: "亚美尼亚", martj42: "Armenia"}
+  "50000075": {zh: "阿鲁巴", martj42: "Aruba"}
+  "50000087": {zh: "澳大利亚", martj42: "Australia"}
+  "50000108": {zh: "奥地利", martj42: "Austria"}
+  "50000118": {zh: "阿塞拜疆", martj42: "Azerbaijan"}
+  "50000119": {zh: "巴哈马", martj42: "Bahamas"}
+  "50000120": {zh: "巴林", martj42: "Bahrain"}
+  "50000121": {zh: "孟加拉国", martj42: "Bangladesh"}
+  "50000122": {zh: "巴巴多斯", martj42: "Barbados"}
+  "50000137": {zh: "白俄罗斯", martj42: "Belarus"}
+  "50000203": {zh: "比利时", martj42: "Belgium"}
+  "50000204": {zh: "伯利兹", martj42: "Belize"}
+  "50000205": {zh: "贝宁", martj42: "Benin"}
+  "50000206": {zh: "百慕大群岛", martj42: "Bermuda"}
+  "50000207": {zh: "不丹", martj42: "Bhutan"}
+  "50000218": {zh: "玻利维亚", martj42: "Bolivia"}
+  "50000219": {zh: "波黑", martj42: "Bosnia and Herzegovina"}
+  "50000220": {zh: "博茨瓦纳", martj42: "Botswana"}
+  "50000269": {zh: "巴西", martj42: "Brazil"}
+  "50000270": {zh: "英属维尔京群岛", martj42: "British Virgin Islands"}
+  "50000271": {zh: "文莱", martj42: "Brunei"}
+  "50000296": {zh: "保加利亚", martj42: "Bulgaria"}
+  "50000297": {zh: "布基纳法索", martj42: "Burkina Faso"}
+  "50000298": {zh: "布隆迪", martj42: "Burundi"}
+  "50000299": {zh: "柬埔寨", martj42: "Cambodia"}
+  "50000300": {zh: "喀麦隆", martj42: "Cameroon"}
+  "50000303": {zh: "加拿大", martj42: "Canada"}
+  "50000304": {zh: "佛得角", martj42: "Cape Verde"}
+  "50000305": {zh: "开曼群岛", martj42: "Cayman Islands"}
+  "50000306": {zh: "中非", martj42: "Central African Republic"}
+  "50000307": {zh: "乍得", martj42: "Chad"}
+  "50000326": {zh: "智利", martj42: "Chile"}
+  "50000344": {zh: "中国", martj42: "China"}
+  "50000345": {zh: "中国台北", martj42: "Taiwan"}
+  "50000364": {zh: "哥伦比亚", martj42: "Colombia"}
+  "50000365": {zh: "刚果", martj42: "Congo"}
+  "50000366": {zh: "刚果民主共和国", martj42: "DR Congo"}
+  "50000368": {zh: "哥斯达黎加", martj42: "Costa Rica"}
+  "50000396": {zh: "克罗地亚", martj42: "Croatia"}
+  "50000397": {zh: "古巴", martj42: "Cuba"}
+  "50000412": {zh: "塞浦路斯", martj42: "Cyprus"}
+  "50000453": {zh: "捷克", martj42: "Czech Republic"}
+  "50000454": {zh: "科特迪瓦", martj42: "Ivory Coast"}
+  "50000496": {zh: "丹麦", martj42: "Denmark"}
+  "50000497": {zh: "吉布提", martj42: "Djibouti"}
+  "50000498": {zh: "多米尼克", martj42: "Dominica"}
+  "50000499": {zh: "多米尼加", martj42: "Dominican Republic"}
+  "50000510": {zh: "厄瓜多尔", martj42: "Ecuador"}
+  "50000511": {zh: "埃及", martj42: "Egypt"}
+  "50000512": {zh: "萨尔瓦多", martj42: "El Salvador"}
+  "50000627": {zh: "英格兰", martj42: "England"}
+  "50000628": {zh: "赤道几内亚", martj42: "Equatorial Guinea"}
+  "50000640": {zh: "爱沙尼亚", martj42: "Estonia"}
+  "50000641": {zh: "埃塞俄比亚", martj42: "Ethiopia"}
+  "50000651": {zh: "法罗群岛", martj42: "Faroe Islands"}
+  "50000652": {zh: "斐济", martj42: "Fiji"}
+  "50000728": {zh: "芬兰", martj42: "Finland"}
+  "50000789": {zh: "法国", martj42: "France"}
+  "50000790": {zh: "加蓬", martj42: "Gabon"}
+  "50000791": {zh: "冈比亚", martj42: "Gambia"}
+  "50000802": {zh: "格鲁吉亚", martj42: "Georgia"}
+  "50000868": {zh: "德国", martj42: "Germany"}
+  "50000869": {zh: "加纳", martj42: "Ghana"}
+  "50000909": {zh: "希腊", martj42: "Greece"}
+  "50000910": {zh: "格林纳达", martj42: "Grenada"}
+  "50000911": {zh: "关岛", martj42: "Guam"}
+  "50000912": {zh: "危地马拉", martj42: "Guatemala"}
+  "50000913": {zh: "几内亚", martj42: "Guinea"}
+  "50000914": {zh: "几内亚比绍", martj42: "Guinea-Bissau"}
+  "50000915": {zh: "圭亚那", martj42: "Guyana"}
+  "50000916": {zh: "海地", martj42: "Haiti"}
+  "50000917": {zh: "洪都拉斯", martj42: "Honduras"}
+  "50000918": {zh: "中国香港", martj42: "Hong Kong"}
+  "50000943": {zh: "匈牙利", martj42: "Hungary"}
+  "50000955": {zh: "冰岛", martj42: "Iceland"}
+  "50000956": {zh: "印度", martj42: "India"}
+  "50000972": {zh: "印度尼西亚", martj42: "Indonesia"}
+  "50000986": {zh: "伊朗", martj42: "Iran"}
+  "50000987": {zh: "伊拉克", martj42: "Iraq"}
+  "50001009": {zh: "爱尔兰", martj42: "Republic of Ireland"}
+  "50001037": {zh: "以色列", martj42: "Israel"}
+  "50001116": {zh: "意大利", martj42: "Italy"}
+  "50001117": {zh: "牙买加", martj42: "Jamaica"}
+  "50001146": {zh: "日本", martj42: "Japan"}
+  "50001147": {zh: "约旦", martj42: "Jordan"}
+  "50001165": {zh: "哈萨克斯坦", martj42: "Kazakhstan"}
+  "50001166": {zh: "肯尼亚", martj42: "Kenya"}
+  "50001167": {zh: "朝鲜", martj42: "North Korea"}
+  "50001181": {zh: "韩国", martj42: "South Korea"}
+  "50001182": {zh: "科威特", martj42: "Kuwait"}
+  "50001183": {zh: "吉尔吉斯斯坦", martj42: "Kyrgyzstan"}
+  "50001184": {zh: "老挝", martj42: "Laos"}
+  "50001192": {zh: "拉脱维亚", martj42: "Latvia"}
+  "50001193": {zh: "黎巴嫩", martj42: "Lebanon"}
+  "50001194": {zh: "莱索托", martj42: "Lesotho"}
+  "50001195": {zh: "利比里亚", martj42: "Liberia"}
+  "50001196": {zh: "利比亚", martj42: "Libya"}
+  "50001197": {zh: "列支敦士登", martj42: "Liechtenstein"}
+  "50001205": {zh: "立陶宛", martj42: "Lithuania"}
+  "50001215": {zh: "卢森堡", martj42: "Luxembourg"}
+  "50001216": {zh: "中国澳门", martj42: "Macau"}
+  "50001228": {zh: "北马其顿", martj42: "North Macedonia"}
+  "50001229": {zh: "马达加斯加", martj42: "Madagascar"}
+  "50001230": {zh: "马拉维", martj42: "Malawi"}
+  "50001231": {zh: "马来西亚", martj42: "Malaysia"}
+  "50001232": {zh: "马尔代夫", martj42: "Maldives"}
+  "50001233": {zh: "马里", martj42: "Mali"}
+  "50001244": {zh: "马耳他", martj42: "Malta"}
+  "50001245": {zh: "毛里塔尼亚", martj42: "Mauritania"}
+  "50001246": {zh: "毛里求斯", martj42: "Mauritius"}
+  "50001278": {zh: "墨西哥", martj42: "Mexico"}
+  "50001286": {zh: "摩尔多瓦", martj42: "Moldova"}
+  "50001287": {zh: "蒙古", martj42: "Mongolia"}
+  "50001288": {zh: "蒙特塞拉特岛", martj42: "Montserrat"}
+  "50001289": {zh: "摩洛哥", martj42: "Morocco"}
+  "50001290": {zh: "莫桑比克", martj42: "Mozambique"}
+  "50001291": {zh: "缅甸", martj42: "Myanmar"}
+  "50001292": {zh: "纳米比亚", martj42: "Namibia"}
+  "50001293": {zh: "尼泊尔", martj42: "Nepal"}
+  "50001331": {zh: "荷兰", martj42: "Netherlands"}
+  "50001332": {zh: "库拉索", martj42: "Curaçao"}
+  "50001341": {zh: "新西兰", martj42: "New Zealand"}
+  "50001342": {zh: "尼加拉瓜", martj42: "Nicaragua"}
+  "50001343": {zh: "尼日尔", martj42: "Niger"}
+  "50001344": {zh: "尼日利亚", martj42: "Nigeria"}
+  "50001359": {zh: "北爱尔兰", martj42: "Northern Ireland"}
+  "50001389": {zh: "挪威", martj42: "Norway"}
+  "50001390": {zh: "阿曼", martj42: "Oman"}
+  "50001391": {zh: "巴基斯坦", martj42: "Pakistan"}
+  "50001392": {zh: "巴勒斯坦", martj42: "Palestine"}
+  "50001393": {zh: "巴拿马", martj42: "Panama"}
+  "50001394": {zh: "巴布亚新几内亚", martj42: "Papua New Guinea"}
+  "50001405": {zh: "巴拉圭", martj42: "Paraguay"}
+  "50001418": {zh: "秘鲁", martj42: "Peru"}
+  "50001419": {zh: "菲律宾", martj42: "Philippines"}
+  "50001445": {zh: "波兰", martj42: "Poland"}
+  "50001540": {zh: "葡萄牙", martj42: "Portugal"}
+  "50001541": {zh: "波多黎各", martj42: "Puerto Rico"}
+  "50001542": {zh: "卡塔尔", martj42: "Qatar"}
+  "50001585": {zh: "罗马尼亚", martj42: "Romania"}
+  "50001622": {zh: "俄罗斯", martj42: "Russia"}
+  "50001623": {zh: "卢旺达", martj42: "Rwanda"}
+  "50001639": {zh: "圣马力诺", martj42: "San Marino"}
+  "50001640": {zh: "沙特阿拉伯", martj42: "Saudi Arabia"}
+  "50001683": {zh: "苏格兰", martj42: "Scotland"}
+  "50001684": {zh: "塞内加尔", martj42: "Senegal"}
+  "50001702": {zh: "塞舌尔", martj42: "Seychelles"}
+  "50001703": {zh: "塞拉利昂", martj42: "Sierra Leone"}
+  "50001713": {zh: "新加坡", martj42: "Singapore"}
+  "50001737": {zh: "斯洛伐克", martj42: "Slovakia"}
+  "50001750": {zh: "斯洛文尼亚", martj42: "Slovenia"}
+  "50001751": {zh: "所罗门群岛", martj42: "Solomon Islands"}
+  "50001752": {zh: "索马里", martj42: "Somalia"}
+  "50001753": {zh: "南非", martj42: "South Africa"}
+  "50001869": {zh: "西班牙", martj42: "Spain"}
+  "50001870": {zh: "斯里兰卡", martj42: "Sri Lanka"}
+  "50001871": {zh: "圣基茨和尼维斯", martj42: "Saint Kitts and Nevis"}
+  "50001872": {zh: "圣卢西亚", martj42: "Saint Lucia"}
+  "50001873": {zh: "圣文森特和格林纳丁斯", martj42: "Saint Vincent and the Grenadines"}
+  "50001874": {zh: "苏丹", martj42: "Sudan"}
+  "50001875": {zh: "苏里南", martj42: "Suriname"}
+  "50001876": {zh: "斯威士兰", martj42: "Eswatini"}
+  "50001904": {zh: "瑞典", martj42: "Sweden"}
+  "50001931": {zh: "瑞士", martj42: "Switzerland"}
+  "50001932": {zh: "叙利亚", martj42: "Syria"}
+  "50001933": {zh: "圣多美和普林西比", martj42: "São Tomé and Príncipe"}
+  "50001934": {zh: "塔希提", martj42: "Tahiti"}
+  "50001935": {zh: "塔吉克斯坦", martj42: "Tajikistan"}
+  "50001936": {zh: "坦桑尼亚", martj42: "Tanzania"}
+  "50001937": {zh: "泰国", martj42: "Thailand"}
+  "50001938": {zh: "多哥", martj42: "Togo"}
+  "50001940": {zh: "特立尼达和多巴哥", martj42: "Trinidad and Tobago"}
+  "50001941": {zh: "突尼斯", martj42: "Tunisia"}
+  "50001977": {zh: "土耳其", martj42: "Turkey"}
+  "50001978": {zh: "土库曼斯坦", martj42: "Turkmenistan"}
+  "50001979": {zh: "特克斯和凯科斯群岛", martj42: "Turks and Caicos Islands"}
+  "50001980": {zh: "美属维尔京群岛", martj42: "United States Virgin Islands"}
+  "50001981": {zh: "乌干达", martj42: "Uganda"}
+  "50001997": {zh: "乌克兰", martj42: "Ukraine"}
+  "50001998": {zh: "阿联酋", martj42: "United Arab Emirates"}
+  "50002008": {zh: "美国", martj42: "United States"}
+  "50002026": {zh: "乌拉圭", martj42: "Uruguay"}
+  "50002027": {zh: "乌兹别克斯坦", martj42: "Uzbekistan"}
+  "50002039": {zh: "委内瑞拉", martj42: "Venezuela"}
+  "50002040": {zh: "越南", martj42: "Vietnam"}
+  "50002057": {zh: "威尔士", martj42: "Wales"}
+  "50002058": {zh: "也门", martj42: "Yemen"}
+  "50002059": {zh: "赞比亚", martj42: "Zambia"}
+  "50002060": {zh: "津巴布韦", martj42: "Zimbabwe"}
+  "50002450": {zh: "新喀里多尼亚", martj42: "New Caledonia"}
+  "50003123": {zh: "东帝汶", martj42: "Timor-Leste"}
+  "50004908": {zh: "黑山", martj42: "Montenegro"}
+  "50004909": {zh: "塞尔维亚", martj42: "Serbia"}
+  "50005575": {zh: "直布罗陀", martj42: "Gibraltar"}
+  "50005606": {zh: "马提尼克", martj42: "Martinique"}
+  "50005608": {zh: "荷属圣马丁", martj42: "Sint Maarten"}
+  "50005609": {zh: "瓜德罗普", martj42: "Guadeloupe"}
+  "50005610": {zh: "法属圭亚那", martj42: "French Guiana"}
+  "50006539": {zh: "科摩罗", martj42: "Comoros"}
+  "50012117": {zh: "南苏丹", martj42: "South Sudan"}
+  "50012368": {zh: "科索沃", martj42: "Kosovo"}
