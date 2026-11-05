@@ -1114,3 +1114,28 @@ actions:
     predict: 30
     build_site: 10
     test_push: 2
+
+# 调研别人的足球预测项目（需求文档第 5 节“别人的项目”、6.1“调研别人的项目用的网站”；src/collect/others_review.py）
+# 规则跑之前定死：检索词、每个取几条、请求间隔都在这里，不临时改。
+others_review:
+  raw_subdir: others_review     # 存在 paths.raw 下面这个文件夹（不进 Git）
+  user_agent: "FootballLearningProject/0.1 (personal study; https://github.com/DogRanchKiller/-1.0) python-requests"
+  openalex_url: https://api.openalex.org/works
+  openalex_queries:
+    - football match outcome prediction
+    - soccer match prediction machine learning
+    - football betting market efficiency prediction
+    - soccer prediction ranked probability score
+  openalex_per_query: 15        # 每个检索词按被引次数取前几篇
+  github_search_url: https://api.github.com/search/repositories
+  github_repo_url: https://api.github.com/repos
+  github_queries: [football prediction, soccer prediction]
+  github_per_query: 30          # 每个检索词按星数取前几个
+  arxiv_url: https://arxiv.org
+  max_per_kind: 12              # 论文、项目各最多几个进评分表
+  min_interval_seconds: {openalex: 40, github: 2, arxiv: 15}   # arXiv 的 robots.txt 要求 15 秒；OpenAlex 2 秒一次会被拒（429），40 秒一次没问题（2026-11-05）
+  retry_waits: [60, 180, 600]   # 失败后等几秒再试
+  demo:                         # 第四部分：拿我们自己的数据演示（src/evaluate/others_demo.py，只报告）
+    top_shares: [0.10, 0.05]    # 胜平负只挑把握分最高的几成
+    ou_fixed: [1.5, 2.5, 3.5]   # 大小球固定这几条线
+    output: data/backtest/others_demo.json
