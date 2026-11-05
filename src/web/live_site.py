@@ -48,7 +48,7 @@ import pandas as pd
 from src.common import markets as site_markets
 from src.common.config import resolve_path
 from src.features import open_readonly
-from src.web.site import bots, lifecycle, match, pages
+from src.web.site import bots, lifecycle, match, odds_lead, pages
 from src.web.site import data as site_data
 from src.web.site import picks as pk
 from src.web.site.common import LiveMinutes, TeamFiles, utc_iso
@@ -142,6 +142,7 @@ class Snapshot:
     teams: TeamFiles                         # 每支球队的页面文件名
     team_by_file: dict[str, str]             # 反过来：页面文件名 → 球队
     bots_html: str                           # 虚拟投注页（要读好几个结果文件，提前做好）
+    lead_html: str                           # 盘口联动页（要把所有比赛的变盘记录过一遍，提前做好）
     dqd: dict[str, int]                      # 懂球帝比赛编号（文字）→ 我们的 match_id，只留这次页面里有的比赛
     version: str                             # 数据版本（内容哈希，见 content_version），/api/version 返回它
     stamp: str                               # 读之前那一刻的指纹（文件的修改时间和大小），判断“文件变了没有”用
@@ -354,15 +355,19 @@ class LiveSite:
     def _build(self, stamp: str) -> Snapshot:
         now = self.now()
         data, dqd = self.loader(self.settings, self.db_path, now)
+        lead_html, lead_error = odds_lead.render_checked(data)
+        if lead_error:      # 和生成静态网站一样（src/jobs/build_site.py write_site）
+            data.notes.insert(0, f"盘口联动页出错（{lead_error}），这一页先换成占位页；别的页照常。")
         bots_html, bots_error = bots.render_checked(data)
         if bots_error:      # 和生成静态网站一样（src/jobs/build_site.py write_site）：提示排在首页提示的最前面
             data.notes.insert(0, f"虚拟投注页出错（{bots_error}），这一页先换成占位页；别的页照常。")
         teams = TeamFiles({data.matches[mid][k] for mid in data.page_ids for k in ("home_team", "away_team")})
         by_file = {teams.file(t): t for t in teams.names}
-        # 虚拟投注页、比分参考是直接读文件做的（不在 data 里），把这两样文件的修改时间也算进数据版本
+        # 虚拟投注页、比分参考是直接读文件做的（不在 data 里），把这两样文件的修改时间也算进数据版本；
+        # 盘口联动页看哪些比赛跟着“现在”变（开球后才算进来），也算进去
         extra = [_folder_stamps(self.bots_dir, "bots"), _stamp(self.picks_file) if self.picks_file else None,
-                 sorted(dqd.items()), bots_error]
-        return Snapshot(data=data, teams=teams, team_by_file=by_file, bots_html=bots_html, dqd=dqd,
+                 sorted(dqd.items()), bots_error, lead_error, odds_lead.eligible_checked(data)]
+        return Snapshot(data=data, teams=teams, team_by_file=by_file, bots_html=bots_html, lead_html=lead_html, dqd=dqd,
                         version=content_version(data, extra), stamp=stamp,
                         loaded_at=self.clock(), generated_at=now.astimezone(timezone.utc).isoformat(timespec="seconds"))
 
@@ -397,6 +402,8 @@ class LiveSite:
                     "application/json; charset=utf-8")
         if route == "/bots.html":
             return 200, snap.bots_html, html_type
+        if route == "/odds_lead.html":
+            return 200, snap.lead_html, html_type
         m = MATCH_PAGE.fullmatch(route)
         if m:
             mid = int(m.group(1))

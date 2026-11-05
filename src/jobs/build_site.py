@@ -20,7 +20,7 @@ from src.common.config import load_settings, resolve_path
 from src.features import open_readonly
 from src.jobs.heartbeat import job_run
 from src.web.site import data as site_data
-from src.web.site import bots, lifecycle, match, pages
+from src.web.site import bots, lifecycle, match, odds_lead, pages
 from src.web.site.common import TeamFiles
 
 TMP_NAME, OLD_NAME = "site_tmp_build", "site_old"   # 临时文件夹、换下来的旧网站，和 data/site 放在同一层
@@ -60,10 +60,16 @@ def _swap(tmp: Path, out: Path) -> None:
 def write_site(data: site_data.SiteData, folder: Path, final_dir: Path, problems: dict | None = None) -> dict:
     """把整站写进 folder。final_dir 是最后换上去的位置（算战绩页里周报的相对链接用）。返回每种页面几页（都是数字）。
 
-    problems：给一个空字典，某一页走了兜底时在里面记一项（现在只有 {"虚拟投注页出错": 错误种类}），build 放进摘要最前面。
+    problems：给一个空字典，某一页走了兜底时在里面记一项（{"虚拟投注页出错": 错误种类}、{"盘口联动页出错": 错误种类}），
+    build 放进摘要最前面。
     """
     (folder / "match").mkdir(parents=True)
     (folder / "team").mkdir()
+    # 盘口联动观察页：只用 data.odds（网站已经读进来的变盘记录）。出了意外的错就换成占位页，不影响别的页。
+    # 放在虚拟投注页前面：两页都出错时，虚拟投注页的提示还是排第一（和以前一样；摘要里的两项也是这个顺序）
+    lead_html, lead_error = odds_lead.render_checked(data)
+    if lead_error:
+        data.notes.insert(0, f"盘口联动页出错（{lead_error}），这一页先换成占位页；别的页照常。")
     # 虚拟投注页：只读 site.bots_dir 里机器人历史回测的结果文件；没有结果时这一页写“还没有”，不影响别的页。
     # 先生成它：万一走了兜底（这一页出了意外的错），提示要排在首页提示的最前面（首页最多显示 10 条）
     bots_html, bots_error = bots.render_checked(data)
@@ -71,6 +77,8 @@ def write_site(data: site_data.SiteData, folder: Path, final_dir: Path, problems
         data.notes.insert(0, f"虚拟投注页出错（{bots_error}），这一页先换成占位页；别的页照常。")
         if problems is not None:
             problems["虚拟投注页出错"] = bots_error
+    if lead_error and problems is not None:
+        problems["盘口联动页出错"] = lead_error
     teams = {data.matches[mid][k] for mid in data.page_ids for k in ("home_team", "away_team")}
     files = TeamFiles(teams)
     for mid in sorted(data.page_ids):
@@ -83,7 +91,9 @@ def write_site(data: site_data.SiteData, folder: Path, final_dir: Path, problems
     (folder / "lifecycle.json").write_text(json.dumps(data.lifecycle, ensure_ascii=False, indent=2, allow_nan=False),
                                           encoding="utf-8")
     (folder / "bots.html").write_text(bots_html, encoding="utf-8")
-    return {"首页": 1, "单场页": len(data.page_ids), "球队页": len(teams), "战绩页": 1, "逐场验收页": 1, "虚拟投注页": 1}
+    (folder / "odds_lead.html").write_text(lead_html, encoding="utf-8")
+    return {"首页": 1, "单场页": len(data.page_ids), "球队页": len(teams), "战绩页": 1, "逐场验收页": 1, "虚拟投注页": 1,
+            "盘口联动页": 1}
 
 
 def build(settings: dict | None = None, now: datetime | None = None, db_path: Path | str | None = None,

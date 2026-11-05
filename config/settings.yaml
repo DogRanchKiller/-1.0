@@ -860,6 +860,17 @@ site:
   # 只读 summary.csv、by_season.csv、by_period.csv、bankroll.csv、check.json，不读每注明细 bets.csv；文件不在时页面写“还没有结果”
   bots_dir: data/backtest/bots/bots_v1
 
+# 盘口联动观察页 odds_lead.html（src/web/site/odds_lead.py，需求文档第 8 节“盘口联动观察页怎么算”，写程序之前写下）。
+# 只是观察“赔率明显变动时哪家公司先变、哪家跟着变”，不是预测，不进模型
+odds_lead:
+  since: "2026-10-30 18:12"     # 我们自己的懂球帝快照从这时开始（UTC；以前回补的只有初盘和最新两个点，看不出谁先变）
+  window_hours: 48              # 看开球前多少小时的变动；开球要晚于 since + 这么多小时，整个窗口才都在快照里
+  min_move: 0.02                # 市场线（各家的中位数）变了至少这么多（2 个百分点）才算“明显变动”
+  min_books: 5                  # 窗口开始时至少要有几家公司有价格
+  tolerance_hours: 1            # 比市场早这么多小时以上走到一半 = 先变，晚这么多以上 = 晚变，中间 = 一起变
+  min_matches: 10               # 一家公司算进来不到这么多场，只写场数，不排位置、不下结论
+  recent_rows: 20               # 页面列最近多少次明显变动
+
 # 四个玩法的预测和命中率 picks_v2（src/web/site/picks.py、src/evaluate/picks_reference.py，需求文档第 3 节“四个玩法的预测和命中率”，
 # 算命中率之前写下）。想改规则另起一版，旧的照留（picks_v1 比分只给 1 个，picks_v2 给 4 个，别的一样）
 picks:                           # 规则名写在 src/web/site/picks.py 的 RULE、比分几个写在 SCORE_TOP（历史参考文件里也记着规则名，对不上不用）

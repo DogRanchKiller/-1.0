@@ -153,7 +153,7 @@ def page(title: str, body: str, prefix: str, now: datetime, refresh_minutes: int
     """
     nav = (f"<nav class='top'><span class='brand'>足球预测</span><a href='{e(prefix)}index.html'>即将开赛</a>"
            f"<a href='{e(prefix)}record.html'>战绩</a><a href='{e(prefix)}lifecycle.html'>逐场验收</a>"
-           f"<a href='{e(prefix)}bots.html'>虚拟投注</a></nav>")
+           f"<a href='{e(prefix)}bots.html'>虚拟投注</a><a href='{e(prefix)}odds_lead.html'>盘口联动</a></nav>")
     live = isinstance(refresh_minutes, LiveMinutes)
     minutes = int(refresh_minutes)
     refresh = f'<meta http-equiv="refresh" content="{minutes * 60}">\n' if minutes > 0 else ""
