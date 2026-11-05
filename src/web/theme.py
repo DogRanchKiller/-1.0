@@ -151,6 +151,10 @@ details.more > summary { font-size: 16.5px; }
 /* 2026-11-05：大字是亚盘倾向时，下面一行小一点的字写胜平负那句；首页每场那一格最上面的亚盘倾向（粗字，单独一行） */
 .hero .subhead { font-size: 17px; color: var(--sub); margin: -6px 0 12px; }
 b.lead { display: block; color: var(--text); font-weight: 650; }
+/* 把握等级（picks_v3，2026-11-05）：单场页“四个玩法的预测”表和首页每场那一格。只是字的颜色，不改别的 */
+.tier { font-weight: 650; white-space: nowrap; } .tier-high { color: var(--green); } .tier-mid { color: var(--text); }
+.tier-low { color: var(--sub); }
+.tierline { display: block; margin-top: 4px; }
 .pbar { display: flex; width: 100%; max-width: 220px; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 6px;
         background: var(--line); }
 .pbar.big { max-width: none; height: 30px; border-radius: 8px; margin: 4px 0 8px; }

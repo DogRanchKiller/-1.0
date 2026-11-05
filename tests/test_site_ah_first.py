@@ -93,7 +93,8 @@ def test_match_page_ah_before_1x2(env):
     out, _ = build(env)
     for rel in ("match/1.html", "match/10.html"):
         page = read(out, rel)
-        assert picks_rows(page) == ["让球（亚盘）", "胜平负", "大小球 2.5", "比分 4 个"], rel
+        # picks_v3（2026-11-05）起大小球那一行改看主盘口，行名是“大小球（主盘口）”；顺序照旧亚盘第一
+        assert picks_rows(page) == ["让球（亚盘）", "胜平负", "大小球（主盘口）", "比分 4 个"], rel
         hero = text_of(page[page.index("<div class='card pad hero'>"):page.index("<div class='version-switch'")])
         # 造的数据：亚盘倾向主队 -0.5 胜算 53%；胜平负利物浦 50%
         assert hero.startswith("倾向利物浦让半球赢盘，胜算 53%"), rel

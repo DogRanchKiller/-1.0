@@ -3,7 +3,8 @@
 一页从上到下（2026-11-03 起精简：一眼要看的放上面，细节默认收起）：
 - 结论：一句大字（2026-11-05 起先写亚盘倾向，例“倾向利物浦让半球赢盘，胜算 53%”；没有合格的主盘口才写谁赢的可能更大），
   有亚盘那句时下面一行小一点的字写胜平负那句；再下面一根大号三色概率条 + 信心等级。
-- 四个玩法的预测：让球（亚盘）、胜平负、大小球 2.5 各一个，比分 4 个（2026-11-05 起亚盘排第一），踢完写中没中（规则 picks_v2，src/web/site/picks.py）。
+- 四个玩法的预测：让球（亚盘）、胜平负、大小球（主盘口）各一个，比分 4 个（2026-11-05 起亚盘排第一），每个写把握等级和历史命中率，
+  踢完写中没中（规则 picks_v3，src/web/site/picks.py；战绩页的命中率照旧按 picks_v2 算）。
 - 为什么这样看（src/web/site/story.py）：最多 3 句话；下面收起的是结论链 6 步、四块分析、影响最大的几类因素。
 - 更多数据（点标题展开，<details>，不用脚本）：比分概率热力图和各玩法、各版本对比（简表 + 完整记录）、
   赔率变动图、首发名单、赛后复盘；最后一块“流程记录和技术细节”里是各家公司价格、竞彩、逐场贡献解释完整版、流程记录。
@@ -583,14 +584,18 @@ def tags_html(row: dict) -> str:
 
 
 def picks_html(data: SiteData, mid: int, row: dict) -> str:
-    """结论卡片里的“四个预测”表：让球（亚盘）、胜平负、大小球 2.5 各一个，比分 4 个（规则 picks_v2，src/web/site/picks.py）。
+    """结论卡片里的“四个预测”表：让球（亚盘）、胜平负、大小球（主盘口）各一个，比分 4 个（规则 picks_v3，src/web/site/picks.py）。
     从上到下按 pk.DISPLAY_ORDER 排（2026-11-05 起亚盘排第一，只是显示顺序；算命中率、接口还是 pk.MARKETS 的顺序）。
-    踢完了写中没中；“预测”只是哪个更可能，不是值得买。"""
+    “把握”一列：胜平负、大小球、比分写高 / 中 / 低和这一档的历史命中率（settings.yaml picks_v3）；让球不分档，写总的历史命中率。
+    “模型自己”一列不分档；让球、大小球只写方向（模型在这两个玩法上写的胜算历史上偏高）。
+    踢完了写中没中；“预测”只是哪个更可能，不是值得买。战绩页的命中率照旧按 picks_v2 算（大小球固定 2.5 球），表下写明。"""
     from src.web.site import picks as pk
 
     info = data.matches[mid]
     home, away = data.zh(info["home_team"]), data.zh(info["away_team"])
-    ps, mine = pk.match_picks(row, data.settings), pk.model_picks(row, data.settings)
+    s = data.settings
+    ps = pk.match_picks_v3(row, s)
+    mine = pk.model_picks_v3(row, s, ps["ou"]["line"] if ps["ou"] else None)
     score = data.results.get(mid)
     got = pk.before_kickoff(data, mid) if score else None
     # 踢完了但这一版不算进战绩页的命中率：开球时间读不出来，或这一版开球以后才出（理论上不该有）
@@ -600,20 +605,38 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
         late = "这场的开球时间不明，不算进战绩页的命中率。"
     else:
         late = "这一版是开球以后才出的，不算进战绩页的命中率。"
+    over = s["picks_v3"]["model_overstated"]
     rows = []
     for k in pk.DISPLAY_ORDER:
-        q = mine[k]
-        own = ("—" if q is None else f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>{pct0(q['p'])}</span>"
-               + (f" {pk.outcome_html(pk.settle(k, q, score))}" if score else ""))
-        rows.append([e(pk.MARKET_NAMES[k]), f"<b>{e(pk.pick_text(k, ps[k], home, away))}</b>", pk.prob_html(k, ps[k]),
-                     pk.outcome_html(pk.settle(k, ps[k], score)) if score else "<span class='muted'>还没踢</span>", own])
-    note = ("<p class='small muted'>每个玩法写最可能的那一边，踢完记中没中，汇总在<a href='../record.html'>战绩页</a>。"
+        q, mk = mine[k], ps[k]
+        if q is None:
+            own = "—"
+        elif q.get("overstated"):
+            # 让球、大小球：只写方向，不写胜算（SEL：模型高档写 61% / 57%，实际五五开左右）
+            own = (f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>只写方向：模型写的胜算历史上偏高"
+                   f"（高档写 {pk.rate1(over[k]['written'])}，实际 {pk.rate1(over[k]['actual'])}）</span>")
+        else:
+            own = f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>{pct0(q['p'])}</span>"
+        if q is not None and score:
+            own += f" {pk.outcome_html(pk.settle(k, q, score))}"
+        what = f"<b>{e(pk.pick_text(k, mk, home, away))}</b>"
+        if k == "ou" and mk is not None and mk.get("line_from") == "推算":
+            what += " <span class='small muted'>这一版没存主盘口，按概率推出来的线</span>"
+        if k in ("ou", "score") and mk is not None and mk.get("matrix") == "重算":
+            what += " <span class='small muted'>按存的赔率概率重算</span>"
+        rows.append([e(pk.MARKET_NAMES_V3[k]), what, pk.prob_html(k, mk), pk.tier_html(k, mk, s),
+                     pk.outcome_html(pk.settle(k, mk, score)) if score else "<span class='muted'>还没踢</span>", own])
+    note = ("<p class='small muted'>每个玩法写最可能的那一边，踢完记中没中。"
             "让球：-0.5 = 要赢 1 球以上才算中，+0.5 = 不输就算中；四分之一球会有赢半、输半，整数球打平会走盘。"
+            "大小球看开的公司最多的那条主盘口（出这一版时存下的），不再固定 2.5 球。"
             "比分写 121 个比分里可能性最大的 4 个，实际比分是其中一个就算中；4 个合起来一般也只有四成左右，里面常常有平局的比分，和胜平负的预测不一样（平局集中在 1–1、0–0 几格）。"
-            "“模型自己”是只用我们自己的模型、不看赔率时的预测（有赔率时前面的预测用赔率算出来的概率，历史上赔率更准；这一版没用上赔率时两列一样），两列不一样时可以对比着看。</p>")
+            f"“把握”：同样这么写的预测，历史上（{e(pk.test_seasons_text(s))}、{int(s['picks_v3']['test_n']):,} 场）这一档中了几成；"
+            "只说明以前中了几成，不说明赔率划算。让球分不开，不分档。"
+            "“模型自己”是只用我们自己的模型、不看赔率时的预测（有赔率时前面的预测用赔率算出来的概率，历史上赔率更准；这一版没用上赔率时两列一样），两列不一样时可以对比着看。"
+            "<a href='../record.html'>战绩页</a>的命中率照旧按原来的规则算（大小球固定 2.5 球），和这里的主盘口不一定是同一条线。</p>")
     if late:
         note = f"<p class='note'>{late}</p>" + note
-    return table(["玩法", "预测", "可能性", "结果", "模型自己"], rows, "picks") + note
+    return table(["玩法", "预测", "可能性", "把握（历史命中）", "结果", "模型自己"], rows, "picks") + note
 
 
 def tech_line(row: dict) -> str:

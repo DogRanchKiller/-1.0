@@ -520,6 +520,7 @@ class LiveSite:
         return 200, {"data_version": snap.version, "generated_at": snap.generated_at, **self._head(data, mid),
                      "latest": self._latest(data, mid),
                      "picks": self._picks(data, mid, latest[1]) if latest else None,
+                     "picks_v3": self._picks_v3(data, mid, latest[1]) if latest else None,   # 2026-11-05 新加（把握等级），上面的 picks 不变
                      "versions": [self._version(data, r) for r in rows]}
 
     @staticmethod
@@ -540,7 +541,8 @@ class LiveSite:
 
     @staticmethod
     def _latest(data: site_data.SiteData, mid: int) -> dict | None:
-        """最新一版的结论（首页“最新一版的结论”那一格）。还没有预测是 None。"""
+        """最新一版的结论（首页“最新一版的结论”那一格）。还没有预测是 None。
+        tiers（2026-11-05 新加）：胜平负、大小球（主盘口）、比分的把握等级 high / mid / low，不分档是 None（picks_v3）。"""
         lt = data.latest(mid)
         if lt is None:
             return None
@@ -548,7 +550,8 @@ class LiveSite:
         p, src = final_probs(row)
         return {"kind": kind, "kind_name": version_name(kind), "cutoff_utc": utc_iso(row.get("cutoff_utc")),
                 "probs": [_num(x) for x in p], "source": "fusion" if src == "融合" else "model",
-                "confidence": level(row) if isinstance(level(row), int) else None, "leans": leans(row)}
+                "confidence": level(row) if isinstance(level(row), int) else None, "leans": leans(row),
+                "tiers": pk.tier_codes(pk.match_picks_v3(row, data.settings))}
 
     @staticmethod
     def _version(data: site_data.SiteData, row: dict) -> dict:
@@ -593,3 +596,42 @@ class LiveSite:
             return out
 
         return {"pick": {k: one(k, ps[k]) for k in pk.MARKETS}, "model": {k: one(k, mine[k]) for k in pk.MARKETS}}
+
+    @staticmethod
+    def _picks_v3(data: site_data.SiteData, mid: int, row: dict) -> dict:
+        """单场页“四个玩法的预测”（规则 picks_v3，2026-11-05 新加；上面 _picks 的 picks_v2 照旧）。
+        pick：每个玩法 text、p、source、outcome、side / line / scores（和 picks 一样），再加 tier（high / mid / low / None）、
+          tier_rate（这一档的历史命中率；让球是总的命中率）、tier_n（几场）；大小球加 line_from（主盘口从哪来：存档 / 推算）。
+        model：“模型自己”一列，不分档；让球、大小球加 overstated: true（模型在这两个玩法上写的胜算历史上偏高，页面上只写方向）。
+        seasons：历史命中率是哪几季的（开始年份）。"""
+        m = data.matches[mid]
+        home, away = data.zh(m["home_team"]), data.zh(m["away_team"])
+        score = data.results.get(mid)
+        s = data.settings
+        ps = pk.match_picks_v3(row, s)
+        mine = pk.model_picks_v3(row, s, ps["ou"]["line"] if ps["ou"] else None)
+
+        def one(market: str, q: dict | None, model: bool) -> dict | None:
+            if q is None:
+                return None
+            out = {"text": pk.pick_text(market, q, home, away), "p": _num(q.get("p")), "source": q.get("source"),
+                   "outcome": pk.settle(market, q, score) if score else None, "tier": q.get("tier")}
+            if market == "score":
+                out["scores"] = [[int(h), int(a)] for h, a in q["scores"]]
+            else:
+                out["side"] = int(q["side"]) if market == "1x2" else q["side"]
+                out["line"] = _num(q["line"], 2) if "line" in q else None
+            if model:
+                out["overstated"] = bool(q.get("overstated"))
+                return out
+            info = pk.tier_info(market, q, s)
+            if market == "ah":
+                info = {"rate": float(s["picks_v3"]["ah_all"]["rate"]), "n": int(s["picks_v3"]["ah_all"]["n"])}
+            out["tier_rate"] = _num(info["rate"], 4) if info else None
+            out["tier_n"] = info["n"] if info else None
+            if market == "ou":
+                out["line_from"] = q.get("line_from")
+            return out
+
+        return {"rule": pk.RULE_V3, "seasons": [int(x) for x in s["picks_v3"]["test_seasons"]],
+                "pick": {k: one(k, ps[k], False) for k in pk.MARKETS}, "model": {k: one(k, mine[k], True) for k in pk.MARKETS}}
