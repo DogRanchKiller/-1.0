@@ -10,3 +10,4 @@ beautifulsoup4  # 读维基百科网页（HTML）：杯赛比赛框和表格、�
 lxml        # beautifulsoup4 用的 HTML 解析器，比自带的快、容错好
 matplotlib  # 画图：学习小分析（xG 射门图、运气回归散点图）
 lightgbm    # 梯度提升树（需求文档第 4 节步骤 6）：用比赛前能知道的特征预测两队进球
+torch       # 深度学习（PyTorch，CPU 版）：复现 Yeung 等 2024 的 Transformer + 多层感知机（需求文档第 5 节“别人的项目”），只做研究，不上线
