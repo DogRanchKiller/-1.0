@@ -86,10 +86,9 @@ def tournament_group(name: str, cfg: dict) -> str:
 
 
 def venues(fs: FeatureStore, cutoff: str, cfg: dict) -> pd.DataFrame:
-    '''每场 INT 比赛的中立场和赛事名（取数层 match_venues：赛程，赛前就能知道），只要 venue_source 那个来源。'''
-    if not hasattr(fs, 'match_venues'):
-        raise RuntimeError('取数层还没有 match_venues（工作树 INA 加的），合并 INA 以后再跑')
-    v = fs.match_venues(cutoff, cfg['usage'], competition=cfg['competition'])
+    '''每场 INT 比赛的中立场和赛事名（取数层 match_venues：赛程，赛前就能知道），只要 venue_source 那个来源。
+    只要最早开球在 cutoff 之前的（和要预测的名单同一个终点）：开发模式下碰不到 2024 年起的比赛。'''
+    v = fs.match_venues(cutoff, cfg['usage'], competition=cfg['competition'], until=cutoff)
     v = v[v['source'] == cfg['venue_source']]
     if v['match_id'].duplicated().any():
         raise ValueError('match_venue 里同一场比赛同一个来源有两行')
@@ -113,7 +112,7 @@ def run(settings: dict | None = None, db_path=None, first: int | None = None, la
     t0 = time.perf_counter()
     fs = store or FeatureStore(open_readonly(db_path), '开发', s)
     if comp not in fs.leagues:
-        raise RuntimeError(f'settings 的 leagues 里还没有 {comp}（工作树 INA 加 intl 组），合并 INA 以后再跑')
+        raise RuntimeError(f'settings 的 leagues 里没有 {comp}（leagues 的 intl 组）')
     horizon = float(cfg['horizon_hours'])
     after = pd.Timedelta(hours=float(s['backtest']['eval_after_kickoff_hours']))
     # 两个终点：

@@ -667,13 +667,14 @@ class FeatureStore:
 
     VENUE_COLUMNS = ["match_id", "source", "neutral", "city", "country", "tournament"]
 
-    def match_venues(self, cutoff, usage: str, competition=None, since=None) -> pd.DataFrame:
+    def match_venues(self, cutoff, usage: str, competition=None, since=None, until=None) -> pd.DataFrame:
         """比赛场地：是不是中立场、城市、国家、赛事名（表 match_venue；第 11 阶段国际赛加，现在只有来源 martj42）。
 
         数据字典“比赛场地”：什么时候能知道 = 赛程（赛前就知道在哪踢、是不是中立场），用途和“比赛信息”一样。
         所以和赛程一样，截止时间之前、之后的比赛都返回（本场的场地赛前就能用）；截止时间照样要给、照样检查写法。
         用途对“以前的比赛”“本场”两个范围都要允许才行（这张表两种比赛都有）。
-        competition：只要这些赛事（例如 'INT'）；since：只要最早开球时间 ≥ 这个时间的比赛。
+        competition：只要这些赛事（例如 'INT'）；since：只要最早开球时间 ≥ 这个时间的比赛；
+        until：只要最早开球时间 < 这个时间的比赛（和 prediction_targets 的 end 一样；开发模式用它挡住期末考试赛季的比赛）。
         运行模式照样按赛季检查：开发模式取到期末考试赛季的比赛就报错（不悄悄删掉）。
         返回列：match_id, source, neutral（1 = 中立场）, city, country, tournament，按 match_id、source 排。
         数据库里还没有 match_venue 表（还没导过国际赛的旧库）时：返回同样几列的空表，不报错（只读，不建表）。
@@ -693,6 +694,9 @@ class FeatureStore:
         if since is not None:
             where.append("k.kickoff_earliest_utc >= ?")
             params.append(to_utc_text(since))
+        if until is not None:
+            where.append("k.kickoff_earliest_utc < ?")
+            params.append(to_utc_text(until))
         sql = f"""
             select v.match_id, v.source, v.neutral, v.city, v.country, v.tournament, m.season, k.season_role
             from match_venue v join matches m using (match_id) join temp.{self._kt} k using (match_id)

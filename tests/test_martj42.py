@@ -306,7 +306,7 @@ def test_match_venues(env, settings):
 
 
 def test_match_venues_exam_season_locked(env, settings):
-    """开发模式取到期末考试赛季的场地：报错（不悄悄删掉）。"""
+    """开发模式取到期末考试赛季的场地：报错（不悄悄删掉）；until 把它挡在外面就不报错。"""
     con, folder = env
     imp.run(con, settings, folder)
     with con:
@@ -317,6 +317,9 @@ def test_match_venues_exam_season_locked(env, settings):
     fs = FeatureStore(con, "开发", settings)
     with pytest.raises(SeasonLockedError):
         fs.match_venues("2000-01-01", "研究实验")
+    v = fs.match_venues("2000-01-01", "研究实验", until="2024-01-01")   # 只要最早开球在 2024-01-01 之前的
+    assert len(v) == 5
+    assert len(fs.match_venues("2000-01-01", "研究实验", until="2011-01-01")) == 2
 
 
 def test_match_venues_without_table(tmp_path, settings):

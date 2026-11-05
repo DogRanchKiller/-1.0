@@ -8,14 +8,7 @@
   - 研究程序在手造数据库上从头跑到尾；不偷看（改掉截止时间以后的比分，之前的预测一点不变）；
     格子固定（--first 不同，同一场的预测一样）；开发模式碰 2024 年就报错。
 
-INA 合并前的临时做法（合并后改用真的）：
-  - match_venue 表：INA 合并前的临时建表，合并后改用 schema（create_tables 会建）。
-  - day_world 的“什么时候能知道”：先在这里替 known_time.compute_known_times 补上（规则是和 INA 约好的：
-    最早开球 = 前一天 10:00 UTC，最晚开球 = 后一天 12:00 UTC，比分能知道 = 最晚开球 + 3 小时）；
-    INA 合并后去掉替身，用取数层自己的。
-  - 取数层的 match_venues：先在这里放一个替身（返回 match_id、source、neutral、city、country、tournament）；
-    INA 合并后去掉替身，用取数层自己的。
-  - settings 的 leagues 加 intl: {INT: 国际赛}：先在测试里复制一份设置加上；INA 合并后设置里本来就有。
+match_venue 表、'day_world' 的“什么时候能知道”、取数层 match_venues、settings 的 leagues.intl 都用 INA 合并进来的真东西。
 '''
 import copy
 import sqlite3
@@ -24,7 +17,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import src.features.store as store_mod
 from src.clean.schema import create_tables
 from src.common.config import load_settings
 from src.evaluate import intl_study
@@ -138,57 +130,11 @@ def test_logit_uses_only_official_before_cutoff():
     assert e.predict('A', 'B', False) is None
 
 
-# ======================= INA 合并前的替身 =======================
-_real_compute_known_times = store_mod.compute_known_times
-
-
-def _known_times_with_day_world(matches: pd.DataFrame, feature_settings: dict) -> pd.DataFrame:
-    '''替身：day_world 的比赛按和 INA 约好的规则算；其余照取数层原来的算。INA 合并后去掉，用取数层自己的。'''
-    out = _real_compute_known_times(matches, feature_settings)
-    if 'date_precision' not in matches.columns:
-        return out
-    w = (matches['date_precision'] == 'day_world').to_numpy()
-    if w.any():
-        d = pd.to_datetime(matches.loc[w, 'match_date'], format='%Y-%m-%d')
-        earliest, latest = d - pd.Timedelta(hours=14), d + pd.Timedelta(hours=36)   # 前一天 10:00、后一天 12:00（UTC）
-        out.loc[w, 'kickoff_earliest_utc'] = earliest.dt.strftime(TIME_FORMAT).to_numpy()
-        out.loc[w, 'kickoff_latest_utc'] = latest.dt.strftime(TIME_FORMAT).to_numpy()
-        out.loc[w, 'close_known_utc'] = latest.dt.strftime(TIME_FORMAT).to_numpy()
-        out.loc[w, 'result_known_utc'] = (latest + pd.Timedelta(hours=3)).dt.strftime(TIME_FORMAT).to_numpy()
-    return out
-
-
-def _match_venues_stand_in(self, cutoff, usage, competition=None, since=None) -> pd.DataFrame:
-    '''替身：取数层的 match_venues（赛程信息，最早开球在截止时间之前的比赛）。INA 合并后去掉，用取数层自己的。'''
-    from src.features.known_time import to_utc_text
-    self.usage.check('比赛信息', '本场', usage)
-    sql = (f'select v.match_id, v.source, v.neutral, v.city, v.country, v.tournament, k.season_role, m.season '
-           f'from match_venue v join matches m using (match_id) join temp.{self._kt} k using (match_id) '
-           f'where k.kickoff_earliest_utc <= ?')
-    params = [to_utc_text(cutoff)]
-    if competition is not None:
-        sql += ' and m.competition = ?'
-        params.append(competition)
-    if since is not None:
-        sql += ' and k.kickoff_earliest_utc >= ?'
-        params.append(to_utc_text(since))
-    df = pd.read_sql(sql + ' order by v.match_id', self.conn, params=params)
-    return self._check_rows_mode(df, usage).drop(columns='season')
-
-
-@pytest.fixture(scope='module', autouse=True)
-def ina_stand_ins():
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(store_mod, 'compute_known_times', _known_times_with_day_world)
-        mp.setattr(FeatureStore, 'match_venues', _match_venues_stand_in, raising=False)
-        yield
-
-
 @pytest.fixture(scope='module')
 def settings():
-    '''复制一份设置：leagues 加 intl（INA 合并后设置里本来就有），intl_study 换成测试用的小分档、小门槛。'''
+    '''复制一份设置：intl_study 换成测试用的小分档、小门槛（leagues.intl 设置里本来就有）。'''
     s = copy.deepcopy(load_settings())
-    s['leagues']['intl'] = {'INT': '国际赛'}
+    assert s['leagues']['intl'] == {'INT': '国际赛'}
     c = s['intl_study']
     c['k_by_tournament'] = copy.deepcopy(K_TEST)
     c['tournament_groups'] = {'世界杯': ['FIFA World Cup'], '预选赛': ['Test Cup qualification']}
@@ -237,9 +183,6 @@ def build_db(path, m: pd.DataFrame, seed: int = 11) -> None:
     rng = np.random.default_rng(seed)
     con = sqlite3.connect(path)
     create_tables(con)
-    # INA 合并前的临时建表，合并后改用 schema
-    con.execute('create table if not exists match_venue (match_id integer not null, source text not null, '
-                'neutral integer not null, city text, country text, tournament text not null, primary key (match_id, source))')
     con.executemany('insert into teams (team_id, country) values (?, ?)', [(t, 'World') for t in TEAMS])
     con.executemany('insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc,'
                     ' status, round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
