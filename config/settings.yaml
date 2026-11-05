@@ -600,6 +600,278 @@ kor_study:                    # 韩K 开发回测和标杆比，同一个程序 
     - {league: 五大联赛, model: dyn_q1e5_b01, bench: 平博收盘, n: 18085, model_ll: 0.98187, bench_ll: 0.9643, source: 第 4 节步骤 6}
     - {league: 五大联赛, model: gb_l7, bench: 平博收盘, n: 18085, model_ll: 0.97884, bench_ll: 0.96429, source: 第 4 节步骤 6}
 
+intl_study:                   # 第 11 阶段：国际赛开发回测（国家队 Elo vs 懂球帝多家平均收盘；中立场比较），只是研究，不上线
+  title: 国际赛开发回测：国家队 Elo 和多家平均收盘、中立场加不加主场优势
+  # 运行（工作树 INC）：python -m src.evaluate.intl_study；快速试跑 --first 2021 --last 2021
+  competition: INT            # 国际赛在 matches 里的赛事代码（INA 加进 leagues.intl）
+  usage: 研究实验             # 取以前的比分用这个用途（只在开发模式）
+  score_source: martj42       # 比分只认这个来源（match_stats.source）
+  venue_source: martj42       # 中立场、赛事名只认这个来源（match_venue.source）
+  benchmark_source: dongqiudi-intl   # 标杆赔率只认这个来源（INB 导的懂球帝国际赛）
+  benchmark_bookmaker: 多家平均      # 标杆：多家平均收盘胜平负，按 backtest.benchmark_devig_method 去水
+  # K（比赛的分量），按维基百科 World Football Elo Ratings 的分档：
+  #   60 世界杯、奥运会（1908–1980）；50 洲际锦标赛和洲际之间的比赛；40 世界杯和洲际锦标赛预选赛、大赛；
+  #   30 其他所有赛事；20 友谊赛。
+  # 每个赛事名都要写进一档；数据里出现没写进来的赛事名，程序直接报错，不猜。
+  # 名单：martj42 results.csv（data/raw/martj42/2026-11-05，1872-11-30 到 2026-10-06，49,940 场）里的全部 225 个赛事名。
+  # 拿不准的（按字面归档，以后有依据再改）：
+  #   欧国联、中北美国联（含预选）放 40：维基百科没点名，它们连着欧洲杯、金杯赛的资格，按“大赛”算；
+  #   Olympic Games 放 60：数据里只有 1908–1928 年的，都在维基百科写的 1908–1980 以内；
+  #   CONCACAF Championship 放 50（金杯赛以前的名字），CONMEBOL–UEFA Cup of Champions 放 50（洲际之间的比赛）；
+  #   CFU Caribbean Cup、UNCAF Cup 放 30（它们有几届也算金杯赛资格，但本身是次区域赛）；
+  #   Asian Games、CCCF Championship、Pan American Championship、Intercontinental Cup（印度办的邀请赛）、Arab Cup 都放 30。
+  k_by_tournament:
+    60:
+      - FIFA World Cup
+      - Olympic Games
+    50:
+      - UEFA Euro
+      - Copa América
+      - African Cup of Nations
+      - AFC Asian Cup
+      - Gold Cup
+      - CONCACAF Championship
+      - Oceania Nations Cup
+      - Confederations Cup
+      - CONMEBOL–UEFA Cup of Champions
+    40:
+      - FIFA World Cup qualification
+      - UEFA Euro qualification
+      - Copa América qualification
+      - African Cup of Nations qualification
+      - AFC Asian Cup qualification
+      - Gold Cup qualification
+      - CONCACAF Championship qualification
+      - Oceania Nations Cup qualification
+      - UEFA Nations League
+      - CONCACAF Nations League
+      - CONCACAF Nations League qualification
+    30:
+      - ABCS Tournament
+      - AFC Challenge Cup
+      - AFC Challenge Cup qualification
+      - AFC Solidarity Cup
+      - AFF Championship
+      - AFF Championship qualification
+      - Afghanistan Republic Day Festival Cup
+      - African Friendship Games
+      - Afro-Asian Games
+      - Al Ain International Cup
+      - All-African Games
+      - Amílcar Cabral Cup
+      - Arab Cup
+      - Arab Cup qualification
+      - ASEAN Championship
+      - ASEAN Championship qualification
+      - Asian Games
+      - Atlantic Cup
+      - Atlantic Heritage Cup
+      - Australia Bicentenary Gold Cup
+      - Balkan Cup
+      - Baltic Cup
+      - Bangabandhu Cup
+      - Bangladesh President's Gold Cup
+      - Beijing International Friendship Tournament
+      - Benedikt Fontana Cup
+      - Bolivarian Games
+      - Brazil Independence Cup
+      - British Home Championship
+      - CAFA Nations Cup
+      - Canadian Shield
+      - CCCF Championship
+      - CECAFA Cup
+      - Central American and Caribbean Games
+      - Central European International Cup
+      - CFU Caribbean Cup
+      - CFU Caribbean Cup qualification
+      - China Cup
+      - Columbus Cup
+      - CONCACAF Series
+      - CONIFA Africa Football Cup
+      - CONIFA Asia Cup
+      - ConIFA Challenger Cup
+      - CONIFA European Football Cup
+      - CONIFA South America Football Cup
+      - CONIFA World Cup qualification
+      - CONIFA World Football Cup
+      - CONIFA World Football Cup qualification
+      - Copa Artigas
+      - Copa Bernardo O'Higgins
+      - Copa Carlos Dittborn
+      - Copa Chevallier Boutell
+      - Copa Confraternidad
+      - Copa del Pacífico
+      - Copa Félix Bogado
+      - Copa Juan Pinto Durán
+      - Copa Lipton
+      - Copa Newton
+      - Copa Oswaldo Cruz
+      - Copa Paz del Chaco
+      - Copa Premio Honor Argentino
+      - Copa Premio Honor Uruguayo
+      - Copa Ramón Castilla
+      - Copa Rio Branco
+      - Copa Roca
+      - Corsica Cup
+      - COSAFA Cup
+      - COSAFA Cup qualification
+      - Coupe de l'Outre-Mer
+      - CTFA International Tournament
+      - Cup of Ancient Civilizations
+      - Cyprus International Tournament
+      - Dakar Tournament
+      - Diamond Jubilee International Football Tournament
+      - Dragon Cup
+      - Dunhill Cup
+      - Dynasty Cup
+      - EAFF Championship
+      - EAFF Championship qualification
+      - East Asian Games
+      - ELF Cup
+      - Far Eastern Championship Games
+      - FAS Tri-Nations Series
+      - FIFA 75th Anniversary Cup
+      - FIFA ASEAN Challenge Cup
+      - FIFA ASEAN Cup
+      - FIFA Series
+      - FIFI Wild Cup
+      - Four Nations Tournament
+      - Four Nations' Cup
+      - Fuchs International Tournament
+      - GaNEFo
+      - Great Wall Cup
+      - Guangzhou International Friendship Tournament
+      - Gulf Cup
+      - Hungary Heritage Cup
+      - Indian Ocean Island Games
+      - Indonesian Independence Cup
+      - Inter Games
+      - Inter-Allied Games
+      - Intercontinental Cup
+      - International Friendship Championship
+      - International Tournament of Peoples, Cultures and Tribes
+      - Iran International Tournament
+      - Island Games
+      - Jakarta Anniversary Tournament
+      - Joe Robbie Cup
+      - Jordan International Tournament
+      - King Hassan II Tournament
+      - King's Cup
+      - Kirin Challenge Cup
+      - Kirin Cup
+      - Korea Cup
+      - KTFF 50th Anniversary Cup
+      - Kuneitra Cup
+      - LG Cup
+      - Los Angeles Nations Cup
+      - Lunar New Year Cup
+      - Mahinda Rajapaksa Cup
+      - Malta International Tournament
+      - Mapinduzi Cup
+      - Maple Cup
+      - Marianas Cup
+      - Marlboro Cup
+      - Matthews Cup
+      - Mauritius Four Nations Cup
+      - Mediterranean Cup
+      - Melanesia Cup
+      - Merdeka Tournament
+      - Merlion Cup
+      - Miami Cup
+      - Millennium Cup
+      - Morocco, Capital of African Football
+      - MSG Prime Minister's Cup
+      - Mukuru 4 Nations
+      - Mundialito
+      - Muratti Vase
+      - NAFC Championship
+      - NAFU Championship
+      - Nations Cup
+      - Navruz Cup
+      - Nehru Cup
+      - Niamh Challenge Cup
+      - Nile Basin Tournament
+      - Nordic Championship
+      - Open International Championship
+      - OSN Cup
+      - Outrigger Challenge Cup
+      - Pacific Games
+      - Pacific Mini Games
+      - Palestine Cup
+      - Palestine International Championship
+      - Pan American Championship
+      - Peace Cup
+      - Philippine Peace Cup
+      - Phillip Seaga Cup
+      - President's Gold Cup International Tournament
+      - Prime Minister's Cup
+      - Quaid-e-Azam International Tournament
+      - Real Madrid 75th Anniversary Cup
+      - Rous Cup
+      - SAFF Cup
+      - Scania 100 Tournament
+      - Simba Tournament
+      - SKN Football Festival
+      - Soccer Ashes
+      - South Asian Games
+      - South Asian Super Cup
+      - South Pacific Games
+      - South Pacific Mini Games
+      - Southeast Asian Games
+      - Southeast Asian Peninsular Games
+      - Superclásico de las Américas
+      - Taça das Nações
+      - The Other Final
+      - Three Nations Cup
+      - TIFOCO Tournament
+      - Tournament Burkina Faso
+      - Tournoi de France
+      - Trans-Tasman Cup
+      - Tri Nation Tournament
+      - Tri-Nation Series
+      - Tri-Nations Cup
+      - Tri-Nations Series
+      - Tynwald Hill Tournament
+      - U.S.A. Bicentennial Cup Tournament
+      - UDEAC Cup
+      - Umbro Cup
+      - UNCAF Cup
+      - UNIFFAC Cup
+      - United Arab Emirates Friendship Tournament
+      - Unity Cup
+      - USA Cup
+      - VFF Cup
+      - Vietnam Independence Cup
+      - Viva World Cup
+      - WAFF Championship
+      - West African Cup
+      - Windward Islands Tournament
+      - World Unity Cup
+      - Zambian Independence Tournament
+      - Évence Coppée Trophy
+    20:
+      - Friendly
+  tournament_groups:          # 报告里按赛事分组（只看看），没写进来的算“其他”
+    世界杯: [FIFA World Cup]
+    洲际杯: [UEFA Euro, Copa América, African Cup of Nations, AFC Asian Cup, Gold Cup, Oceania Nations Cup, Confederations Cup]
+    预选赛: [FIFA World Cup qualification, UEFA Euro qualification, Copa América qualification, African Cup of Nations qualification, AFC Asian Cup qualification, Gold Cup qualification, Oceania Nations Cup qualification]
+    欧国联: [UEFA Nations League, CONCACAF Nations League, CONCACAF Nations League qualification]
+  home_advantage: 100         # 主场优势（评分点），中立场 intl_elo 不加、intl_elo_home 照加
+  start_rating: 1500          # 第一次出现的队的起始分
+  round_points: true          # 每场加减的分 P 先四舍五入到整数再改评分（维基百科这样写）
+  refit_days: 7               # 每 7 天一格：更新评分、重新拟合有序 logit
+  grid_anchor: '2000-01-03'   # 格子从这一天（星期一 00:00 UTC）算起，往前往后每 7 天一格；固定，不管从哪年开始跑
+  fit_years: 8                # 有序 logit 用截止时间前 8 年的正式比赛（不含友谊赛）
+  min_fit_n: 200              # 拟合用的比赛少于这么多场不出预测（数据开头那几年）
+  friendly_tournament: Friendly   # 友谊赛：照样更新评分，但不打分、不进有序 logit
+  horizon_hours: 24           # T-24
+  main_years: [2021, 2023]    # 主比较：intl_elo vs 多家平均（这几年的正式比赛）
+  neutral_years: [2010, 2023] # 中立场比较：intl_elo vs intl_elo_home（这几年的全部正式比赛）
+  min_total_n: 1000           # 合计少于这么多场：只列数，不下结论
+  min_year_n: 100             # 一年少于这么多场：标“样本少”
+  output: data/reports/国际赛_开发回测对比.md       # 报告（data/ 不进 Git）
+  predictions: data/backtest/intl_study/predictions.csv   # 逐场预测（data/ 不进 Git）
+
 disagree_study:               # 模型和赔率意见不一样时谁准 src/evaluate/disagree_study.py（需求文档第 4 节“模型和赔率意见不一样时谁准”，跑之前写下，不临时加）
   # 读哪次开发回测：W9 那次（gb_l7，五大联赛 2005/06–2023/24，T-24）。三个文件从工作树 W9 原样复制到这里，sha256 见结果的 run_info.json（只读）。
   # 要 predictions.csv（gb_l7 和 pinnacle_close 的逐场概率）、fusion_odds.csv（经取数层取的 T-24 赛前赔率，已去水）、run_info.json
