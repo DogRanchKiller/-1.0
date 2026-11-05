@@ -4,7 +4,7 @@ r"""国际赛（国家队）懂球帝赔率导入数据库（需求文档第 4 �
 kickoff_utc 空着，date_precision 'day_world'，round = 'YYYY-MM-DD'，leg 0，比分在 match_stats 来源 martj42）。
 这个程序不新建比赛、不改比赛表、不写比分，只把懂球帝的赔率挂到这些比赛上。
 
-运行：.venv\Scripts\python -m src.clean.dongqiudi_intl_import              （要等 INA 合并、INT 比赛进了数据库以后）
+运行：.venv\Scripts\python -m src.clean.dongqiudi_intl_import              （INT 比赛要先由 src.clean.martj42_import 导进数据库）
       .venv\Scripts\python -m src.clean.dongqiudi_intl_import --db 别的数据库文件 --twice
       .venv\Scripts\python -m src.clean.dongqiudi_intl_import --suggest results.csv   （只列队名对照候选，不写数据库）
 可以反复运行：每次都从原始层整批重导来源 dongqiudi-intl 的行；同一批原始文件导两次，结果完全一样。
@@ -360,7 +360,7 @@ def run(con: sqlite3.Connection, settings: dict, raw: Path | None = None, teams_
     comp = cfg["competition"]
     registered = {c for g in settings["leagues"].values() for c in g}
     if comp not in registered:
-        raise ValueError(f"{comp} 没有登记在 settings.yaml 的 leagues 里（INA 合并以后才有）")
+        raise ValueError(f"{comp} 没有登记在 settings.yaml 的 leagues 里")
     raw = raw or resolve_path(settings["paths"]["raw"])
     create_tables(con)
     if not con.execute("select 1 from matches where competition = ? limit 1", (comp,)).fetchone():

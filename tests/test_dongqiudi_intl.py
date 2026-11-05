@@ -28,9 +28,9 @@ UTC = timezone.utc
 # ---------- 合成的设置、页面、文件 ----------
 @pytest.fixture
 def settings():
-    """真的 settings 拷一份，换成两个小赛事；INT 登记进 leagues（INA 合并以后真的 settings 里才有）。"""
+    """真的 settings 拷一份，换成两个小赛事（INT 在 leagues 的 intl 组里，INA 合并进来的）。"""
     s = copy.deepcopy(load_settings())
-    s["leagues"] = dict(s["leagues"], intl={"INT": "国际赛"})
+    assert s["leagues"]["intl"] == {"INT": "国际赛"}
     s["dongqiudi_intl"] = dict(s["dongqiudi_intl"], competitions={
         "INT_WC": {"cid": 61, "seasons": {"2022": 501}},
         "INT_Q": {"cid": 207, "seasons": {"2026": 502}}})
@@ -248,11 +248,7 @@ def test_window_edges(settings):
 # ---------- 导入（合成的数据库，形状和 INA 导入 martj42 以后一样） ----------
 def build_db(con):
     """建表、放几场 INT 比赛（INA 的写法：英文名 + NT、round = 日期、leg 0、kickoff 空、'day_world'、比分来源 martj42）。"""
-    create_tables(con)
-    # INA 合并前的临时建表，合并后改用 schema
-    con.execute("create table if not exists match_venue (match_id integer not null, source text not null, "
-                "neutral integer not null, city text, country text, tournament text not null, "
-                "primary key (match_id, source))")
+    create_tables(con)                                   # match_venue 表也在 schema 里（INA）
     teams = [("Alpha NT", None), ("Beta NT", "老写法"), ("Gamma NT", ""), ("Delta NT", None), ("Epsilon NT", None)]
     con.executemany("insert into teams (team_id, name_zh, country) values (?, ?, ?)",
                     [(t, zh, t[:-3]) for t, zh in teams])
