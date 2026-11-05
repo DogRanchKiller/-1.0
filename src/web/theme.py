@@ -127,6 +127,7 @@ details.more > .inner { padding-bottom: 16px; }
 .num { text-align: right; white-space: nowrap; }
 .score { font-weight: 650; color: var(--lime); white-space: nowrap; }
 .hit { color: var(--green); } .miss { color: var(--red); }
+tr.mine td { background: rgba(52, 211, 153, .12); font-weight: 650; }   /* 球队页积分榜里这队那一行（工作树 TEAM） */
 td.match a, td a.match { color: var(--text); text-decoration: none; font-weight: 600; }
 td.match a:hover, td a.match:hover { color: var(--green); }
 dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 6px 0; font-size: 14px; }

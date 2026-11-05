@@ -196,6 +196,21 @@ def test_odds_lead_page_error_does_not_break_site(env, monkeypatch):
     assert "盘口联动页出错（RuntimeError）" in read(out, "index.html")
 
 
+def test_team_stats_error_does_not_break_site(env, monkeypatch):
+    """球队数据四块算不出来：球队页这四块换成一行“球队数据暂时算不出来”，原来几块照常，首页提示写原因。"""
+    from src.web.site import team_stats
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("想不到的错")
+
+    monkeypatch.setattr(team_stats, "collect", boom)
+    out, summary = build(env)
+    assert summary["页面合计"] == 12
+    html = plain(read(out, "team/Arsenal.html"))
+    assert "球队数据暂时算不出来" in html and "近期状态" not in html and "有预测、已踢完的 1 场" in html
+    assert "球队数据暂时算不出来：RuntimeError: 想不到的错" in plain(read(out, "index.html"))
+
+
 def test_no_script_no_advice_words_and_links_work(env):
     write_review(env[2])
     out, _ = build(env)
@@ -270,6 +285,13 @@ def test_team_page(env):
     html = plain(read(out, "team/Arsenal.html"))
     assert "欧冠" in html and "客 对 利物浦" in html and "2–1</span> 负" in html
     assert "有预测、已踢完的 1 场" in html
+    # 球队数据四块（近期状态、历史交锋、Elo、积分榜）排在“接下来”和“最近踢过的”中间
+    blocks = [html.find(h) for h in ("近期状态（最近 1 场联赛）", "<h2>历史交锋", "<h2>Elo 评分变化", "积分榜：英超 2026/27", "踢过的")]
+    assert -1 not in blocks and blocks == sorted(blocks)
+    assert "0 胜 0 平 1 负，拿了 0 分" in html and "接下来 14 天没有联赛，不列交锋" in html
+    assert html.count("<tr class='mine'>") == 1
+    liv = plain(read(out, "team/Liverpool.html"))
+    assert "历史交锋：对 <a href='../team/Man_City.html'>曼城</a>" in liv and "数据库里没有两队的联赛交锋" in liv
     weird = plain(read(out, "team/A_B_C.html"))
     assert "接下来 14 天" in weird and "曼城" in weird and "欧冠" in weird
 

@@ -61,6 +61,9 @@ class SiteData:
     # 我们的 match_id → data/live/scores.json 里对应的那一条（原样，没有改字段）
     live_scores: dict[int, dict] = field(default_factory=dict)
     live_stale: bool = False                                      # 即时比分是不是很久没更新了（页面上会提醒）
+    # 球队页的近期状态、历史交锋、Elo 评分变化、积分榜（team_stats.collect 算好的；load 第 9 步）
+    team_stats: dict = field(default_factory=dict)
+    team_stats_error: str | None = None                           # 算不出来的原因（球队页这几块换成一行占位）
 
     def comp(self, code: str) -> str:
         return self.comp_names.get(code, code)
@@ -403,4 +406,14 @@ def load(con, settings: dict, now: datetime) -> SiteData:
                 continue
             if not lu.empty:
                 data.lineups[mid] = lu
+
+    # 9. 球队页的四块（近期状态、历史交锋、Elo 评分变化、积分榜；用途「显示」）。只算有球队页的队（单场页里出现的）。
+    #    出了任何意外的错只让这几块换成占位，别的页面照常
+    from src.web.site import team_stats
+    teams = {data.matches[mid][k] for mid in data.page_ids for k in ("home_team", "away_team")}
+    try:
+        data.team_stats = team_stats.collect(fs, data, teams)
+    except Exception as err:  # noqa: BLE001 —— 这几块只是显示，坏了不能拖垮整个网站
+        data.team_stats, data.team_stats_error = {}, f"{type(err).__name__}: {str(err).splitlines()[0] if str(err) else ''}"
+        data.notes.append(f"{team_stats.BAD}：{data.team_stats_error}")
     return data

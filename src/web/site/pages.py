@@ -14,6 +14,7 @@ from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews
 from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bar_html, bj_text, day_title, details,
                                  e, kickoff_text, level_name, match_attrs, match_href, page, placeholder, table)
 from src.web.site import picks as pk
+from src.web.site import team_stats
 from src.web.site.data import SiteData
 from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text, level,
                                 live_html, score_text, side_of, version_name)
@@ -262,6 +263,7 @@ def render_team(data: SiteData, team: str, teams: TeamFiles) -> str:
     body = (f"<h1>{e(data.zh(team))} <span class='accent'>{e(team if data.zh(team) != team else '')}</span></h1>"
             f"<h2>接下来 {cfg['team_days_ahead']} 天</h2>"
             + (table(["开球", "赛事", "比赛", "最新一版的结论"], up_rows) if up_rows else placeholder("这段时间没有联赛"))
+            + team_stats.render(data, team, teams)
             + f"<h2>最近 {cfg['team_days_back']} 天踢过的</h2>"
             + (table(["开球", "赛事", "比赛", "比分（主–客）和这队的胜负"], past_rows) if past_rows else placeholder("这段时间没有踢过的比赛"))
             + "<p class='small muted'>杯赛、欧战现在只有赛程，没有比分，写“—”。</p>"
