@@ -29,12 +29,15 @@ def test_main_writes_files_and_heartbeat(env, tmp_path, monkeypatch):
     con.close()
     s["paths"]["database"] = db
     s["ledger"]["output_dir"] = str(tmp_path / "ledger")
+    s["lottery_value"]["output_dir"] = str(tmp_path / "lottery_value")   # 第二步的结果也写到临时文件夹
     s["jobs"]["state_dir"] = str(tmp_path / "jobs")
     monkeypatch.setattr(ledger_daily, "load_settings", lambda: s)
     ledger_daily.main()
     assert (tmp_path / "ledger" / "ledger_matches.csv").exists() and (tmp_path / "ledger" / "ledger_summary.csv").exists()
     hb = read_state("ledger", tmp_path / "jobs")
     assert hb["成功"] is True and hb["摘要"]["对上账的预测"] == 3
+    assert hb["摘要"]["竞彩偏离"] == "正式计数 0 注"                         # 造的数据没有竞彩价格
+    assert len(hb["摘要"]) <= 6
 
 
 def test_task_is_registered_and_shown_on_status_page():

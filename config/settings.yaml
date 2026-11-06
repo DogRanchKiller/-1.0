@@ -1636,6 +1636,23 @@ ledger:                       # 开发顺序第 2 步“四本账”（需求文
   min_matches: 1000           # 一个通道少于这么多场：只列数，不算区间、不下结论
   pinnacle: 平博 Pinnacle     # 亚盘、大小球的市场价用哪家（config/bookmakers_dongqiudi.yaml 换过的写法）
 
+lottery_value:                 # 竞彩价格偏离虚拟实盘 src/evaluate/lottery_value.py（需求文档第 14 节“竞彩价格偏离虚拟实盘”，跑之前写下）
+  # 运行：python -m src.evaluate.lottery_value；每天 09:40 跟四本账一起跑（src/jobs/ledger_daily.py）。只读打开数据库
+  output_dir: data/backtest/lottery_value   # candidates / bets / skipped / summary / decisions_log（data/ 不进 Git）
+  leagues: top                 # 五大联赛（leagues 段里的组名）
+  first_kickoff_utc: "2026-10-30 00:00:00"  # 从这天起开球的比赛（懂球帝每小时快照 2026-10-30 起才有竞彩赛前价格）
+  count_from_utc: "2026-11-07 00:00:00"     # 决定时间在这之后的注才“正式计数”（规则写下以后）；之前的只看看
+  hours_before: 6              # 决定时间 = 开球前几小时
+  sale_window_bj: ["09:00", "21:30"]        # 竞彩能买的时间段（北京时间，停售时间待核实，宁早勿晚）
+  pinnacle: 平博 Pinnacle      # 公道价只用这家
+  products: {result: 竞彩胜平负, handicap: 竞彩让球}
+  max_fit_error: 0.01          # 让球用的反推比分矩阵，还原误差超过这个就不算让球那三注
+  ev_threshold: 0.05           # 主规则：每场 EV 最大的那个选项 ≥ 这个才下 1 注
+  report_thresholds: [0.0, 0.02, 0.05, 0.10]   # 报告里列哪些门槛（只有 ev_threshold 那个下结论）
+  min_bets_report: 100         # 有 CLV 的注少于这么多：只列数
+  pass_bets: 300               # 至少这么多注才可能“通过”
+  give_up_bets: 600            # 这么多注还没通过就停下
+
 baseline:                     # 开发顺序第 3 步“历史基线”src/evaluate/baseline.py（需求文档第 16 节“历史基线怎么算（第 3 步）”，跑之前写下）
   # 运行（工作树 BAS）：python -m src.evaluate.baseline。只读打开数据库；结果放 data/backtest/<run>/baseline_*
   run: tc_fix_gb_l7           # 冻结版本的回测（v1.12 新时间规则；要有 predictions.csv 和 matrices_gb_l7.npz）

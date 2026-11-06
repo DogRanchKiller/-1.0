@@ -8,15 +8,20 @@
 另外每次运行开始、结束各写一次心跳文件（src/jobs/heartbeat.py，任务名 ledger），数据状态页“定时任务”那一行能看到：
 最近一次跑没跑成、对上账的预测几条、下结论的时点（ledger.main_kind，T-24）每个通道对账了几场、差的平均是多少。
 差 = 模型 − 市场（log loss 一类的分数，小于 0 = 模型更准）；场数不够 ledger.min_matches 时只列数、不下结论。
+第二步（2026-11-07 加）：竞彩价格偏离虚拟实盘（src/evaluate/lottery_value.py，需求文档第 14 节），结果写到
+settings.yaml lottery_value.output_dir；摘要多一项“竞彩偏离”。这一步出错不影响四本账，只把出错原因写进摘要。
 只读：数据库只读打开，不改存档、模型、设置。出错不推送（settings.yaml notify.push_jobs 里没有它），只在状态页显示。
 """
 from __future__ import annotations
 
 import math
+import sys
+import traceback
 
 import pandas as pd
 
 from src.common.config import load_settings, resolve_path
+from src.evaluate import lottery_value
 from src.evaluate.ledger import build, write
 from src.features import FeatureStore, open_readonly
 from src.jobs.heartbeat import job_run, state_dir
@@ -36,6 +41,18 @@ def heartbeat_summary(rows: pd.DataFrame, summary: pd.DataFrame, settings: dict)
     return out
 
 
+def lottery_step(fs: FeatureStore, settings: dict) -> str:
+    """第二步：竞彩价格偏离虚拟实盘算一遍、写文件，返回摘要那一句（40 个字以内）。
+    出错时不往外抛（不影响四本账），把出错原因写进摘要，完整的出错信息打到错误输出。"""
+    try:
+        cand, skipped = lottery_value.build(fs, settings)
+        _, summary = lottery_value.write(cand, skipped, settings)
+        return lottery_value.short_text(summary)
+    except Exception as e:  # noqa: BLE001（这一步是附带的，出什么错都不能拖垮四本账）
+        traceback.print_exc(file=sys.stderr)
+        return f"出错：{type(e).__name__}"[:40]
+
+
 def main() -> None:
     settings = load_settings()
     with job_run("ledger", state_dir(settings)) as run:
@@ -43,10 +60,11 @@ def main() -> None:
         try:
             fs = FeatureStore(con, "实时", settings)     # 和手动运行一样：存档的比赛是上线后的赛季，用实时模式
             rows, summary = build(fs, con, settings)
+            lottery = lottery_step(fs, settings)
         finally:
             con.close()
         out = write(rows, summary, settings)
-        run.summary = heartbeat_summary(rows, summary, settings)
+        run.summary = {**heartbeat_summary(rows, summary, settings), "竞彩偏离": lottery}
     print(f"写到 {out}")
     for k, v in run.summary.items():
         print(f"  {k}：{v}")
