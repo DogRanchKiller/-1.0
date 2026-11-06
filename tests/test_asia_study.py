@@ -71,7 +71,8 @@ def test_second_study_settings_match_leagues_and_models(settings):
     m = settings["models"]
     assert set(c["models"]) == {"gb_l7", "dyn_q1e5_b01"}
     assert "gb_l7" in m["gbdt_variants"] and "dyn_q1e5_b01" in m["dynamic_variants"]
-    assert settings["preview"]["model"] == "gb_l7"            # 上线的就是 gb_l7
+    # 第 11 阶段跑的时候上线的是 gb_l7；2026-11-07 起上线的是 gb_xg（= gb_l7 + dyn 用一半 xG 更新，树的设置一样）
+    assert settings["preview"]["model"] in ("gb_l7", "gb_xg")
     assert m["gbdt"]["dyn"] == "dyn_q1e5_b01"                 # gb_l7 里带的比分模型
     assert c["horizon"] == "T-24" and c["benchmark"] == "pinnacle_close"
 

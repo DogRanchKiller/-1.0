@@ -79,8 +79,9 @@ def env(tmp_path):
         h, a, d, ko = {1: ("Liverpool", "Arsenal", "2026-10-10", "2026-10-10 14:00"),
                        2: ("Man City", "Liverpool", "2026-10-17", "2026-10-17 14:00"),
                        3: ("Arsenal", "Man City", "2026-11-20", "2026-11-20 15:00")}[mid]
-        con.execute("insert into predictions values (?, ?, 'E0', 2026, ?, ?, ?, ?, ?, 'gb_l7', 'v', ?, ?, ?, ?, ?, ?)",
-                    (pid, mid, h, a, ko, d, kind, cut, cr, ph, pd_, pa, json.dumps(det)))
+        # 模型名跟着 settings 的 ledger.model（2026-11-07 起上线的是 gb_xg）
+        con.execute("insert into predictions values (?, ?, 'E0', 2026, ?, ?, ?, ?, ?, ?, 'v', ?, ?, ?, ?, ?, ?)",
+                    (pid, mid, h, a, ko, d, kind, s["ledger"]["model"], cut, cr, ph, pd_, pa, json.dumps(det)))
     con.commit()
     return con, s
 

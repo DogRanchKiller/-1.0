@@ -1,6 +1,7 @@
-"""影子预测：定时预测存了 gb_l7 的 T-24 以后，用同一个截止时间再出一份别的模型（需求文档第 4 节“xG 研究第 2 段怎么做”）。
+"""影子预测：定时预测存了正式模型的 T-24 以后，用同一个截止时间再出一份别的模型（需求文档第 4 节“xG 研究第 2 段怎么做”）。
 
-现在只有一个影子模型 gb_xg（懂球帝 xG 版：gb_l7 里的 dyn 用 0.5 × 进球 + 0.5 × 比赛统计里的 xG 更新）。
+影子模型写在 settings.yaml shadow.models。2026-11-07 以前正式模型是 gb_l7、影子是 gb_xg（懂球帝 xG 版）；
+那天你决定换成 gb_xg 上线（需求文档第 4 节“换成 gb_xg 上线”），从此正式是 gb_xg、影子是 gb_l7。
 
 做什么（src/jobs/scheduled_predict.py 在 run_scheduled 之后调 run_shadow）：
 1. 看这次新存进 predictions 表的那几行：时点是 settings.yaml shadow.kinds（T-24）的，才跟着出。
@@ -8,10 +9,10 @@
    同样的联赛、同样往后看 preview.days_ahead 天）拟合影子模型，给窗口里的比赛出预测，挑出这几场。
    为什么窗口要一样：模型出预测时会按要预测的比赛换赛季等（会动状态），预测的比赛一样，两边才好比。
 3. 存进 shadow_predictions 表（src/clean/schema.py），不进 predictions：网站、推送、复盘、四本账读 predictions 时很多地方不分模型。
-   每行记对应那行 gb_l7 的 prediction_id；同一行 gb_l7、同一个影子模型只存一次（表上有唯一约束）。
+   每行记对应那行正式预测的 prediction_id；同一行正式预测、同一个影子模型只存一次（表上有唯一约束）。
 
 出错不影响正式预测：调用的地方（scheduled_predict.run_job）用 safe_run_shadow，出错只记进心跳摘要，定时任务照样算成功。
-漏出的（出错、关机）不补：补出来的截止时间就和 gb_l7 那行不一样了。
+漏出的（出错、关机）不补：补出来的截止时间就和正式预测那行不一样了。
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ def main_rows(con, prediction_ids, kinds) -> list[dict]:
 
 
 def already_stored(con, prediction_ids, model: str) -> set[int]:
-    """这几行 gb_l7 里，这个影子模型已经存过的（main_prediction_id）。"""
+    """这几行正式预测里，这个影子模型已经存过的（main_prediction_id）。"""
     ids = [int(i) for i in prediction_ids]
     if not ids:
         return set()

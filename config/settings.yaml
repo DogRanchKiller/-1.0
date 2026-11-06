@@ -290,12 +290,14 @@ status:
 preview:
   days_ahead: 7              # 显示未来几天开球的比赛
   leagues: top               # 哪一组联赛（leagues 段里的 top 五大联赛 / second 次级联赛）
-  model: gb_l7               # 用哪个模型（models 段里的名字）。2026-10-31 从 Elo 换成 dc，同一天又换成 gb_l7（步骤 6 选出的），页面上仍标“临时模型”
+  model: gb_xg               # 用哪个模型（models 段里的名字）。2026-10-31 从 Elo 换成 dc，同一天又换成 gb_l7（步骤 6 选出的），页面上仍标“临时模型”
+                             # 2026-11-07 你决定从 gb_l7 换成 gb_xg（需求文档第 4 节“换成 gb_xg 上线”）；想退回：这里、ledger.model 写回 gb_l7，shadow.models 写回 [gb_xg]
   # 页面上关于模型的说明，换模型时一起改。回测成绩：五大联赛 2014–2023 有平博收盘赔率的 18,083 场，T-24，胜平负 log loss
   # （越小越准）；出处是进度记录“步骤 6”的结果目录 s6_eval 的 summary_vs_benchmark.csv（gb_l7 0.97888，平博收盘 0.96429）
+  # 换成 gb_xg 后回测成绩照用 gb_l7 的：懂球帝 xG 2025-12 起才有，2014–2023 每场都没有 xG，gb_xg 在这些年按代码就是用进球更新（推断，没重跑回测）
   model_info:
-    label: 梯度提升树 gb_l7
-    desc: 把动态实力评分、Elo、pi-rating、近期状态、射正、休息天数等一起交给一种“很多棵小决策树”的模型，先猜两队各进几球，再算胜平负
+    label: 梯度提升树 gb_xg
+    desc: 把动态实力评分、Elo、pi-rating、近期状态、射正、休息天数等一起交给一种“很多棵小决策树”的模型，先猜两队各进几球，再算胜平负；动态实力评分每场赛后用一半实际进球、一半 xG 更新（有 xG 的比赛，2025 年 12 月起）
     backtest_period: 2014–2023
     backtest_n: 18083
     backtest_model: 0.979
@@ -1042,7 +1044,7 @@ models:                    # 第 0 步模型 src/models（需求文档第 4 节�
     # xG 研究第 1 段（需求文档第 4 节“xG 研究第 1 段怎么做”）：dyn 的更新用 0.5 × 进球 + 0.5 × Understat xG，对照组是上面的 gb_l7_r
     gb_xg_r: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, xg_mix: 0.5}
     # xG 研究第 2 段（需求文档第 4 节“xG 研究第 2 段怎么做”）：同样的做法，xG 用数据库比赛统计里的（懂球帝 / football-data），
-    # 用途 A版输入；只在定时预测里和 gb_l7 并排出 T-24，存进 shadow_predictions（见 shadow 段），网站、融合、推送不用它
+    # 用途 A版输入。2026-11-07 起是上线模型（preview.model）；gb_l7 反过来当影子模型并排出 T-24（见 shadow 段）
     gb_xg: {num_leaves: 7, min_data_in_leaf: 200, xg_mix: 0.5, xg_source: match_stats}
     # 步骤 8 B 版（需求文档第 4 节“步骤 8 怎么做”）：用途都是“B版输入”，一次回测里的用途要一样；另一组 market_pre 见 models.market_variants
     gb_l7_b: {num_leaves: 7, min_data_in_leaf: 200, usage: B版输入}                        # 和 gb_l7 一样，只是用途不同（核对）
@@ -1161,7 +1163,7 @@ schedule:
 # 用同一个截止时间给这些比赛再出一份别的模型，存进 shadow_predictions 表（不进 predictions，网站、融合、推送、复盘都不读它）
 shadow:
   enabled: true                 # false = 不出影子预测（退回原样）
-  models: [gb_xg]               # 并排出哪几个模型（models 段里的名字）
+  models: [gb_l7]               # 并排出哪几个模型（models 段里的名字）。2026-11-07 上线换成 gb_xg 以后，原来的 gb_l7 在这里接着出；不能和 preview.model 一样
   kinds: [T-24]                 # 主预测存了哪几个时点才跟着出
   output_dir: data/backtest/xg_shadow   # 对比报告 src/evaluate/xg_shadow.py 的结果（data/ 不进 Git）
   min_matches: 1000             # 踢完的少于这么多场：只列数，不算区间、不下结论
@@ -1623,7 +1625,7 @@ ledger:                       # 开发顺序第 2 步“四本账”（需求文
   # 运行（工作树 LDG）：python -m src.evaluate.ledger。只读打开数据库，不写任何表
   output_dir: data/backtest/ledger   # ledger_matches.csv、ledger_summary.csv（data/ 不进 Git）
   leagues: top                # 五大联赛（leagues 段里的组名）
-  model: gb_l7                # 现在出预测的模型
+  model: gb_xg                # 现在出预测的模型（和 preview.model 一样；2026-11-07 以前的存档是 gb_l7，要看那一段就临时改回 gb_l7 再跑）
   kinds: [T-24, T-6, T-1]     # 对哪几个时点的存档
   main_kind: T-24             # 只有这个时点下结论，另外两个只报告
   min_matches: 1000           # 一个通道少于这么多场：只列数，不算区间、不下结论
