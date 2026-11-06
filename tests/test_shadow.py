@@ -187,3 +187,48 @@ def test_xg_shadow_report(job_env):
     assert sc["比分 log loss"] == pytest.approx(np.log(9))
     assert sc["大 2.5 球 Brier"] == pytest.approx((3 / 9) ** 2)     # 2-0 没过 2.5，矩阵里 i + j ≥ 3 的有 3 格
     assert sc["双方进球 Brier"] == pytest.approx((4 / 9) ** 2)      # 2-0 不是双方进球，i ≥ 1 且 j ≥ 1 的有 4 格
+
+
+def _pair_row(shadow, main, day, s_ll, m_ll, s_home, m_home):
+    """xg_shadow.match_rows 那样的一行（只填汇总要用的列）。"""
+    from src.evaluate.xg_shadow import SCORES
+    r = {"影子模型": shadow, "正式模型": main, "比赛日期": day, "影子主胜": s_home, "正式主胜": m_home}
+    for k in SCORES:
+        s, m = (s_ll, m_ll) if k == SCORES[0] else (np.nan, np.nan)
+        r[f"影子 {k}"], r[f"正式 {k}"], r[f"差 {k}"] = s, m, s - m
+    return r
+
+
+def test_xg_shadow_pools_across_model_switch(job_env):
+    """换模型前后两段：方向固定成 新 − 旧（先当影子的 gb_xg − gb_l7），换之后那段差取反，两段合起来计数。"""
+    import pandas as pd
+    from src.evaluate.xg_shadow import model_pairs, summarize
+
+    s, _, _ = job_env
+    s["shadow"]["min_matches"] = 3
+    s["preview"]["model"], s["shadow"]["models"] = "gb_xg", ["gb_l7"]          # 换之后的设置
+    # 换之前 2 场：影子 gb_xg、正式 gb_l7；换之后 1 场：影子 gb_l7、正式 gb_xg
+    rows = pd.DataFrame([_pair_row("gb_xg", "gb_l7", "2026-11-01", 0.9, 1.0, 0.45, 0.40),
+                         _pair_row("gb_xg", "gb_l7", "2026-11-02", 1.1, 1.0, 0.50, 0.52),
+                         _pair_row("gb_l7", "gb_xg", "2026-11-09", 1.3, 1.0, 0.30, 0.33)])
+    stored = pd.DataFrame({"shadow_id": [3, 1, 2], "shadow_model": ["gb_l7", "gb_xg", "gb_xg"],
+                           "main_model": ["gb_xg", "gb_l7", "gb_l7"]})
+    pairs = model_pairs(stored, s)
+    assert pairs == [("gb_xg", "gb_l7")]                     # 最早的影子是 gb_xg：方向不因后来换模型而反
+    main = summarize(rows, s, pairs)
+    main = main[main["主比较"]]
+    assert len(main) == 1                                     # 一组，不分成两组
+    r = main.iloc[0]
+    assert (r["新模型"], r["旧模型"]) == ("gb_xg", "gb_l7")
+    assert r["场数"] == 3 and r["新当影子的场"] == 2 and r["新当正式的场"] == 1
+    # 新 − 旧：−0.1、+0.1、换之后 gb_xg 1.0 − gb_l7 1.3 = −0.3（影子 − 正式 是 +0.3，取反）
+    assert r["差的平均"] == pytest.approx(-0.1)
+    assert r["新平均分"] == pytest.approx((0.9 + 1.1 + 1.0) / 3)
+    assert r["旧平均分"] == pytest.approx((1.0 + 1.0 + 1.3) / 3)
+    assert r["主胜概率平均绝对差"] == pytest.approx((0.05 + 0.02 + 0.03) / 3)
+    assert not np.isnan(r["区间下限"])                         # 够 3 场才算区间：合起来才够
+    # 只有换之前那 2 场时不够 3 场
+    only_before = summarize(rows.iloc[:2], s, pairs)
+    assert "场数不够" in only_before[only_before["主比较"]].iloc[0]["结论"]
+    # 还没有任何影子预测：按设置配（影子模型, 上线模型）
+    assert model_pairs(pd.DataFrame(), s) == [("gb_l7", "gb_xg")]
