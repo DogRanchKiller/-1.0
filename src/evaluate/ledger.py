@@ -243,6 +243,15 @@ def build(fs: FeatureStore, con, settings: dict) -> tuple[pd.DataFrame, pd.DataF
     return rows, summarize(rows, settings)
 
 
+def write(rows: pd.DataFrame, summary: pd.DataFrame, settings: dict):
+    """两个结果文件写到 ledger.output_dir（手动运行和每天的定时任务 src.jobs.ledger_daily 共用）。返回文件夹。"""
+    out = resolve_path(settings["ledger"]["output_dir"])
+    out.mkdir(parents=True, exist_ok=True)
+    rows.to_csv(out / "ledger_matches.csv", index=False, encoding="utf-8-sig")
+    summary.to_csv(out / "ledger_summary.csv", index=False, encoding="utf-8-sig")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="四本账：按四个通道给真实预测对账（只读）")
     ap.add_argument("--db", help="数据库文件（不写 = settings.yaml 的 paths.database）")
@@ -251,10 +260,7 @@ def main() -> None:
     con = open_readonly(a.db)
     fs = FeatureStore(con, "实时", settings)          # 存档的比赛是上线后的赛季（2026/27 起），用实时模式
     rows, summary = build(fs, con, settings)
-    out = resolve_path(settings["ledger"]["output_dir"])
-    out.mkdir(parents=True, exist_ok=True)
-    rows.to_csv(out / "ledger_matches.csv", index=False, encoding="utf-8-sig")
-    summary.to_csv(out / "ledger_summary.csv", index=False, encoding="utf-8-sig")
+    out = write(rows, summary, settings)
     print(f"踢完、对上账的预测：{rows['prediction_id'].nunique() if len(rows) else 0} 条，写到 {out}")
     with pd.option_context("display.width", 200, "display.max_columns", 20):
         print(summary[["时点", "通道", "对账的场数", "缺市场价的场数", "模型平均分", "市场平均分", "差的平均",

@@ -52,7 +52,7 @@ from src.web.site import bots, lifecycle, match, odds_lead, pages
 from src.web.site import data as site_data
 from src.web.site import picks as pk
 from src.web.site.common import LiveMinutes, TeamFiles, utc_iso
-from src.web.site.match import final_probs, leans, level, uncertain, version_matrices, version_name
+from src.web.site.match import final_probs, leans, level, show_level, source_text, uncertain, version_matrices, version_name
 
 LOG = logging.getLogger("site_server")
 # settings.yaml 里没写 live: 时用的数（写了以 settings.yaml 为准）
@@ -524,7 +524,10 @@ class LiveSite:
         rows.sort(key=lambda r: (str(r.get("model")), str(r.get("model_version")), order.get(r["kind"], len(order)),
                                  str(r.get("cutoff_utc") or ""), r["prediction_id"]))
         latest = data.latest(mid)
+        # show_confidence（2026-11-07 新加）：页面要不要显示信心等级（settings.yaml site.show_confidence）。
+        # 每一版的 confidence 照样给（存档里有的数），显不显示由 site.js 看这个开关
         return 200, {"data_version": snap.version, "generated_at": snap.generated_at, **self._head(data, mid),
+                     "show_confidence": show_level(data.settings),
                      "latest": self._latest(data, mid),
                      "picks": self._picks(data, mid, latest[1]) if latest else None,
                      "picks_v3": self._picks_v3(data, mid, latest[1]) if latest else None,   # 2026-11-05 新加（把握等级），上面的 picks 不变
@@ -558,6 +561,7 @@ class LiveSite:
         return {"kind": kind, "kind_name": version_name(kind), "cutoff_utc": utc_iso(row.get("cutoff_utc")),
                 "probs": [_num(x) for x in p], "source": "fusion" if src == "融合" else "model",
                 "confidence": level(row) if isinstance(level(row), int) else None, "leans": leans(row),
+                "source_text": source_text(row),       # 2026-11-07 新加：例“概率来自去水赔率”；没用上赔率是 null
                 "tiers": pk.tier_codes(pk.match_picks_v3(row, data.settings))}
 
     @staticmethod
@@ -576,6 +580,7 @@ class LiveSite:
                 "model_probs": [_num(row.get(k)) for k in ("p_home", "p_draw", "p_away")],
                 "final_probs": [_num(x) for x in p], "source": "fusion" if src == "融合" else "model",
                 "confidence": level(row) if isinstance(level(row), int) else None,
+                "source_text": source_text(row),       # 2026-11-07 新加：例“概率来自去水赔率”；没用上赔率是 null
                 "leans": leans(row), "uncertain": uncertain(row),
                 "top_scores": [{"matrix": "fusion" if name == "融合后" else "model",
                                 "scores": [[h, a, _num(q)] for h, a, q in site_markets.top_scores(m, n)]}

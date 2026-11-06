@@ -69,7 +69,7 @@ def test_index_cell_leads_with_ah_and_falls_back_to_1x2():
     t = text_of(cell)
     assert "class='lead'" not in cell and "赢盘" not in t and "胜算" not in t
     assert t.startswith("主胜 60% / 平 20% / 客胜 20%") and "倾向 主胜 60%" in t
-    assert conclusion_html(row) in cell                                 # 胜平负这一块和原来的写法一模一样
+    assert conclusion_html(row, show=False) in cell                     # 胜平负这一块和单独写的一模一样（不显示信心等级）
 
 
 def test_index_cell_near_even():

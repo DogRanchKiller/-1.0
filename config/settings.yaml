@@ -454,7 +454,8 @@ fusion:                       # 融合权重（fusion_study 选出来的，需�
 
 lean:                         # 倾向门槛（同上；页面以后按它写“倾向 / 无明显倾向 / 平局风险高”）。null = 一律“无明显倾向”
   result: 0.04                   # 胜平负：最高的概率比第二高的高这么多才写倾向
-  draw: 0.28                     # 平局概率不低于这个标“平局风险高”
+  draw: 0.34                     # 平局概率不低于这个标“平局风险高”。新时间规则重跑后按事先定的规则推到 0.34
+                                 # （0.32–0.34 那档区间跨过 0；以前是 0.28），2026-11-07 用户定按规则改（需求文档第 16 节、v1.21）
   over25: 0.02                   # 大小球 2.5：偏向那边的概率 − 0.5 不小于这个
   btts: 0.02                     # 双方进球：同上
   ah: 0.02                       # 亚盘（多家平均赛前主盘口）：两边较大的胜算 − 0.5 不小于这个
@@ -1227,6 +1228,9 @@ site:
   # 虚拟投注页 bots.html 读哪一次机器人历史回测的结果（src/web/site/bots.py，需求文档第 8 节、第 14 节）。
   # 只读 summary.csv、by_season.csv、by_period.csv、bankroll.csv、check.json，不读每注明细 bets.csv；文件不在时页面写“还没有结果”
   bots_dir: data/backtest/bots/bots_v1
+  # 网站显不显示“信心等级”（●●● 高 / ●●○ 中 / ●○○ 低）。现在实时预测都有赔率、降级因素是空的，每场都是 ●●● 高，
+  # 显示出来没有区分作用，2026-11-07 用户定先藏起来（需求文档第 8 节、v1.21）。只是不显示，存档里的等级照样存
+  show_confidence: false
 
 # 盘口联动观察页 odds_lead.html（src/web/site/odds_lead.py，需求文档第 8 节“盘口联动观察页怎么算”，写程序之前写下）。
 # 只是观察“赔率明显变动时哪家公司先变、哪家跟着变”，不是预测，不进模型
@@ -1390,6 +1394,7 @@ notify:
     review: {name: 赛后对账、复盘, stale_hours: 18}        # 每天 09:10、21:10；留 6 小时余地
     site: {name: 网站重新生成, stale_hours: 2}             # 每 15 分钟重新生成一次
     notify: {name: 推送, stale_hours: 2}                    # 每 15 分钟跑一次
+    ledger: {name: 四本账对账, stale_hours: 36}             # 每天 09:40 跑一次（src.jobs.ledger_daily）；只显示，不推送
   running_stale_minutes: 60           # “结束”为空（正在跑）超过几分钟，算“卡住或中途被关掉”
   # 推送程序自己（notify）出故障时推不出去，只在数据状态页显示；故障推送只看下面这几个任务
   push_jobs: [refresh_data, scheduled_predict, review, site]

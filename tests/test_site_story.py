@@ -19,6 +19,7 @@ def text_of(page: str) -> str:
 
 
 def test_match_page_tells_the_story_with_this_matchs_numbers(env):
+    env[1]["site"]["show_confidence"] = True          # 这条查“显示信心等级”时第 6 步怎么写；不显示的见下面另一条
     out, _ = build(env)
     page = read(out, "match/1.html")
     t = text_of(page)
@@ -32,8 +33,8 @@ def test_match_page_tells_the_story_with_this_matchs_numbers(env):
     assert "合并时赔率占 60%、模型占 40%" in t and "用 gb_l7 模型回测选出来的（这一版用的是 gb）" in t and "0.979" not in t
     assert "这一版用到了赔率，但没有单独存赔率算出来的概率" in t       # 造的数据没存“赔率概率”，不编
     assert "高 23.0 个百分点，现在的门槛是 4 个百分点。这一版写的是“倾向 主胜”。" in t
-    assert "平局 27.0%，平局风险的线是 28%，这一版没标平局风险" in t
-    assert "所以几乎每场都是 ●●● 高" in t
+    assert "平局 27.0%，平局风险的线是 34%，这一版没标平局风险" in t      # 线读 settings.yaml lean.draw（2026-11-07 起 0.34）
+    assert "按门槛写倾向，再定信心" in t and "所以几乎每场都是 ●●● 高" in t
     # 四块分析：没存模型解释的写明没有；伤停与首发写明模型不看
     for title in ("实力对比", "近期状态与赛程", "伤停与首发", "盘口与水位解读"):
         assert f"<h3>{title}</h3>" in page
@@ -109,8 +110,11 @@ def test_index_cell_is_short_and_record_starts_with_plain_summary(env):
 
 def test_index_guide_says_where_probabilities_come_from():
     conf = {"downgrade_factors": [], "no_odds_downgrade": 1}
-    text = plain(index_guide({"fusion": {"w": 1.0}, "confidence": conf}))
+    text = plain(index_guide({"fusion": {"w": 1.0}, "confidence": conf}))     # 没写 site.show_confidence：当 true
     assert "全部来自博彩公司的赔率" in text and "几乎每场都是 ●●● 高" in text
+    off = plain(index_guide({"fusion": {"w": 1.0}, "confidence": conf, "site": {"show_confidence": False}}))
+    assert "全部来自博彩公司的赔率" in off and "●●●" not in off and "信心等级" not in off
+    assert "概率来自去水赔率" in off and "只有模型（没和赔率融合）" in off
     assert "全部来自" not in plain(index_guide({"fusion": {"w": 0.7}, "confidence": conf}))   # 模型也占一部分时不能这么写
 
 
@@ -131,8 +135,11 @@ def test_old_row_without_fusion_does_not_claim_no_lean():
     head = story.headline(data, row, "Liverpool", "Arsenal")
     assert head == "最可能是利物浦赢（50%；这一版没有存倾向）"
     t = text_of(story.chain_html(data, row, "Liverpool", "Arsenal"))
-    assert "这一版没有存倾向；按现在的门槛够" in t and "平局风险的线是 28%，这一版没有存平局风险。" in t
+    assert "这一版没有存倾向；按现在的门槛够" in t and "平局风险的线是 34%，这一版没有存平局风险。" in t
     assert "这一版这一版" not in t and "两边差不多" not in t
+    assert "信心" not in t                                       # 网站不显示信心等级（site.show_confidence: false）
+    data.settings["site"]["show_confidence"] = True
+    t = text_of(story.chain_html(data, row, "Liverpool", "Arsenal"))
     assert "这一版没有存信心等级和提醒因素。" in t and "没有碰上要提醒的因素" not in t
 
 
@@ -148,10 +155,10 @@ def test_stored_lean_wins_over_recomputed_threshold():
 
 def test_draw_shown_with_one_decimal_near_line():
     data, row = one_row()
-    row["detail"]["融合"]["倾向"] = {"result": {"side": 0, "p": .4, "lean": False}, "draw": {"p": .2796, "risk": False}}
-    t = text_of(story.lean_rule_text(data.settings, row, [.40, .2796, .3204]))
-    assert "平局 28.0%，平局风险的线是 28%，这一版没标平局风险" in t and "没到 28%" not in t
-    assert "高 8.0 个百分点" in t                                # 40.0 − 32.0，用显示出来的数减
+    row["detail"]["融合"]["倾向"] = {"result": {"side": 0, "p": .4, "lean": False}, "draw": {"p": .3396, "risk": False}}
+    t = text_of(story.lean_rule_text(data.settings, row, [.40, .3396, .2604]))
+    assert "平局 34.0%，平局风险的线是 34%，这一版没标平局风险" in t and "没到 34%" not in t
+    assert "高 6.0 个百分点" in t                                # 40.0 − 34.0，用显示出来的数减
 
 
 def test_odds_probability_step_and_no_odds_downgrade():

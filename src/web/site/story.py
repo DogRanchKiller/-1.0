@@ -24,7 +24,8 @@ from src.web.explanation import validate_explanation
 from src.web.preview_page import ah_text
 from src.web.site.common import OUTCOMES, bar_html, bj_text, details, e, level_name, pct0, pct1
 from src.web.site.data import SiteData
-from src.web.site.match import final_probs, fusion, latest_lineup, lineup_schedule, uncertain, version_matrices
+from src.web.site.match import (final_probs, fusion, latest_lineup, lineup_schedule, show_level, uncertain,
+                                version_matrices)
 from src.web.site.picks import ah_sentence, pick_ah, used_odds
 
 # 降级候选因素的中文名（src/predict 存的“降级候选因素”里的键）
@@ -170,8 +171,11 @@ def chain_html(data: SiteData, row: dict, home: str, away: str) -> str:
     else:
         steps.append(("最后的概率", f"没有和赔率合并，直接用模型的：<b>{e(_probs3(p, hn, an))}</b>。"))
 
-    # 第 6 步：倾向和信心
-    steps.append(("按门槛写倾向，再定信心", lean_rule_text(cfg, row, p) + confidence_text(cfg, row)))
+    # 第 6 步：倾向和信心（网站不显示信心等级时只写倾向，site.show_confidence）
+    if show_level(cfg):
+        steps.append(("按门槛写倾向，再定信心", lean_rule_text(cfg, row, p) + confidence_text(cfg, row)))
+    else:
+        steps.append(("按门槛写倾向", lean_rule_text(cfg, row, p)))
     items = "".join(f"<li><b class='step'>{e(t)}</b><div>{body}</div></li>" for t, body in steps)
     return f"<ol class='chain'>{items}</ol>"
 

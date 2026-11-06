@@ -366,6 +366,10 @@
     st.league = fields[0].input.value; st.day = fields[1].input.value; st.tier = fields[4].input.value;
     st.sort = fields[5].input.value;
     fields.forEach(function (f) { bar.appendChild(f.wrap); });
+    // 没有一行带 data-level（网站不显示信心等级，或者都没有等级）：“信心”下拉框藏起来，记住的选择也清掉，
+    // 不然以前选过“●●● 高”的人会一场都看不到。字段顺序不变（fields[3] 还是它），“全部显示”照样清它
+    var anyLevel = groups.some(function (g) { return g.rows.some(function (r) { return r.hasAttribute("data-level"); }); });
+    if (!anyLevel) { fields[3].wrap.hidden = true; fields[3].input.value = ""; st.level = ""; }
     bar.appendChild(button("全部显示", "js-reset", function () {
       st = { league: "", day: "", pred: "", level: "", tier: "", sort: "time", q: "" };
       saveState("index", st);
@@ -821,8 +825,11 @@
     });
     card.appendChild(list);
     var meta = [];
-    meta.push("信心：" + (LEVEL_NAMES[v.confidence] || "—"));
-    meta.push(v.source === "model" ? "只有模型（没和赔率融合）" : "赔率和模型合起来的概率");
+    // show_confidence 是 false（网站不显示信心等级，settings.yaml site.show_confidence）时不写信心；
+    // 概率从哪来按服务器给的 source_text 写（例“概率来自去水赔率”），旧接口没有这个字段时写“用上了赔率”
+    var showLevel = api.show_confidence !== false;
+    if (showLevel) meta.push("信心：" + (LEVEL_NAMES[v.confidence] || "—"));
+    meta.push(v.source === "model" ? "只有模型（没和赔率融合）" : (v.source_text || "用上了赔率"));
     if (v.cutoff_utc) meta.push("用 " + bjText(v.cutoff_utc) + "（北京时间）之前的数据");
     card.appendChild(el("p", "small", meta.join("；")));
     if (v.leans && v.leans.length) card.appendChild(el("p", "small", "倾向：" + v.leans.join("；")));
@@ -832,7 +839,8 @@
     if (vs.length > 1) {
       var tb = el("table", "js-mini");
       var hr = el("tr");
-      ["版本", names[0], names[1], names[2], "信心"].forEach(function (h) { hr.appendChild(el("th", "", h)); });
+      ["版本", names[0], names[1], names[2]].concat(showLevel ? ["信心"] : [])
+        .forEach(function (h) { hr.appendChild(el("th", "", h)); });
       var thead = el("thead");
       thead.appendChild(hr);
       tb.appendChild(thead);
@@ -846,7 +854,7 @@
           if (d && d !== "没变") td.appendChild(el("span", "small " + (d.charAt(0) === "↑" ? "js-up" : "js-down"), " " + d.split(" ")[0]));
           tr.appendChild(td);
         });
-        tr.appendChild(el("td", "", LEVEL_NAMES[w.confidence] || "—"));
+        if (showLevel) tr.appendChild(el("td", "", LEVEL_NAMES[w.confidence] || "—"));
         tbody.appendChild(tr);
       });
       tb.appendChild(tbody);

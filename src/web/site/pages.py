@@ -17,7 +17,7 @@ from src.web.site import picks as pk
 from src.web.site import team_stats
 from src.web.site.data import SiteData
 from src.web.site.match import (archive_name, conclusion_html, final_probs, hit_html, identity_text, known_text, level,
-                                live_html, score_text, side_of, version_name)
+                                live_html, score_text, show_level, side_of, version_name)
 
 
 def match_link(data: SiteData, mid: int, prefix: str) -> str:
@@ -43,7 +43,7 @@ def row_attrs(data: SiteData, m: dict) -> str:
     """首页一行 <tr> 上的 data-*（给 /static/site.js 筛选、排序、搜索用；看不见，没有脚本时什么都不影响）。
     在 match_attrs（比赛编号、联赛代码、开球时间）之外再加：
     data-league-name = 联赛中文名（筛选框里显示）；data-teams = 两队的原名（英文，搜索时英文名也能搜到）；
-    data-pred = 有没有预测（1 / 0）；data-level = 信心等级 1 / 2 / 3（没有就不写）；
+    data-pred = 有没有预测（1 / 0）；data-level = 信心等级 1 / 2 / 3（没有就不写；site.show_confidence 是 false 时也不写）；
     data-p = 最新一版最后的概率“主胜,平,客胜”（三位小数，按概率排序用；没有预测就不写）；
     data-tier-1x2 / data-tier-ou / data-tier-score = 最新一版这三个玩法的把握等级 high / mid / low（picks_v3，“只看高把握”筛选用；
     不分档、不是赔率算的就不写）。值都转义过。"""
@@ -57,7 +57,7 @@ def row_attrs(data: SiteData, m: dict) -> str:
     p, _ = final_probs(row)
     out += " data-pred='1'"
     lv = level(row)
-    if isinstance(lv, int) and lv in (1, 2, 3):
+    if show_level(data.settings) and isinstance(lv, int) and lv in (1, 2, 3):   # 不显示信心等级时也不写，筛选框就没有可选的
         out += f" data-level='{lv}'"
     if all(isinstance(x, (int, float)) and np.isfinite(x) for x in p):
         out += f" data-p='{','.join(f'{float(x):.3f}' for x in p)}'"
@@ -100,7 +100,7 @@ def latest_cell(data: SiteData, mid: int) -> str:
     tip = f"{identity_text(row)}，{archive_name(row.get('archive_status'))}，{bj_text(row['cutoff_utc'])} 截止"
     tiers = pk.tier_line(pk.match_picks_v3(row, data.settings), data.settings,
                          data.zh(info["home_team"]), data.zh(info["away_team"])) or "把握：这一版不是赔率算的，不分档"
-    return (f"<div title='{e(tip)}'>{lead}{bar_html(p)}{conclusion_html(row, skip_ah=bool(ah))}"
+    return (f"<div title='{e(tip)}'>{lead}{bar_html(p)}{conclusion_html(row, skip_ah=bool(ah), show=show_level(data.settings))}"
             f"<span class='small muted tierline'>{e(tiers)}</span>"
             f"<span class='small muted'>{e(version_name(kind))}这一版</span></div>")
 
@@ -108,7 +108,8 @@ def latest_cell(data: SiteData, mid: int) -> str:
 # ---------- 首页 ----------
 # 首页表格上面的“怎么看”：颜色条、概率、倾向、信心各是什么意思
 def index_guide(settings: dict) -> str:
-    """首页表格上面的“怎么看”。信心那一条按 settings.yaml 的 confidence 写：现在一个降级因素都不用时，说明几乎都是 ●●● 高。
+    """首页表格上面的“怎么看”。信心那一条按 settings.yaml 的 confidence 写：现在一个降级因素都不用时，说明几乎都是 ●●● 高；
+    site.show_confidence 是 false（不显示信心等级）时换成一条“小标签写概率从哪来”。
     概率那一条按 settings.yaml 的 fusion.w 写：w = 1 时三个数全部来自赔率，模型只作对照（不然读的人会以为是模型算的）。
     “把握”那一条按 settings.yaml 的 picks_v3 写（哪几季、几场、大小球三档差多少、让球的总命中率）。"""
     w = (settings.get("fusion") or {}).get("w")
@@ -132,8 +133,10 @@ def index_guide(settings: dict) -> str:
             "没有合适的盘口时不写这一句，看下面的胜平负。</li>"
             f"{tier_li}"
             "<li>“倾向”：最可能的结果比第二可能的高出足够多才写；差不多时写“无明显倾向”。</li>"
-            f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>"
-            "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
+            + (f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>" if show_level(settings) else
+               "<li>三个数后面的小标签写这几个数从哪来，例如“概率来自去水赔率”（博彩公司的赔率去掉抽水）；"
+               "没用上赔率的写“只有模型（没和赔率融合）”。</li>")
+            + "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
 
 
 def tier_guide(settings: dict) -> str | None:
@@ -391,6 +394,8 @@ def render_record(data: SiteData, out_dir: Path) -> str:
                       "大小 2.5 log loss", "双方进球 log loss", "证据说明"], rows) if rows else placeholder("无匹配证据")
 
     summary = summary_table(metrics["groups"])
+    # 网站不显示信心等级时（site.show_confidence: false），下面“按信心等级”的两张表不放进页面（数照样从 scores.csv 算）
+    show = show_level(data.settings)
     by_level = summary_table(metrics["confidence"], ("confidence",))
     pair_rows = []
     for item in metrics["comparisons"]:
@@ -472,15 +477,15 @@ def render_record(data: SiteData, out_dir: Path) -> str:
                + details(f"最新一份：{latest.name}", f"<pre class='small' style='white-space:pre-wrap'>{e(text)}</pre>"))
     tech = (f"<h2>分组成绩</h2>{summary}<h2>独立收盘标杆</h2>{benchmarks}<h2>逐家公司同场比较</h2>{pairs}"
             f"<h2>收盘证据覆盖</h2><p class='small muted'>分母为当前复盘比赛集合，各公司、玩法独立统计；缺失原因可以重叠。</p>{coverage_table}"
-            f"<h2>按保存的信心等级</h2>{by_level}<h2>概率校准</h2>{calibration}"
-            f"<h2>按信心等级校准</h2>{confidence_calibration}"
-            f"<h2>按联赛</h2>{summary_table(metrics['competitions'], ('competition',))}"
+            + (f"<h2>按保存的信心等级</h2>{by_level}" if show else "") + f"<h2>概率校准</h2>{calibration}"
+            + (f"<h2>按信心等级校准</h2>{confidence_calibration}" if show else "")
+            + f"<h2>按联赛</h2>{summary_table(metrics['competitions'], ('competition',))}"
             f"<h2>按比赛标签（未知单列）</h2>{summary_table(metrics['tags'], ('tag', 'tag_value'))}")
     body = (f"<h1>战绩 <span class='accent'>赛后对账</span></h1>"
             + review_notes + picks_record(data) + rep
             + "<h2>详细统计</h2>"
             + (details("最近踢完的：各版本胜平负猜中（不分玩法，每个版本都列）", recent) if recent else "")
-            + details("详细统计表（log loss、校准、按信心等级、按联赛、和收盘赔率逐家比较）",
+            + details(f"详细统计表（log loss、校准、{'按信心等级、' if show else ''}按联赛、和收盘赔率逐家比较）",
                       f"<p class='muted'>从 data/review/scores.csv 汇总：已经踢完、有预测的比赛，每一版、每种概率一行。"
             f"模型版本、预测时点、实际归档状态分别统计。log loss、Brier、RPS 都是越小越准。"
             f"收盘字段来自有证据的来源声明，不表示恰好在开球瞬间采集；最后一次观察到的赛前价格单独保留。零匹配表示无匹配证据。</p>"

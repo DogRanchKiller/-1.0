@@ -101,11 +101,11 @@ def test_data_attributes_for_filters_exist(world):
     with LiveRunning(s, tmp) as srv:
         h = srv.cookie()
         index = srv.req("GET", "/", h)[1].decode("utf-8")
-        # 首页：联赛、有没有预测、信心、概率、球队原名
+        # 首页：联赛、有没有预测、概率、球队原名（信心等级不显示时没有 data-level，见 test_site_confidence.py）
         row10 = re.search(r"<tr( data-match-id='10'[^>]*)>", index).group(1)
         for attr in ("data-league='E0'", "data-league-name='英超'", "data-pred='1'", "data-teams=", "data-kickoff="):
             assert attr in row10, attr
-        assert re.search(r"data-level='[123]'", row10) and re.search(r"data-p='0\.\d{3},0\.\d{3},0\.\d{3}'", row10)
+        assert "data-level=" not in row10 and re.search(r"data-p='0\.\d{3},0\.\d{3},0\.\d{3}'", row10)
         assert "data-pred='0'" in re.search(r"<tr( data-match-id='11'[^>]*)>", index).group(1)   # 11 还没有预测
         # 即时比分的格子：比赛 10 在踢（服务器已经放了一份），比赛 1 有正式赛果（没有格子）
         assert re.search(r"<td data-live-slot='10'><span class='live-score'>", index)

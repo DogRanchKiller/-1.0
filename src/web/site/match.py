@@ -83,6 +83,36 @@ def level(row: dict):
     return fusion(row).get("信心等级")
 
 
+def show_level(settings: dict) -> bool:
+    """网站上显不显示信心等级（settings.yaml 的 site.show_confidence，没写当 true）。
+    2026-11-07 起是 false：实时预测每场都是 ●●● 高，显示出来没有区分作用（需求文档第 8 节）。存档里的等级照样存，只是不显示。"""
+    return bool((settings.get("site") or {}).get("show_confidence", True))
+
+
+def source_text(row: dict) -> str | None:
+    """这一版最后的概率从哪来，一小句（结论那一行的小标签用）：
+    用上了赔率、赔率占 100%（w = 1）→ “概率来自去水赔率”；赔率占一部分 → “赔率占 x%、模型占 y%”。
+    w 用这一版存档时记下的（不是现在的设置）。没用上赔率的返回 None（那种情况另外写“只有模型（没和赔率融合）”）。"""
+    from src.web.site.picks import used_odds         # 放这里导入，和别处一样免得互相导入
+    if not used_odds(row):
+        return None
+    w = fusion(row).get("w")
+    if not isinstance(w, (int, float)) or isinstance(w, bool):
+        return None
+    if float(w) == 1.0:
+        return "概率来自去水赔率"
+    return f"赔率占 {float(w) * 100:g}%、模型占 {(1 - float(w)) * 100:g}%"
+
+
+def level_tag(row: dict, show: bool) -> str:
+    """结论那一行的第一个小标签：show=True 写信心等级（以前的样子）；show=False 写概率从哪来（没用上赔率时什么都不写，
+    后面另有“只有模型”的提醒）。"""
+    if show:
+        return f"<span class='tag'>{e(level_name(level(row)))}</span>"
+    src = source_text(row)
+    return f"<span class='tag'>{e(src)}</span>" if src else ""
+
+
 def uncertain(row: dict) -> list[str]:
     u = fusion(row).get("不确定因素")
     return [str(x) for x in u] if isinstance(u, list) else []
@@ -107,12 +137,13 @@ def probs_text(p) -> str:
     return " / ".join(f"{OUTCOMES[i]} {pct0(x)}" for i, x in enumerate(p))
 
 
-def conclusion_html(row: dict, skip_ah: bool = False) -> str:
-    """一版的结论：胜平负概率、信心等级、倾向（首页每场一格用）。
+def conclusion_html(row: dict, skip_ah: bool = False, show: bool = True) -> str:
+    """一版的结论：胜平负概率、信心等级（show=False 时换成“概率来自去水赔率”，见 level_tag）、倾向（首页每场一格用）。
     skip_ah=True：倾向那一行不写亚盘（调用的地方已经把亚盘倾向写在最上面当主结论了，见 pages.latest_cell）。"""
     p, src = final_probs(row)
     st = fusion(row).get("状态")
-    bits = [f"<span class='probs'>{e(probs_text(p))}</span> <span class='tag'>{e(level_name(level(row)))}</span>"]
+    tag = level_tag(row, show)
+    bits = [f"<span class='probs'>{e(probs_text(p))}</span>" + (f" {tag}" if tag else "")]
     if src == "模型":
         bits.append(" <span class='tag warn'>只有模型（没和赔率融合）</span>")
     elif st and st != "已融合":
@@ -225,8 +256,16 @@ def versions_html(data: SiteData, mid: int) -> str:
         ])
     note = ("<p class='small muted'>截止时间和存档时间分别列出，均为北京时间。模型名称、模型版本、预测时点与归档状态分别保留。各版本只用当时已经知道的数据，"
             "所以越晚的版本赔率越新；“首发”还没有接进来时写“未含首发”。猜中 = 胜平负里概率最大的那项和赛果一样。</p>")
-    full = table(["模型", "模型版本", "预测时点", "归档状态", "数据截止时间", "存档时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"], out) + note
+    head = ["模型", "模型版本", "预测时点", "归档状态", "数据截止时间", "存档时间", "模型自己", "和赔率融合后", "信心", "倾向", "不确定因素、首发", "胜平负猜中"]
+    if not show_level(data.settings):            # 不显示信心等级：去掉“信心”那一列（第 9 列）
+        head, out = _drop_col(head, 8), [_drop_col(r, 8) for r in out]
+    full = table(head, out) + note
     return short_versions(data, mid) + details("完整记录（模型版本、归档状态、存档时间、换模型前的旧版本）", full)
+
+
+def _drop_col(cells: list, i: int) -> list:
+    """去掉表格一行里的第 i 格（从 0 数）。"""
+    return cells[:i] + cells[i + 1:]
 
 
 def short_versions(data: SiteData, mid: int) -> str:
@@ -244,7 +283,10 @@ def short_versions(data: SiteData, mid: int) -> str:
         p, _ = final_probs(r)
         out.append([e(version_name(kind)), e(bj_text(r["cutoff_utc"])), e(probs_text(p)) + bar_html(p), e(level_name(level(r))),
                     "<br>".join(e(t) for t in leans(r)) or "—", hit_html(r, score)])
-    return table(["哪一版", "用到这个时间的数据", "最后的概率（主胜 / 平 / 客胜）", "信心", "倾向", "胜平负猜中"], out)
+    head = ["哪一版", "用到这个时间的数据", "最后的概率（主胜 / 平 / 客胜）", "信心", "倾向", "胜平负猜中"]
+    if not show_level(data.settings):            # 不显示信心等级：去掉“信心”那一列（第 4 列）
+        head, out = _drop_col(head, 3), [_drop_col(r, 3) for r in out]
+    return table(head, out)
 
 
 def explanations_html(data: SiteData, mid: int) -> str:
@@ -571,11 +613,12 @@ def review_html(data: SiteData, mid: int) -> str:
 
 
 # ---------- 整页 ----------
-def tags_html(row: dict) -> str:
-    """信心等级，加上“只有模型”“赔率不全”这类提醒（概率本身在上面的概率条里，不再写一遍）。"""
+def tags_html(row: dict, show: bool = True) -> str:
+    """信心等级（show=False 时换成“概率来自去水赔率”，见 level_tag），加上“只有模型”“赔率不全”这类提醒
+    （概率本身在上面的概率条里，不再写一遍）。"""
     p, src = final_probs(row)
     st = fusion(row).get("状态")
-    out = f"信心 <span class='tag'>{e(level_name(level(row)))}</span>"
+    out = f"信心 {level_tag(row, True)}" if show else level_tag(row, False)
     if src == "模型":
         out += " <span class='tag warn'>只有模型（没和赔率融合）</span>"
     elif st and st != "已融合":
@@ -685,7 +728,7 @@ def render(data: SiteData, mid: int, teams: TeamFiles) -> str:
         kind, row = latest
         # version-switch：空的格子（没有脚本时什么都不显示）。/static/site.js 从 /api/match/<编号> 取各版本，
         # 在这里放“开球前 24 / 6 / 1 小时”几个按钮，点一下看那一版的概率和前后怎么变
-        summary = (f"<h2>结论</h2><div class='card pad hero'>{hero_html(data, mid, row)}<p>{tags_html(row)}</p>"
+        summary = (f"<h2>结论</h2><div class='card pad hero'>{hero_html(data, mid, row)}<p>{tags_html(row, show_level(data.settings))}</p>"
                    f"<p class='small muted'>最新一版：{e(version_name(kind))}，用 {e(bj_text(row['cutoff_utc']))}（北京时间）"
                    f"之前的数据。</p></div><div class='version-switch' data-version-switch='{int(mid)}'></div>"
                    f"<h2>四个玩法的预测</h2>{picks_html(data, mid, row)}")

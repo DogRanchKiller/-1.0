@@ -301,7 +301,13 @@ def test_record_page(env):
     out, _ = build(env)
     html = read(out, "record.html")
     assert "不分版本" in html and "收盘赔率" in html and "0.690" in html
+    # 网站不显示信心等级（settings.yaml site.show_confidence: false）：战绩页没有“按信心等级”那两张表
+    assert "●●● 高" not in html and "●●○ 中" not in html and "按保存的信心等级" not in html and "按信心等级" not in html
+    assert "概率校准" in html and "按联赛" in html           # 别的表照样在
+    env[1]["site"]["show_confidence"] = True
+    html = read(build(env)[0], "record.html")
     assert "●●● 高" in html and "●●○ 中" in html           # T-24、T-1 是 3 级，预览版是 2 级
+    assert "按保存的信心等级" in html and "按信心等级校准" in html
     assert "2026-W45.md" in html and "第 45 周" in html
 
 

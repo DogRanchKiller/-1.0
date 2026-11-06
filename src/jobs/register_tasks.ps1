@@ -7,6 +7,7 @@
 #     Unregister-ScheduledTask -TaskName 足球预测_数据状态 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_定时预测 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_赛后复盘 -Confirm:$false
+#     Unregister-ScheduledTask -TaskName 足球预测_四本账对账 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_生成网站 -Confirm:$false
 #     Unregister-ScheduledTask -TaskName 足球预测_网站服务 -Confirm:$false
 
@@ -59,6 +60,14 @@ $triggers = @(
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "足球预测_赛后复盘" -Action $action -Trigger $triggers -Settings $settings `
     -Description "每天 09:10、21:10 重新对账完赛预测，生成单场复盘和周报月报" -Force | Out-Null
+
+# 四本账对账：每天北京时间 09:40 一次（在 09:10 的赛后复盘之后），按四个通道把踢完的真实预测和市场重新对一遍账，
+# 结果写到 data/backtest/ledger/，数据状态页能看到（需求文档第 16 节“四本账怎么算”）。只读，错过时开机后补跑
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.ledger_daily" -WorkingDirectory $root
+$trigger = New-ScheduledTaskTrigger -Daily -At 09:40
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "足球预测_四本账对账" -Action $action -Trigger $trigger -Settings $settings `
+    -Description "每天 09:40 按四个通道给踢完的真实预测和市场对账（只读）" -Force | Out-Null
 
 # 网站（K3）：每 15 分钟一次（第 12、27、42、57 分），显示最新预测和复盘，只读数据库、不联网。
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument "-m src.jobs.build_site" -WorkingDirectory $root
