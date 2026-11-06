@@ -12,6 +12,7 @@
 import copy
 import gzip
 import json
+import os
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -309,6 +310,10 @@ def test_lineups(env):
     put_lineup(raw, "lineup_live/E0/903/20261107T1000Z.html.gz", lineup_html(903, home="曼城", away="阿森纳"))  # 主客反了
     put_lineup(raw, "lineup_final/E0/2026/901.html.gz",
                lineup_html(901, new_lineup=0, status="Played", home="曼城", away="切尔西", subs=9))
+    # 赛后首发页文件名里没有时间、也没有抓取记录，导入时用文件修改时间当“抓到的时间”。
+    # 固定成 NOW 之前（11-06 06:00 UTC），不然测试跟着真实日期变：过了 NOW 那天就取不到这份名单
+    os.utime(raw / "dongqiudi" / "lineup_final/E0/2026/901.html.gz",
+             (NOW.timestamp() - 6 * 3600,) * 2)
     out = go(env)
     c = out["counts"]
     assert c["首发名单（份）"] == 3 and c["首发名单（球员行）"] == 22 * 2 + 40
