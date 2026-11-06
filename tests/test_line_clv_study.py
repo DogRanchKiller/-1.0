@@ -192,7 +192,8 @@ def _fake_db(settings, n=14):
     r = np.random.default_rng(7)
     c = sqlite3.connect(":memory:")
     create_tables(c)
-    games = [(100 * (k + 1) + i, lg, 2019, (pd.Timestamp("2019-08-10") + pd.Timedelta(weeks=i)).strftime("%Y-%m-%d"))
+    # 都是周日：football-data 周五傍晚采的赛前价格，T-24 已经能知道（周六的比赛 T-24 还没采，需求文档第 16 节时间核对）
+    games = [(100 * (k + 1) + i, lg, 2019, (pd.Timestamp("2019-08-11") + pd.Timedelta(weeks=i)).strftime("%Y-%m-%d"))
              for k, lg in enumerate(["E0", "E1"]) for i in range(n)]
     games.append((999, "E0", 2024, "2024-08-17"))
     c.executemany("insert into teams (team_id, country) values (?, 'England')",

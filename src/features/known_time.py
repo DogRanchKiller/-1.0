@@ -6,7 +6,10 @@
 规则（数字都在 settings.yaml 的 features 段）：
 - 比分、射门等赛后数据：开球时间 + result_available_after_kickoff_hours（默认 3 小时：踢 2 小时，留 1 小时更新数据）。
 - 收盘赔率：开球那一刻。所以本场的收盘赔率，开球前任何时候都拿不到。
-- 赛前赔率：开球前 pre_odds_hours_before_kickoff 小时（按来源分；football-data 是 24，当作 T-24 版的赔率）。
+- 赛前赔率：按来源分两种写法（settings.yaml 的 features 段）。
+  pre_odds_hours_before_kickoff：最早开球前几小时；pre_odds_collection：按采集时间（pre_odds_collection_utc）。
+  football-data 用采集时间：比赛日当天或之前最近的周二 / 周五 18:00 英国时间（2026-11-06 时间核对后从“开球前 24 小时”改过来，
+  因为周二、周五的比赛是当天下午才采的，比 T-24 晚）。
 - 赛程（谁和谁、哪天踢）：一直能知道。
 
 只有日期、没有开球时间的比赛（football-data 2019/20 以前全是这样）用保守规则，两头都往“更不容易偷看”的方向估：
@@ -108,3 +111,25 @@ def compute_known_times(matches: pd.DataFrame, feature_settings: dict) -> pd.Dat
         "result_known_utc": fmt(latest + buffer).to_numpy(),
         "close_known_utc": fmt(latest).to_numpy(),
     })
+
+
+def collection_back_days(weekdays: pd.Series, collection_weekdays: list[int]) -> pd.Series:
+    """比赛日是周几 → 往前推几天是采集日（当天或之前最近的一个采集日）。周几用数字：周一 0 … 周日 6。
+
+    例如采集日是周二（1）、周五（4）：周六（5）往前 1 天是周五；周一（0）往前 3 天是周五；周二当天采（0 天）。
+    """
+    def back(wd: int) -> int:
+        return min((wd - c) % 7 for c in collection_weekdays)
+    return weekdays.map(back)
+
+
+def pre_odds_collection_utc(match_dates: pd.Series, tz: str, weekdays: list[int], hour: int) -> pd.Series:
+    """按采集时间算的赛前赔率“能知道的时间”（UTC 文字）：比赛日当天或之前最近的采集日，tz 时区的 hour 点。
+
+    match_dates：比赛日（tz 时区的日期，'YYYY-MM-DD'）。例如 football-data 周二、周五 18:00 英国时间：
+    2021-08-14（周六）→ 2021-08-13 18:00 英国夏令时 = 17:00 UTC；2010-09-14（周二）→ 当天 18:00 = 17:00 UTC。
+    """
+    date = pd.to_datetime(match_dates, format="%Y-%m-%d").reset_index(drop=True)
+    day = date - pd.to_timedelta(collection_back_days(date.dt.day_of_week, [int(w) for w in weekdays]), unit="D")
+    local = (day + pd.Timedelta(hours=int(hour))).dt.tz_localize(tz, ambiguous=True, nonexistent="shift_forward")
+    return local.dt.tz_convert("UTC").dt.strftime(TIME_FORMAT)

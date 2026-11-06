@@ -26,20 +26,10 @@ import pandas as pd
 
 from src.common.config import load_settings, resolve_path, season_role
 from src.features import FeatureStore, open_readonly
-from src.features.known_time import compute_known_times
+from src.features.known_time import collection_back_days, compute_known_times
 
 SECTION = "timing_check"
 WEEKDAY_NAMES = "一二三四五六日"   # 周一 0 … 周日 6
-
-
-def collection_back_days(weekdays: pd.Series, collection_weekdays: list[int]) -> pd.Series:
-    """比赛日是周几 → 往前推几天是采集日（当天或之前最近的一个采集日）。
-
-    例如采集日是周二（1）、周五（4）：周六（5）往前 1 天是周五；周一（0）往前 3 天是周五；周二当天采（0 天）。
-    """
-    def back(wd: int) -> int:
-        return min((wd - c) % 7 for c in collection_weekdays)
-    return weekdays.map(back)
 
 
 def pre_odds_peek(matches: pd.DataFrame, feature_settings: dict, collection_weekdays: list[int],

@@ -3,7 +3,8 @@
 一、src/common/markets.py 的独立泊松矩阵和 src/models/goals.py 的一样（取数层用前者，不能引用模型）。
 二、赔率特征（src/features/market_odds.py）：平博 → 多家平均按顺序选、按比例去水、大 2.5 球、市场预期进球、别的来源不用。
 三、回测框架接赔率：用 test_backtest 的小联赛，加上赛前赔率。
-    历史比赛的赔率特征只给比分已经能知道的比赛；要预测的比赛只在截止时间不早于“开球前 24 小时”时有赔率；
+    历史比赛的赔率特征只给比分已经能知道的比赛；要预测的比赛只在截止时间不早于赔率采集时间时有赔率
+    （football-data：比赛日当天或之前最近的周二 / 周五 18:00 英国时间；小联赛都是周六，周五傍晚采：T-48 还没有，T-6 有）；
     A版输入的模型拿不到赔率（取数层报错）。
 四、market_pre 出的就是赛前赔率去水；梯度提升树的赔率特征“这队 / 对手”方向对、训练表和出预测时一样、A 版不能加赔率。
 """
@@ -15,6 +16,7 @@ from src.common import markets
 from src.common.odds import devig_proportional
 from src.evaluate.backtest import run_backtest
 from src.features import FeatureStore, UsageNotAllowedError
+from src.features.known_time import pre_odds_collection_utc
 from src.features.market_odds import ODDS_COLS, odds_features
 from src.models.base import Model
 from src.models.goals import score_matrices
@@ -119,7 +121,10 @@ class OddsSpy(Model):
 
 def test_backtest_gives_odds_features_without_peeking(fs_odds):
     spy = OddsSpy()
-    run_backtest(fs_odds, "E0", 2022, 2022, [spy], horizons=[48, 24])
+    run_backtest(fs_odds, "E0", 2022, 2022, [spy], horizons=[48, 6])
+    rule = fs_odds.fs["pre_odds_collection"]["football-data"]
+    days = {m[0]: m[5] for m in MATCHES}
+    seen_late = 0
     pin = devig_proportional([1.7, 3.8, 5.5])
     avg = devig_proportional([2.4, 3.3, 3.0])
     seen_hist = 0
@@ -132,17 +137,19 @@ def test_backtest_gives_odds_features_without_peeking(fs_odds):
                 assert df["mo_p_home"].notna().all() and df["mo_over25"].notna().all()
                 seen_hist += len(df)
             continue
-        # 要预测的比赛：T-48 赔率还不能知道（开球前 24 小时才算能知道）→ 空值；T-24 有
-        ko = df["kickoff_earliest_utc"].map(pd.Timestamp)
-        early = (ko - pd.Timestamp(cutoff)) > pd.Timedelta(hours=24)
+        # 要预测的比赛：截止时间早于采集时间（T-48 = 周四）赔率还不能知道 → 空值；不早于采集时间（T-6）有
+        known = pre_odds_collection_utc(df["match_id"].map(days), fs_odds.fs["date_only_timezone"],
+                                        rule["weekdays"], rule["hour"])
+        early = (known > cutoff).to_numpy()
         assert df.loc[early, ODDS_COLS].isna().all().all()
         late = df[~early]
+        seen_late += len(late)
         for _, r in late.iterrows():
             want = pin if r["match_id"] in PRE_PIN else avg
             np.testing.assert_allclose(r[["mo_p_home", "mo_p_draw", "mo_p_away"]].to_numpy(float), want)
             assert r["mo_pinnacle"] == float(r["match_id"] in PRE_PIN)
             assert r["mo_over25"] == pytest.approx(devig_proportional([2.0, 1.8])[0])
-    assert seen_hist > 0
+    assert seen_hist > 0 and seen_late > 0
     assert any(not df.empty and df[ODDS_COLS[0]].notna().any() for k, _, df in spy.log if k == "predict")
 
 
@@ -157,10 +164,10 @@ def test_a_version_cannot_get_odds(fs_odds):
 def test_market_pre_is_devigged_pre_odds(fs_odds, settings):
     m = build_model("market_pre", settings)
     assert m.usage == "B版输入" and m.uses_pre_odds and model_config("market_pre", settings)["market_odds"]
-    res = run_backtest(fs_odds, "E0", 2022, 2022, [m], horizons=[48, 24])
+    res = run_backtest(fs_odds, "E0", 2022, 2022, [m], horizons=[48, 6])   # 周六的比赛：周五傍晚采，T-48 还没有，T-6 有
     p = res.predictions[res.predictions["model"] == "market_pre"].set_index(["match_id", "horizon"])
     some = PRE_PIN[0]
-    np.testing.assert_allclose(p.loc[(some, "T-24"), ["p_home", "p_draw", "p_away"]].to_numpy(float),
+    np.testing.assert_allclose(p.loc[(some, "T-6"), ["p_home", "p_draw", "p_away"]].to_numpy(float),
                                devig_proportional([1.7, 3.8, 5.5]))
     assert p.xs("T-48", level="horizon")["p_home"].isna().all()       # T-48 还没有赔率 → 不出预测
     with pytest.raises(ValueError):

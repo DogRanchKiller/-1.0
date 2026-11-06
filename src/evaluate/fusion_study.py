@@ -422,7 +422,8 @@ def main() -> None:
     # 取赔率用到的设置变了（换公司、换线、换用途、赛前赔率几小时前算知道、换数据库）就重新取，不用旧的
     key = json.dumps({"market_odds": settings["market_odds"], "usage": st["usage"], "ah_book": st["ah_book"],
                       "model": st["model"], "horizon": st["horizon"], "db": str(a.db),
-                      "pre_odds_hours": settings["features"]["pre_odds_hours_before_kickoff"]},
+                      "pre_odds_hours": settings["features"].get("pre_odds_hours_before_kickoff"),
+                      "pre_odds_collection": settings["features"].get("pre_odds_collection")},
                      ensure_ascii=False, sort_keys=True)
     odds = None
     if cache.exists() and key_file.exists() and key_file.read_text(encoding="utf-8") == key and not a.refresh_odds:

@@ -15,7 +15,8 @@
 二、从哪拿（都经过取数层，规矩和别的数据一样）
   以前的比赛：FeatureStore.historical_odds（比分能知道才给），history_odds_features 取。
   要预测的比赛：FeatureStore.pre_match_odds 按“本场”取（检查用途、运行模式、截止时间早于开球；
-      赛前赔率开球前 24 小时才算能知道），attach_odds_features 接到目标比赛那张表上。
+      赛前赔率按采集时间才算能知道，football-data 是比赛日当天或之前最近的周二 / 周五 18:00 英国时间），
+      attach_odds_features 接到目标比赛那张表上。
   只用 market_odds.source 这个来源（football-data）：别的来源的赛前赔率采集时间不一样，混在一起训练和预测对不上。
   两个函数都检查：取到的每一行“能知道的时间”都不晚于截止时间，否则停下报错。
 

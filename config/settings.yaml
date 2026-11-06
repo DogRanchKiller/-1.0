@@ -339,10 +339,16 @@ features:                    # 取数层 src/features（需求文档第 16、17 
   # 比分、统计开球后几个小时才算“能知道”：90 分钟 + 中场 15 分钟 + 补时，约 2 小时踢完，再留 1 小时给数据更新。
   # 要模拟“football-data 过几天才更新”的延迟（需求文档 6.2），把这个数调大再回测。
   result_available_after_kickoff_hours: 3
-  # 赛前赔率开球前几个小时算“能知道”（按来源分）。football-data 实际是周五 / 周二下午采集的（开赛前约 1–3 天），
-  # 按需求文档第 17 节第 3 步的约定，当作 T-24 版的赔率，所以写 24。没登记的来源一律拿不到。
-  pre_odds_hours_before_kickoff:
-    football-data: 24
+  # 赛前赔率什么时候算“能知道”（按来源分），两种写法，一个来源只登记一种；两种都没登记的来源一律拿不到。
+  # 1）开球前几个小时（pre_odds_hours_before_kickoff）。现在没有来源用这一种。
+  #    以前 football-data 写 24（当作 T-24 版的赔率）；2026-11-06 时间核对发现周二、周五的比赛是当天下午才采的，比 T-24 晚，改成第 2 种。
+  #    退回原来的规则：这里放回 football-data: 24，删掉下面 pre_odds_collection 里的 football-data。
+  pre_odds_hours_before_kickoff: {}
+  # 2）按采集时间（pre_odds_collection）：比赛日（date_only_timezone 的日期）当天或之前、最近的一个采集日（weekdays，周一 0 … 周日 6），
+  #    hour 点（date_only_timezone 的时间）。football-data 说明文件：周末比赛周五下午采、周中比赛周二下午采，没写几点，
+  #    “下午”取晚的一头 18 点，宁可晚知道（需求文档第 16 节“时间核对（第 1 步）”第 1 条怎么修）。
+  pre_odds_collection:
+    football-data: {weekdays: [1, 4], hour: 18}
   # 只有日期、没有开球时间的比赛，日期按哪个时区的“一天”算（football-data 的日期是英国当地日期）
   date_only_timezone: Europe/London
   # 只知道“这一轮从哪天开始”的杯赛（date_precision = round），按这一轮最长持续几天算最晚开球（比分晚知道，不偷看）

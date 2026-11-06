@@ -130,15 +130,49 @@ def test_cutoff_with_timezone_is_converted():
 
 
 # ---------- 截止时间：赔率 ----------
-def test_pre_match_odds_known_24h_before(dev):
-    """3 号 2024-01-14 15:00 开球：赛前赔率 13 日 15:00（T-24）起能拿到，早 1 秒拿不到。没登记的来源永远拿不到。"""
+def test_pre_match_odds_known_at_collection_time(dev):
+    """3 号 2024-01-14（周日）15:00 开球：football-data 周五 18:00 英国时间采（1 月 = 12 日 18:00 UTC），
+    这一刻起能拿到，早 1 秒拿不到；T-24 当然拿得到。没登记的来源永远拿不到。"""
     t24 = dev.cutoff_before(3, 24, "B版输入")
     assert t24 == "2024-01-13 15:00:00"
     got = dev.pre_match_odds(3, t24, "B版输入")
     assert sorted(got["bookmaker"]) == ["多家平均", "平博 Pinnacle"]
     assert set(got["source"]) == {"football-data"}
-    assert dev.pre_match_odds(3, "2024-01-13 14:59:59", "B版输入").empty
+    assert (got["known_at_utc"] == "2024-01-12 18:00:00").all()
+    assert len(dev.pre_match_odds(3, "2024-01-12 18:00", "B版输入")) == 2
+    assert dev.pre_match_odds(3, "2024-01-12 17:59:59", "B版输入").empty
     assert len(dev.pre_match_odds(3, dev.cutoff_before(3, 1), "融合", bookmaker="平博 Pinnacle")) == 1
+
+
+def test_pre_match_odds_tuesday_match_not_known_at_t24(con, settings):
+    """周二的比赛当天 18:00 英国时间才采（夏令时 = 17:00 UTC）：T-24 拿不到，开球前 1 小时拿得到。
+    只有日期的周六比赛：周五 18:00 采，比“当天 00:00 往前 24 小时”晚，T-24 也拿不到。"""
+    con.executemany("insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc,"
+                    " status) values (?, 'E0', 2023, ?, ?, ?, ?, 'finished')",
+                    [(7, "B", "D", "2024-04-16", "2024-04-16 18:45"), (8, "C", "B", "2024-04-20", None)])
+    con.executemany("insert into odds (match_id, source, bookmaker, market, timing, line, home, draw, away)"
+                    " values (?, 'football-data', '多家平均', '1x2', 'pre', null, 2.0, 3.3, 3.8)", [(7,), (8,)])
+    con.commit()
+    fs = FeatureStore(con, "开发", settings)
+    assert fs.pre_match_odds(7, fs.cutoff_before(7, 24, "B版输入"), "B版输入").empty
+    assert fs.pre_match_odds(7, "2024-04-16 16:59:59", "B版输入").empty
+    got = fs.pre_match_odds(7, fs.cutoff_before(7, 1, "B版输入"), "B版输入")
+    assert got["known_at_utc"].tolist() == ["2024-04-16 17:00:00"]
+    assert fs.cutoff_before(8, 24, "B版输入") == "2024-04-18 23:00:00"
+    assert fs.pre_match_odds(8, "2024-04-18 23:00", "B版输入").empty
+    assert len(fs.pre_match_odds(8, "2024-04-19 17:00", "B版输入")) == 1
+
+
+def test_pre_match_odds_hours_rule_still_works(con, settings):
+    """另一种写法（开球前几小时）还能用：把 football-data 改回 24 小时，就回到原来的规则（回退方案）。"""
+    s = copy.deepcopy(settings)
+    s["features"]["pre_odds_hours_before_kickoff"] = {"football-data": 24}
+    s["features"]["pre_odds_collection"] = {}
+    fs = FeatureStore(con, "开发", s)
+    assert len(fs.pre_match_odds(3, "2024-01-13 15:00", "B版输入")) == 2
+    assert fs.pre_match_odds(3, "2024-01-13 14:59:59", "B版输入").empty
+    s["features"]["pre_odds_hours_before_kickoff"] = {}
+    assert FeatureStore(con, "开发", s).pre_match_odds(3, "2024-01-14 14:00", "B版输入").empty   # 两边都没登记：拿不到
 
 
 def test_closing_odds_never_for_this_match_before_kickoff(dev):

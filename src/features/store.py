@@ -30,7 +30,7 @@ import pandas as pd
 
 from src.common.config import load_settings, resolve_path, season_role
 from src.features.errors import LookAheadError
-from src.features.known_time import TIME_FORMAT, compute_known_times, to_utc_text
+from src.features.known_time import TIME_FORMAT, compute_known_times, pre_odds_collection_utc, to_utc_text
 from src.features.usage import PAST, THIS, DataUsage, normalize_mode, season_label
 
 MARKETS = {"1x2", "ou", "ah"}  # 玩法：胜平负 / 大小球 / 亚盘（和 odds 表的写法一样）
@@ -71,6 +71,7 @@ class FeatureStore:
         tag = uuid.uuid4().hex[:8]
         self._kt = f"fs_known_{tag}"      # 每场比赛的几个关键时间点
         self._lead = f"fs_odds_lead_{tag}"  # 赛前赔率：每个来源开球前几小时算能知道
+        self._coll = f"fs_odds_coll_{tag}"  # 赛前赔率：按采集时间算的来源，每场比赛哪一刻算能知道
         self._prio = f"fs_stats_prio_{tag}"  # 同一场有几个来源的比分时，先用哪个
         self.refresh()
 
@@ -84,7 +85,7 @@ class FeatureStore:
         roles = {s: season_role(int(s), self.settings) for s in m["season"].unique()}
         kt["season_role"] = m["season"].map(roles).to_numpy()
         c = self.conn
-        for t in (self._kt, self._lead, self._prio):
+        for t in (self._kt, self._lead, self._coll, self._prio):
             c.execute(f"drop table if exists temp.{t}")
         c.execute(f"""create temp table {self._kt} (
             match_id integer primary key, season_role text not null,
@@ -97,7 +98,16 @@ class FeatureStore:
         # 赛前赔率的提前量写成 SQLite 能直接用的写法，例如 '-24.0 hours'
         c.execute(f"create temp table {self._lead} (source text primary key, modifier text not null)")
         c.executemany(f"insert into temp.{self._lead} values (?, ?)",
-                      [(src, f"-{float(h)} hours") for src, h in self.fs["pre_odds_hours_before_kickoff"].items()])
+                      [(src, f"-{float(h)} hours") for src, h in (self.fs.get("pre_odds_hours_before_kickoff") or {}).items()])
+        # 按采集时间算的来源（例如 football-data 每周二、周五 18:00 英国时间采）：每场比赛算出采集那一刻，放一行
+        c.execute(f"""create temp table {self._coll} (
+            match_id integer not null, source text not null, known_at_utc text not null,
+            primary key (match_id, source))""")
+        tz = self.fs["date_only_timezone"]
+        for src, rule in (self.fs.get("pre_odds_collection") or {}).items():
+            known = pre_odds_collection_utc(m["match_date"], tz, rule["weekdays"], rule["hour"])
+            c.executemany(f"insert into temp.{self._coll} values (?, ?, ?)",
+                          [(int(mid), src, k) for mid, k in zip(m["match_id"], known)])
         c.execute(f"create temp table {self._prio} (source text primary key, rank integer not null)")
         c.executemany(f"insert into temp.{self._prio} values (?, ?)",
                       [(src, i) for i, src in enumerate(self.fs["stats_source_priority"])])
@@ -381,21 +391,29 @@ class FeatureStore:
     def pre_match_odds(self, match_id: int, cutoff, usage: str, bookmaker=None, market=None) -> pd.DataFrame:
         """本场截止时间之前已经能看到的赛前赔率，一行是“一家公司 × 一种玩法”。
 
-        football-data 的赛前赔率按开球前 24 小时能知道算（settings.yaml 的 pre_odds_hours_before_kickoff），
-        所以截止时间在 T-24 之后才拿得到；T-6、T-1 拿到的也是同一组（football-data 只有一个赛前时点）。
+        能知道的时间按来源分（settings.yaml 的 features 段）：
+          pre_odds_collection 里的来源按采集时间算。football-data = 比赛日当天或之前最近的周二 / 周五 18:00 英国时间：
+            周日、周一的比赛周五傍晚就能知道（比 T-24 早）；周六的比赛也是周五傍晚，18 点以前开球的比 T-24 晚；
+            周二、周五的比赛要到当天 18:00（T-24 拿不到，开球前几小时才拿得到）。
+            football-data 只有一个赛前时点，什么时候拿到都是同一组。
+          pre_odds_hours_before_kickoff 里的来源按最早开球前几小时算。
+          两边都没登记的来源一律拿不到。
         bookmaker：公司名，按 odds 表的写法，例如 '平博 Pinnacle'、'多家平均'；market：'1x2' / 'ou' / 'ah'。
         """
         cutoff = to_utc_text(cutoff)
         self._target(match_id, cutoff, usage, ["赛前赔率"])
         where, params = self._odds_filters(bookmaker, market)
-        # 能知道的时间 = 最早开球 − 这个来源的提前量；没登记提前量的来源 join 不上，一律拿不到
-        known = "datetime(k.kickoff_earliest_utc, l.modifier)"
+        # 能知道的时间 = 采集时间（登记了 pre_odds_collection 的来源），否则 = 最早开球 − 这个来源的提前量；
+        # 两边都没登记的来源两个 left join 都是空，known 是空值，一律拿不到
+        known = "coalesce(c.known_at_utc, datetime(k.kickoff_earliest_utc, l.modifier))"
         sql = f"""
             select {ODDS_COLUMNS}, {known} as known_at_utc
             from odds o
             join temp.{self._kt} k on k.match_id = o.match_id
-            join temp.{self._lead} l on l.source = o.source
-            where o.match_id = ? and o.timing = 'pre' and {known} <= ? {''.join(' and ' + w for w in where)}
+            left join temp.{self._coll} c on c.match_id = o.match_id and c.source = o.source
+            left join temp.{self._lead} l on l.source = o.source
+            where o.match_id = ? and o.timing = 'pre' and {known} is not null and {known} <= ?
+                  {''.join(' and ' + w for w in where)}
             order by o.bookmaker, o.market"""
         return pd.read_sql(sql, self.conn, params=[int(match_id), cutoff, *params])
 
