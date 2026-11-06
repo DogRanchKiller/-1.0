@@ -43,6 +43,11 @@
     这队赢、平、对手赢的概率（赛前赔率去水）；大 2.5 球的概率；市场预期进球 log（这队、对手）；胜平负用的是不是平博。
   features = mktonly（对照组 gb_mkt）：只用联赛、是不是主场 + 这 7 个赔率特征。
   A版输入不能用赔率：用途是 A版输入 又写了 odds 直接报错。
+
+七、xG 研究第 1 段（需求文档第 4 节“xG 研究第 1 段怎么做”，只能用“研究实验”用途、只在开发模式）
+  xg_mix 大于 0 时，里面那个 dyn 每场赛后更新用的“进球”换成 (1 − xg_mix) × 真实进球 + xg_mix × Understat xG。
+  只改 dyn 的更新：dyn 拟合 rho、Elo、pi-rating、积分榜、近期状态、树要学的进球数都还用真实比分。
+  这场没有 xG 就照常用真实进球。特征的名字、个数和 gb_l7 一样。
 """
 from __future__ import annotations
 
@@ -64,6 +69,8 @@ TABLE = ["played", "ppg", "gdpg", "rank"]
 INJURY_DATA = "伤停（研究）"
 INJ = ["inj_n", "inj_share", "inj_top_loss"]
 EXTRA_COLS = [f"tm_{s}_{n}" for n in [*INJ, "top_value"] for s in ("home", "away")]
+XG_DATA = "Understat xG（研究）"
+XG_COLS = ["us_home_xg", "us_away_xg"]          # 含点球的 xG（取数层接上时加了 us_ 前缀）
 # 赔率特征的名字（按“这队 / 对手”的角度；ODDS_COLS 是按主队角度的原始列，见 _features）
 ODDS_FEATS = ["mkt_p_win", "mkt_p_draw", "mkt_p_loss", "mkt_over25", "mkt_loglam_for", "mkt_loglam_against",
               "mkt_pinnacle"]
@@ -79,7 +86,14 @@ class GBDTModel(Model):
                  learning_rate: float = 0.03, feature_fraction: float = 0.8, bagging_fraction: float = 0.8,
                  lambda_l2: float = 1.0, max_rounds: int = 2000, early_stopping_rounds: int = 50,
                  valid_days: float = 365, retrain_days: float = 91, min_train_rows: int = 2000,
-                 seed: int = 0, max_goals: int = 10, min_matches: int = 200, extra=(), usage: str = "A版输入"):
+                 seed: int = 0, max_goals: int = 10, min_matches: int = 200, extra=(), usage: str = "A版输入",
+                 xg_mix: float = 0.0):
+        self.xg_mix = float(xg_mix)
+        if not 0.0 <= self.xg_mix <= 1.0:
+            raise ValueError(f"xg_mix 要在 0 到 1 之间，收到 {xg_mix!r}")
+        if self.xg_mix > 0 and usage != "研究实验":
+            # 第 1 段用的是 Understat xG（只许研究实验用、只在开发模式）；实时用懂球帝 xG 是第 2 段的事，另外写
+            raise ValueError(f"xg_mix 用的是 Understat xG（研究），用途要是「研究实验」，收到「{usage}」")
         self.extra = tuple(extra or ())
         if any(e not in ("inj", "val", "odds") for e in self.extra):
             raise ValueError(f"extra 只能是 inj / val / odds，收到 {self.extra!r}")
@@ -88,6 +102,9 @@ class GBDTModel(Model):
         if self.injury:
             self.data = (*GBDTModel.data, INJURY_DATA)
             self.pre_match_data = (INJURY_DATA,)     # 回测框架看到这个，给要预测的比赛接上本场的伤停（快照时间之前才有数）
+        if self.xg_mix > 0:
+            # 只有赛后（训练、更新 dyn）用 xG，出预测不用本场的 xG，所以不写 pre_match_data
+            self.data = (*self.data, XG_DATA)
         self.odds = "odds" in self.extra
         if self.odds and usage in ("A版输入", "研究实验"):
             # 「研究实验」在数据字典里能取赛前赔率（给第 14 节二次筛选研究用），但研究用的第一层模型是 A 版，
@@ -210,7 +227,7 @@ class GBDTModel(Model):
             return
         r = r.sort_values(["kickoff_earliest_utc", "match_id"])
         num = {c: pd.to_numeric(r[c], errors="coerce").to_numpy(float) if c in r else np.full(len(r), np.nan)
-               for c in SHOT_COLS + REST_COLS + EXTRA_COLS + ODDS_COLS}
+               for c in SHOT_COLS + REST_COLS + EXTRA_COLS + ODDS_COLS + XG_COLS}
         items = list(r[["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
                         "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None))
         start = 0
@@ -222,19 +239,28 @@ class GBDTModel(Model):
                                     tuple(num[c][k] for c in EXTRA_COLS), tuple(num[c][k] for c in ODDS_COLS))
                      for k, it in enumerate(items[start:end], start)]
             for k, f in zip(range(start, end), feats):
-                self._observe_row(items[k], f, num["home_shots_on_target"][k], num["away_shots_on_target"][k])
+                self._observe_row(items[k], f, num["home_shots_on_target"][k], num["away_shots_on_target"][k],
+                                  (num["us_home_xg"][k], num["us_away_xg"][k]))
             start = end
 
-    def _observe_row(self, item, feats, sh, sa) -> None:
-        """一场比赛踢完：交给各个计算器更新，再把赛前特征存进训练表（这场的比分不会进这场的特征）。"""
+    def _observe_row(self, item, feats, sh, sa, xg=(np.nan, np.nan)) -> None:
+        """一场比赛踢完：交给各个计算器更新，再把赛前特征存进训练表（这场的比分不会进这场的特征）。
+
+        xg：这场的 (主队 xG, 客队 xG)。xg_mix > 0 时 dyn 的更新用 (1 − xg_mix) × 进球 + xg_mix × xG；
+        这场没有 xG（任何一队是空值）就照常用真实进球。别的计算器、树的目标都用真实比分。
+        """
         mid, comp, season, home, away, hg, ag, res, ko = item
         mid, season, hg, ag = int(mid), int(season), int(hg), int(ag)
         self.processed.add(mid)
-        # dyn 的更新和单独跑 dyn 时 _process 做的一样
+        # dyn 的更新和单独跑 dyn 时 _process 做的一样（xg_mix > 0 且这场有 xG 时，更新用的“进球”换成混合值）
         self.dyn.processed.add(mid)
         lg = self.dyn._prepare(comp, season, home, away, ko)
         if lg is not None:
-            self.dyn._observe(lg, ko, home, away, hg, ag)
+            target = None
+            if self.xg_mix > 0 and not (np.isnan(xg[0]) or np.isnan(xg[1])):
+                w = self.xg_mix
+                target = ((1 - w) * hg + w * float(xg[0]), (1 - w) * ag + w * float(xg[1]))
+            self.dyn._observe(lg, ko, home, away, hg, ag, target)
         self.elo.process_row(mid, comp, season, home, away, hg, ag, res, ko)
         self.pi.observe(comp, season, home, away, hg, ag)
         self.table.observe(comp, season, home, away, hg, ag)

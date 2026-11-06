@@ -1039,6 +1039,8 @@ models:                    # 第 0 步模型 src/models（需求文档第 4 节�
     gb_inj: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [inj]}         # 加伤停六个特征
     gb_val: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [val]}         # 只加身价差（对照，只报告）
     gb_inj_val: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [inj, val]} # 两样都加（只报告）
+    # xG 研究第 1 段（需求文档第 4 节“xG 研究第 1 段怎么做”）：dyn 的更新用 0.5 × 进球 + 0.5 × Understat xG，对照组是上面的 gb_l7_r
+    gb_xg_r: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, xg_mix: 0.5}
     # 步骤 8 B 版（需求文档第 4 节“步骤 8 怎么做”）：用途都是“B版输入”，一次回测里的用途要一样；另一组 market_pre 见 models.market_variants
     gb_l7_b: {num_leaves: 7, min_data_in_leaf: 200, usage: B版输入}                        # 和 gb_l7 一样，只是用途不同（核对）
     gb_b: {num_leaves: 7, min_data_in_leaf: 200, usage: B版输入, extra: [odds]}            # gb_l7 + 赔率特征（B 版）

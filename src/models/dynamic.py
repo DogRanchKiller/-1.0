@@ -221,10 +221,16 @@ class DynamicModel(Model):
         i, j = lg.pos(team)
         return float(lg.m[i]), float(lg.m[j])
 
-    def _observe(self, lg: _League, ko: str, home: str, away: str, hg: int, ag: int) -> None:
-        """一场比赛踢完：记下赛前的 λ，再按第四部分的式子更新 m、P。"""
+    def _observe(self, lg: _League, ko: str, home: str, away: str, hg: int, ag: int, target=None) -> None:
+        """一场比赛踢完：记下赛前的 λ，再按第四部分的式子更新 m、P。
+
+        target：更新用的“进球”(主, 客)，不给就是真实比分。xG 研究（需求文档第 4 节“xG 研究第 1 段怎么做”）
+        给的是 0.5 × 进球 + 0.5 × xG，可以是小数。rec 里记的还是真实比分：每周拟合 rho 用真实比分。
+        """
         lh, la = self._lambdas(lg, home, away)
         lg.rec.append((ko, lh, la, int(hg), int(ag)))
+        if target is not None:
+            hg, ag = target
         ah, dh = lg.pos(home)
         aa, da = lg.pos(away)
         n = len(lg.m)
