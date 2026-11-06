@@ -1583,3 +1583,18 @@ repro_yeung:
   compare_with: w9_gb_l7        # 和哪次回测的 gb_l7 比（data/backtest/<这个>/predictions.csv）
   compare_model: gb_l7
   run_name: yeung_repro         # 结果放 data/backtest/<这个>/
+
+timing_check:                 # 开发顺序第 1 步“时间核对”（需求文档第 12 节）：T-24 用到的每一项信息什么时候公开、系统什么时候拿到。只查不改
+  title: 时间核对：T-24 用到的信息什么时候公开、系统什么时候拿到
+  # 运行（工作树 TC）：python -m src.evaluate.timing_check。只读打开数据库，不写任何表
+  output: data/reports/时间核对.md
+  leagues: top                # 查哪一组联赛（leagues 段里的名字）
+  seasons: [2005, 2023]       # 查 football-data 赛前赔率的赛季（只看开发赛季；只读赛程和“有没有赛前赔率”，不读比分）
+  odds_source: football-data
+  # football-data 说明文件（data/raw/football-data/notes/2026-10-30.txt 第 198 行）：
+  # “周末比赛的赔率周五下午采集，周中比赛周二下午采集”。周几用数字：周一 0 … 周日 6。
+  # 每场比赛的采集日 = 比赛日（英国日期）当天或之前、最近的一个采集日：周五、六、日、一 → 周五；周二、三、四 → 周二。
+  # 说明文件没说几点、也没说以前的赛季是不是一样，所以“下午”用两头算：12:00 和 18:00（英国时间）。
+  collection_weekdays: [1, 4]
+  collection_hours_london: [12, 18]
+  horizon_hours: 24           # 回测的预测时点（T-24）
