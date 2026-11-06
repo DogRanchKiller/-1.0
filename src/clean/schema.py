@@ -206,6 +206,30 @@ create table if not exists match_venue (
     tournament text not null,        -- 赛事名（例如 FIFA World Cup、Friendly），INT 一个代码下分不同赛事靠它
     primary key (match_id, source)
 );
+
+-- 影子预测（需求文档第 4 节“xG 研究第 2 段怎么做”；2026-11-06 加的新表，现有的表一个都没改）。
+-- 定时预测存了 gb_l7 的 T-24 以后，用同一个截止时间再出一份别的模型（现在是 gb_xg，懂球帝 xG 版），只用来对比。
+-- 为什么不放进 predictions：网站、推送、复盘、四本账读 predictions 时很多地方不分模型，混进去会被当成正式预测。
+-- 和 predictions 一样只加不改不删。main_prediction_id 是同一截止时间的那行 gb_l7（predictions.prediction_id）。
+create table if not exists shadow_predictions (
+    shadow_id          integer primary key,
+    main_prediction_id integer not null,
+    match_id           integer not null,
+    competition        text not null,
+    season             integer not null,
+    home_team          text not null,
+    away_team          text not null,
+    kickoff_utc        text,
+    match_date         text not null,
+    kind               text not null,   -- 跟着哪个时点出的（T-24）
+    model              text not null,   -- 影子模型名字，例如 gb_xg
+    model_version      text not null,   -- 名字 + 设置的指纹
+    cutoff_utc         text not null,   -- 截止时间：和 main_prediction_id 那行一样
+    created_at_utc     text not null,
+    p_home real, p_draw real, p_away real,
+    detail             text,            -- JSON：比分矩阵、代码版本、模型设置、历史比赛里有 xG 的场数
+    unique (main_prediction_id, model)  -- 同一行 gb_l7、同一个影子模型只存一次
+);
 """
 
 

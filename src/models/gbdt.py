@@ -48,6 +48,8 @@
   xg_mix 大于 0 时，里面那个 dyn 每场赛后更新用的“进球”换成 (1 − xg_mix) × 真实进球 + xg_mix × Understat xG。
   只改 dyn 的更新：dyn 拟合 rho、Elo、pi-rating、积分榜、近期状态、树要学的进球数都还用真实比分。
   这场没有 xG 就照常用真实进球。特征的名字、个数和 gb_l7 一样。
+  xg_source 选 xG 从哪来：understat（默认，第 1 段，只许研究实验）；match_stats（第 2 段的 gb_xg，用途 A版输入）=
+  数据库比赛统计「射门、xG」里的 home_xg / away_xg（懂球帝或 football-data），gb_l7 本来就取这类数据。
 """
 from __future__ import annotations
 
@@ -71,6 +73,9 @@ INJ = ["inj_n", "inj_share", "inj_top_loss"]
 EXTRA_COLS = [f"tm_{s}_{n}" for n in [*INJ, "top_value"] for s in ("home", "away")]
 XG_DATA = "Understat xG（研究）"
 XG_COLS = ["us_home_xg", "us_away_xg"]          # 含点球的 xG（取数层接上时加了 us_ 前缀）
+# xg_source → dyn 更新用哪两列 xG：understat = Understat 镜像（研究实验）；
+# match_stats = 数据库比赛统计「射门、xG」里的 xG（懂球帝或 football-data，取数层挑最全的来源），A版输入能用
+XG_SOURCES = {"understat": XG_COLS, "match_stats": ["home_xg", "away_xg"]}
 # 赔率特征的名字（按“这队 / 对手”的角度；ODDS_COLS 是按主队角度的原始列，见 _features）
 ODDS_FEATS = ["mkt_p_win", "mkt_p_draw", "mkt_p_loss", "mkt_over25", "mkt_loglam_for", "mkt_loglam_against",
               "mkt_pinnacle"]
@@ -87,12 +92,16 @@ class GBDTModel(Model):
                  lambda_l2: float = 1.0, max_rounds: int = 2000, early_stopping_rounds: int = 50,
                  valid_days: float = 365, retrain_days: float = 91, min_train_rows: int = 2000,
                  seed: int = 0, max_goals: int = 10, min_matches: int = 200, extra=(), usage: str = "A版输入",
-                 xg_mix: float = 0.0):
+                 xg_mix: float = 0.0, xg_source: str = "understat"):
         self.xg_mix = float(xg_mix)
         if not 0.0 <= self.xg_mix <= 1.0:
             raise ValueError(f"xg_mix 要在 0 到 1 之间，收到 {xg_mix!r}")
-        if self.xg_mix > 0 and usage != "研究实验":
-            # 第 1 段用的是 Understat xG（只许研究实验用、只在开发模式）；实时用懂球帝 xG 是第 2 段的事，另外写
+        if xg_source not in XG_SOURCES:
+            raise ValueError(f"xg_source 只能是 {' / '.join(XG_SOURCES)}，收到 {xg_source!r}")
+        self.xg_source = xg_source
+        if self.xg_mix > 0 and xg_source == "understat" and usage != "研究实验":
+            # 第 1 段用的是 Understat xG（只许研究实验用、只在开发模式）；
+            # 上线用的 xG 是数据库里比赛统计的 xG（xg_source: match_stats，第 2 段）
             raise ValueError(f"xg_mix 用的是 Understat xG（研究），用途要是「研究实验」，收到「{usage}」")
         self.extra = tuple(extra or ())
         if any(e not in ("inj", "val", "odds") for e in self.extra):
@@ -102,9 +111,11 @@ class GBDTModel(Model):
         if self.injury:
             self.data = (*GBDTModel.data, INJURY_DATA)
             self.pre_match_data = (INJURY_DATA,)     # 回测框架看到这个，给要预测的比赛接上本场的伤停（快照时间之前才有数）
-        if self.xg_mix > 0:
-            # 只有赛后（训练、更新 dyn）用 xG，出预测不用本场的 xG，所以不写 pre_match_data
+        if self.xg_mix > 0 and xg_source == "understat":
+            # 只有赛后（训练、更新 dyn）用 xG，出预测不用本场的 xG，所以不写 pre_match_data。
+            # match_stats 的 xG 在「射门、xG」里，data 本来就有，不用加
             self.data = (*self.data, XG_DATA)
+        self.xg_cols = XG_SOURCES[xg_source]
         self.odds = "odds" in self.extra
         if self.odds and usage in ("A版输入", "研究实验"):
             # 「研究实验」在数据字典里能取赛前赔率（给第 14 节二次筛选研究用），但研究用的第一层模型是 A 版，
@@ -227,7 +238,7 @@ class GBDTModel(Model):
             return
         r = r.sort_values(["kickoff_earliest_utc", "match_id"])
         num = {c: pd.to_numeric(r[c], errors="coerce").to_numpy(float) if c in r else np.full(len(r), np.nan)
-               for c in SHOT_COLS + REST_COLS + EXTRA_COLS + ODDS_COLS + XG_COLS}
+               for c in SHOT_COLS + REST_COLS + EXTRA_COLS + ODDS_COLS + self.xg_cols}
         items = list(r[["match_id", "competition", "season", "home_team", "away_team", "home_goals", "away_goals",
                         "result", "kickoff_earliest_utc"]].itertuples(index=False, name=None))
         start = 0
@@ -240,7 +251,7 @@ class GBDTModel(Model):
                      for k, it in enumerate(items[start:end], start)]
             for k, f in zip(range(start, end), feats):
                 self._observe_row(items[k], f, num["home_shots_on_target"][k], num["away_shots_on_target"][k],
-                                  (num["us_home_xg"][k], num["us_away_xg"][k]))
+                                  (num[self.xg_cols[0]][k], num[self.xg_cols[1]][k]))
             start = end
 
     def _observe_row(self, item, feats, sh, sa, xg=(np.nan, np.nan)) -> None:

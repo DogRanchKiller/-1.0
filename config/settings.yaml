@@ -1041,6 +1041,9 @@ models:                    # 第 0 步模型 src/models（需求文档第 4 节�
     gb_inj_val: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, extra: [inj, val]} # 两样都加（只报告）
     # xG 研究第 1 段（需求文档第 4 节“xG 研究第 1 段怎么做”）：dyn 的更新用 0.5 × 进球 + 0.5 × Understat xG，对照组是上面的 gb_l7_r
     gb_xg_r: {num_leaves: 7, min_data_in_leaf: 200, usage: 研究实验, xg_mix: 0.5}
+    # xG 研究第 2 段（需求文档第 4 节“xG 研究第 2 段怎么做”）：同样的做法，xG 用数据库比赛统计里的（懂球帝 / football-data），
+    # 用途 A版输入；只在定时预测里和 gb_l7 并排出 T-24，存进 shadow_predictions（见 shadow 段），网站、融合、推送不用它
+    gb_xg: {num_leaves: 7, min_data_in_leaf: 200, xg_mix: 0.5, xg_source: match_stats}
     # 步骤 8 B 版（需求文档第 4 节“步骤 8 怎么做”）：用途都是“B版输入”，一次回测里的用途要一样；另一组 market_pre 见 models.market_variants
     gb_l7_b: {num_leaves: 7, min_data_in_leaf: 200, usage: B版输入}                        # 和 gb_l7 一样，只是用途不同（核对）
     gb_b: {num_leaves: 7, min_data_in_leaf: 200, usage: B版输入, extra: [odds]}            # gb_l7 + 赔率特征（B 版）
@@ -1153,6 +1156,15 @@ schedule:
   lock_file: data/jobs/scheduled_predict.lock   # 锁文件：防止两次运行重叠（data/ 不进 Git）
   lock_stale_minutes: 60        # 锁文件超过这么多分钟没更新，视为残留锁，先清掉再拿
   matrix_decimals: 6            # 比分矩阵存档精度（每格几位小数）
+
+# 影子预测 src/predict/shadow.py（需求文档第 4 节“xG 研究第 2 段怎么做”）：定时预测存了 T-24 以后，
+# 用同一个截止时间给这些比赛再出一份别的模型，存进 shadow_predictions 表（不进 predictions，网站、融合、推送、复盘都不读它）
+shadow:
+  enabled: true                 # false = 不出影子预测（退回原样）
+  models: [gb_xg]               # 并排出哪几个模型（models 段里的名字）
+  kinds: [T-24]                 # 主预测存了哪几个时点才跟着出
+  output_dir: data/backtest/xg_shadow   # 对比报告 src/evaluate/xg_shadow.py 的结果（data/ 不进 Git）
+  min_matches: 1000             # 踢完的少于这么多场：只列数，不算区间、不下结论
 
 # 逐场流程验收：只读存档和复盘，沿用 site 的前后天数、preview 的联赛/模型。
 # 起点来自首次真实正式预测的截止时间；之前的计划时点不追认成系统漏跑。
