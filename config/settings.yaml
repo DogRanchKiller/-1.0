@@ -1604,3 +1604,13 @@ timing_check:                 # 开发顺序第 1 步“时间核对”（需求
   collection_weekdays: [1, 4]
   collection_hours_london: [12, 18]
   horizon_hours: 24           # 回测的预测时点（T-24）
+
+ledger:                       # 开发顺序第 2 步“四本账”（需求文档第 16 节“四本账怎么算（第 2 步）”，跑之前写下）
+  # 运行（工作树 LDG）：python -m src.evaluate.ledger。只读打开数据库，不写任何表
+  output_dir: data/backtest/ledger   # ledger_matches.csv、ledger_summary.csv（data/ 不进 Git）
+  leagues: top                # 五大联赛（leagues 段里的组名）
+  model: gb_l7                # 现在出预测的模型
+  kinds: [T-24, T-6, T-1]     # 对哪几个时点的存档
+  main_kind: T-24             # 只有这个时点下结论，另外两个只报告
+  min_matches: 1000           # 一个通道少于这么多场：只列数，不算区间、不下结论
+  pinnacle: 平博 Pinnacle     # 亚盘、大小球的市场价用哪家（config/bookmakers_dongqiudi.yaml 换过的写法）
