@@ -130,12 +130,12 @@ def lean_input(p, over25=None, btts=None, matrix=None):
 def test_leans_thresholds(s):
     ln = leans(lean_input([0.45, 0.27, 0.28], over25=0.53, btts=0.47), None, s)
     assert ln["result"] == {"side": 0, "p": 0.45, "lean": True}            # 0.45 − 0.28 = 0.17 ≥ 0.04
-    assert ln["draw"]["risk"] is False                                       # 0.27 < 0.34
+    assert ln["draw"]["risk"] is False                                       # 0.27 < 0.28
     assert ln["over25"] == {"side": "over", "p": 0.53, "lean": True}
     assert ln["btts"]["side"] == "no" and ln["btts"]["p"] == pytest.approx(0.53) and ln["btts"]["lean"]
     assert ln["ah"] is None                                                  # 没有盘口
-    ln = leans(lean_input([0.34, 0.35, 0.31], over25=0.515), None, s)
-    assert ln["result"]["lean"] is False and ln["draw"]["risk"] is True     # 差 0.01 不够；平局 0.35 ≥ 0.34
+    ln = leans(lean_input([0.36, 0.33, 0.31], over25=0.515), None, s)
+    assert ln["result"]["lean"] is False and ln["draw"]["risk"] is True     # 差 0.03 不够；平局 0.33 ≥ 0.28
     assert ln["over25"]["lean"] is False and ln["btts"] is None             # 差 0.015 不够；没有双方进球
     s["lean"]["result"] = None                                               # 门槛是 null：一律不够
     assert leans(lean_input([0.7, 0.2, 0.1]), None, s)["result"]["lean"] is False
@@ -201,7 +201,7 @@ def test_lean_exactly_at_threshold_counts(s):
     """正好等于门槛算够（和回测一样有 1e-12 的容差）：0.44 − 0.40 在电脑里是 0.0399999…"""
     ln = leans(lean_input([0.44, 0.40, 0.16], over25=0.52), None, s)
     assert ln["result"]["lean"] is True and ln["over25"]["lean"] is True
-    assert leans(lean_input([0.33, 0.34, 0.33]), None, s)["draw"]["risk"] is True
+    assert leans(lean_input([0.36, 0.28, 0.36]), None, s)["draw"]["risk"] is True
 
 
 def test_fuse_w_below_1_with_other_matrix_size_and_three_probs(s):
