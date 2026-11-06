@@ -14,7 +14,10 @@
   4. 滚动选 w：每个赛季只用它之前的赛季选 w（2006/07 起），和纯赔率（w = 1）按周成块 bootstrap 比；再各自和平博收盘比。
      滚动融合胜平负 log loss “更准”才上线用选出的 w，否则 w = 1。
   5. 倾向门槛：用最后定下的 w 的融合概率，每个玩法每场算“偏向多大”和“偏向那边实际怎么样”，按偏向分档，
-     每档算平均和 95% 区间；门槛 = 从它往上每一档都“区间下限 > 0、平均不小于最低差距”的最低一档的下沿（没有就是“无明显倾向”）。
+     每档算平均和 95% 区间；门槛 = 这一档自己、和偏向不小于它的全部比赛合在一起，都“区间下限 > 0、平均不小于最低差距”，
+     而且比它高的候选合在一起也都满足的最低一档的下沿（没有就是“无明显倾向”）。2026-11-06 起是这条（需求文档第 16 节
+     “平局风险门槛怎么定”）；原来的“从它往上每一档都满足”也照算一次，写在“原来规则的门槛”，只报告。
+     另外 2014 前、2014 起两段各算一次门槛（只报告），看门槛稳不稳。
 
 三、结果（都在 data/backtest/<回测名>/ 下面）
   fusion_odds.csv        每场取到的赔率（下次直接读，不再查数据库；取赔率的设置变了或加 --refresh-odds 会重新取，
@@ -303,7 +306,8 @@ def lean_values(t: pd.DataFrame, d: dict) -> dict[str, tuple[np.ndarray, np.ndar
 def lean_bands(strength: np.ndarray, value: np.ndarray, dates: pd.Series, edges, min_gap: float,
                settings: dict) -> pd.DataFrame:
     """按“偏向多大”分档（edges[i] ≤ 偏向 < edges[i+1]，最后一档是 edges[-1] 以上），每档“实际”的平均和 95% 区间（按周成块）。
-    比 edges[0] 小的场次不分档（平局风险从 0.26 起才看）。"""
+    比 edges[0] 小的场次不分档（平局风险从 0.26 起才看）。
+    “合在一起”那几列：偏向不小于这一档下沿的全部比赛（这一档和它上面所有档）一起算平均和区间，满不满足同样的两条。"""
     c = settings["compare"]
     ok = ~np.isnan(strength) & ~np.isnan(value)
     s, v, dt = strength[ok], value[ok], pd.Series(pd.to_datetime(dates)[ok].to_numpy())
@@ -317,6 +321,14 @@ def lean_bands(strength: np.ndarray, value: np.ndarray, dates: pd.Series, edges,
             row.update({"平均": mean, "区间下限": cl, "区间上限": ch, "满足": bool(cl > 0 and mean >= min_gap)})
         else:
             row.update({"平均": np.nan, "区间下限": np.nan, "区间上限": np.nan, "满足": None})
+        up = s >= lo - 1e-12                                  # 这一档和它上面所有档
+        if up.any():
+            mean, cl, ch = bootstrap_mean_diff(v[up], block_ids(dt[up], c["block"]), c["n_boot"], c["confidence"], c["seed"])
+            row.update({"合在一起的场数": int(up.sum()), "合在一起的平均": mean, "合在一起的区间下限": cl,
+                        "合在一起的区间上限": ch, "合在一起满足": bool(cl > 0 and mean >= min_gap)})
+        else:
+            row.update({"合在一起的场数": 0, "合在一起的平均": np.nan, "合在一起的区间下限": np.nan,
+                        "合在一起的区间上限": np.nan, "合在一起满足": None})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -334,6 +346,21 @@ def pick_threshold(bands: pd.DataFrame) -> float | None:
     return thr
 
 
+def pick_threshold_tail(bands: pd.DataFrame) -> float | None:
+    """门槛（2026-11-06 起的规则）：从最高一档往下看，“合在一起满足”一断就停；
+    停之前、这一档自己也满足的最低下沿就是门槛。上面单独一档场少、区间宽不满足没关系，只要合在一起满足。
+    没有比赛的档跳过；都不行 → None（一律“无明显倾向”）。"""
+    thr = None
+    for _, r in bands.iloc[::-1].iterrows():
+        if r["n"] == 0:
+            continue
+        if not r["合在一起满足"]:
+            break
+        if r["满足"]:
+            thr = float(r["下沿"])
+    return thr
+
+
 def lean_study(t: pd.DataFrame, d: dict, settings: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """每个玩法：分档表、门槛、有倾向的场次比例、有倾向的场次里偏向那边实际发生的比例。"""
     st = settings["fusion_study"]
@@ -343,9 +370,15 @@ def lean_study(t: pd.DataFrame, d: dict, settings: dict) -> tuple[pd.DataFrame, 
         s, v = vals[name]
         b = lean_bands(s, v, t["match_date"], st["lean_bands"][name], st["lean_min_gap"][name], settings)
         band_rows.append(b.assign(玩法=name))
-        thr = pick_threshold(b)
+        thr = pick_threshold_tail(b)
         ok = ~np.isnan(s) & ~np.isnan(v)
-        row = {"玩法": name, "门槛": thr, "最低差距": st["lean_min_gap"][name], "可算的场数": int(ok.sum())}
+        row = {"玩法": name, "门槛": thr, "原来规则的门槛": pick_threshold(b), "最低差距": st["lean_min_gap"][name],
+               "可算的场数": int(ok.sum())}
+        # 两段各算一次门槛（只报告）：门槛稳不稳
+        for per in sorted(t["period"].unique()):
+            k = (t["period"] == per).to_numpy()
+            bp = lean_bands(s[k], v[k], t["match_date"][k], st["lean_bands"][name], st["lean_min_gap"][name], settings)
+            row[f"{per}的门槛"] = pick_threshold_tail(bp)
         if thr is not None:
             k = ok & (s >= thr - 1e-12)
             vk = v[k]

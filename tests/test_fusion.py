@@ -136,6 +136,31 @@ def test_pick_threshold_needs_every_band_above():
     assert fsy.pick_threshold(b2) is None                  # 最高一档不满足 → 一律无明显倾向
 
 
+def test_pick_threshold_tail_thin_band_does_not_push_up():
+    """上面一档场少不满足、但合在一起满足：门槛不被推上去（平局风险 0.32–0.34 档的情况）。"""
+    b = pd.DataFrame({"下沿": [0.26, 0.28, 0.30, 0.32, 0.34], "n": [10, 10, 10, 3, 2],
+                      "满足": [False, True, True, False, True], "合在一起满足": [True, True, True, True, True]})
+    assert fsy.pick_threshold(b) == 0.34                   # 原来的规则：被 0.32 那档推到 0.34
+    assert fsy.pick_threshold_tail(b) == 0.28              # 新规则：0.26 那档自己不满足，停在 0.28
+    b2 = b.assign(合在一起满足=[True, False, True, True, True])
+    assert fsy.pick_threshold_tail(b2) == 0.30             # 0.28 起合在一起不满足就停，不再往下
+    b3 = b.assign(n=[10, 10, 0, 3, 2], 满足=[False, True, None, False, False])
+    assert fsy.pick_threshold_tail(b3) == 0.28             # 空档跳过
+    assert fsy.pick_threshold_tail(b.assign(合在一起满足=[False] * 5)) is None
+
+
+def test_lean_bands_tail_columns():
+    """“合在一起”= 偏向不小于这一档下沿的全部比赛。"""
+    settings = {"compare": {"block": "week", "n_boot": 50, "confidence": 0.95, "seed": 1}}
+    s = np.array([0.27, 0.29, 0.29, 0.31, 0.35, 0.20])
+    v = np.array([0.0, 1.0, 1.0, 1.0, 1.0, -1.0])
+    dates = pd.Series(pd.date_range("2020-01-01", periods=6, freq="7D").strftime("%Y-%m-%d"))
+    b = fsy.lean_bands(s, v, dates, [0.26, 0.28, 0.30], 0.03, settings)
+    assert list(b["n"]) == [1, 2, 2]
+    assert list(b["合在一起的场数"]) == [5, 4, 2]            # 0.20 那场比 0.26 小，不算
+    assert b["合在一起的平均"].iloc[0] == 0.8
+
+
 def test_ah_lean_settles_quarter_lines():
     """主队 -0.25（平手/半球）：净胜 1 球以上主队赢全，平局主队输半，输球输全。"""
     n = 10
