@@ -1,7 +1,7 @@
 """虚拟投注页 bots.html：虚拟投注机器人历史回测（bots_v1）的结果（需求文档第 8 节“虚拟投注页”、第 14 节）。
 
 这一页只做一件事：把回测已经算好的结果文件读进来，排成好懂的网页。不重算、不下注、不连任何账户。
-读的文件都在 settings.yaml 的 site.bots_dir（现在是 data/backtest/bots/bots_v1/，由 src/evaluate/bot_backtest.py 生成）：
+读的文件都在 settings.yaml 的 site.bots_dir（现在是 data/backtest/bots/bots_v1_tc/，新时间规则重跑的那次，由 src/evaluate/bot_backtest.py 生成）：
   summary.csv    每个机器人一行：排名、下了几注、ROI 和区间、CLV 和区间……（排行榜）
   by_season.csv  每个机器人、每个赛季一行（画“按赛季累计盈亏”的小图、算“几个赛季赚”）
   by_period.csv  每个机器人分两段（2012 之前 / 2012 起）各一行
@@ -292,8 +292,18 @@ def conclusions(summary: pd.DataFrame, bank: pd.DataFrame | None, check: dict | 
                    f"{len(neg)} 个区间整个小于 0（确实亏），其余 {n - len(neg)} 个区间跨过 0，看不出赚亏，可能只是运气。")
     else:
         names = "、".join(e(r["机器人"]) for r in pos)
-        out.append(f"{n} 个机器人里有 {len(pos)} 个 ROI 区间整个大于 0（{names}）。这么多机器人一起比，碰巧有一两个“看起来赚钱”是正常的，"
-                   "要在期末考试赛季再过一次才算。")
+        text = (f"{n} 个机器人里有 {len(pos)} 个 ROI 区间整个大于 0（{names}）。这么多机器人一起比，碰巧有一两个“看起来赚钱”是正常的，"
+                "要在期末考试赛季再过一次才算。")
+        # 区间大于 0 的如果是对照组（根本不用模型），或者用的是“多家最高”的价格（事后从多家里挑的，下注时未必下得到），
+        # 就再提醒一句：这样的“赚钱”说明不了模型有用
+        ctrl = sum(1 for r in pos if str(r.get("对照组")) == "是")
+        top_price = sum(1 for r in pos if r.get("价格") == "最高")
+        one = len(pos) == 1                    # 只有一个时说“它”，读起来顺
+        if ctrl:
+            text += ("它是对照组" if one else f"其中 {ctrl} 个是对照组") + "，根本不用模型，说明不了模型有用。"
+        if top_price:
+            text += ("它用的是" if one else f"{top_price} 个用的是") + "“多家最高”的价格，这些价格是事后从多家里挑的，下注时未必下得到。"
+        out.append(text)
     pin = _random_theory(check, "平博")
     if pin:
         out.append(f"<b>抽水是真实成本</b>：用平博的价格每场随便买一个，理论上每下 100 亏 {abs(pin['theory']) * 100:.1f}"

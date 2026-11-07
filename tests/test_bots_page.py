@@ -188,6 +188,17 @@ def test_positive_roi_is_not_called_none(site):
     t = text_of(bots.render(data))
     assert "没有一个 ROI 显著为正" not in t and "1 个 ROI 区间整个大于 0" in t and "碰巧" in t
     assert "这一版没有找到值得拿去考的" not in t and "区间整个大于 0" in t
+    assert "是对照组，根本不用模型" not in t and "它用的是“多家最高”的价格" in t
+
+
+def test_positive_control_group_is_flagged(site):
+    """区间整个大于 0 的是对照组、用平博价格：提醒“对照组不用模型”，不提“多家最高”。"""
+    data, folder = site
+    rows = summary_rows()
+    rows[2].update({"ROI": 0.03, "ROI下限": 0.002, "ROI上限": 0.06})
+    write_results(folder, rows)
+    t = text_of(bots.render(data))
+    assert "它是对照组，根本不用模型" in t and "用的是“多家最高”的价格，这些价格是事后" not in t
 
 
 def test_rank_text_means_not_ranked(site):

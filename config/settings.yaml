@@ -1227,7 +1227,8 @@ site:
   record_matches: 60             # 战绩页“每场四个预测”列最近多少场（命中率汇总照样算全部）
   # 虚拟投注页 bots.html 读哪一次机器人历史回测的结果（src/web/site/bots.py，需求文档第 8 节、第 14 节）。
   # 只读 summary.csv、by_season.csv、by_period.csv、bankroll.csv、check.json，不读每注明细 bets.csv；文件不在时页面写“还没有结果”
-  bots_dir: data/backtest/bots/bots_v1
+  # 2026-11-07 用户定换成新时间规则重跑的 bots_v1_tc（需求文档第 14 节、v1.26）；旧规则的 bots_v1 文件留着没删
+  bots_dir: data/backtest/bots/bots_v1_tc
   # 网站显不显示“信心等级”（●●● 高 / ●●○ 中 / ●○○ 低）。现在实时预测都有赔率、降级因素是空的，每场都是 ●●● 高，
   # 显示出来没有区分作用，2026-11-07 用户定先藏起来（需求文档第 8 节、v1.21）。只是不显示，存档里的等级照样存
   show_confidence: false
