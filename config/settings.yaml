@@ -45,7 +45,7 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
   top: {E0: 英超, SP1: 西甲, D1: 德甲, I1: 意甲, F1: 法甲}
   second: {E1: 英冠, SP2: 西乙, D2: 德乙, I2: 意乙, F2: 法乙}
   # 第 11 阶段（2026-11-03）：football-data “新联赛”文件里的亚洲联赛。一年一个赛季（2024 = 2024 赛季），
-  # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响。还没接进实时预测、定时任务、网页
+  # 不进 top / second。2026-11-08 起接进每日预测、网页和梯度提升树联赛编号（preview / site / gbdt_league_groups）
   asia: {JPN: 日职, CHN: 中超, KOR: 韩K}   # KOR：懂球帝来源（2026-11-03 工作树 KR 加，第 4 节“韩K 回补和开发回测”）
   # 第 11 阶段（2026-11-05，工作树 INA）：国家队比赛（martj42），所有国家队一个代码、一个评分池；赛季 = 比赛日期那一年。
   # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响（和 asia 一样）。只做开发回测，没接实时预测
@@ -321,7 +321,10 @@ status:
 # 预测页预览版 src/predict/preview.py + src/web/preview_page.py（需求文档第 8 节“早期简易页”，2026-10-31 提前到第 2 阶段）
 preview:
   days_ahead: 7              # 显示未来几天开球的比赛
-  leagues: top               # 哪一组联赛（leagues 段里的 top 五大联赛 / second 次级联赛）
+  # 哪几组联赛（leagues 段的组名，可以写一个或几个）。2026-11-08 起五大联赛 + 次级 + 日职中超韩K。
+  # skip_leagues：意乙、法乙懂球帝赛程空，第 1 节不加，每日预测和网页都去掉
+  leagues: [top, second, asia]
+  skip_leagues: [I2, F2]
   model: gb_xg               # 用哪个模型（models 段里的名字）。2026-10-31 从 Elo 换成 dc，同一天又换成 gb_l7（步骤 6 选出的），页面上仍标“临时模型”
                              # 2026-11-07 你决定从 gb_l7 换成 gb_xg（需求文档第 4 节“换成 gb_xg 上线”）；想退回：这里、ledger.model 写回 gb_l7，shadow.models 写回 [gb_xg]
   # 页面上关于模型的说明，换模型时一起改。回测成绩：五大联赛 2014–2023 有平博收盘赔率的 18,083 场，T-24，胜平负 log loss
@@ -1037,9 +1040,9 @@ models:                    # 第 0 步模型 src/models（需求文档第 4 节�
     # ada_league（对照组）：2005–2013 选出的 ada_a99 那组 α，一个联赛共用一套权重（和 dyn_weekly 一样，选完才加）
     ada_league: {alpha: 0.99, per_team: false}
   # 梯度提升树的“联赛”特征给哪几组联赛编号（按代码排序编 0、1、2…，不在这里的联赛编 -1）。
-  # 第 11 阶段加了 leagues.asia 以后，如果按全部联赛编号，五大联赛的编号会变，模型版本指纹也跟着变（上线的 gb_l7 会被当成新版本）。
-  # 所以只给 top、second 编号，和加 asia 之前完全一样；日职、中超单独回测（一次一个联赛），联赛特征是常数，不影响
-  gbdt_league_groups: [top, second]
+  # 第 11 阶段只给 top、second 编号，五大联赛指纹不变。2026-11-08 起加 asia（日职、中超、韩K），
+  # 联赛编号和模型版本指纹会变（gb_l7 / gb_xg 都变成新版本）。意乙、法乙仍在 second 里，训练照编
+  gbdt_league_groups: [top, second, asia]
   # 第 4 节步骤 6：特征表 + 梯度提升树（src/models/gbdt.py，原理见文件开头）。下面是默认设置
   gbdt:
     dyn: dyn_q1e5_b01         # 里面带的 dyn 用哪一组（步骤 5 选出的）
@@ -1238,7 +1241,9 @@ review:
 site:
   output_dir: data/site          # 生成到这里（data/ 不进 Git）；每次整站重新生成，先写到旁边的临时文件夹再替换
   review_dir: data/review        # 赛后对账、复盘结果（需求文档第 9 节接口 3，K2 写）
-  leagues: top                   # 首页列哪一组联赛（leagues 段里的 top 五大联赛）
+  # 首页列哪几组联赛（和 preview.leagues 一样，可以写几个组名）。skip_leagues 同 preview：意乙、法乙不加
+  leagues: [top, second, asia]
+  skip_leagues: [I2, F2]
   days_ahead: 7                  # 首页列未来几天开球的比赛
   days_back: 3                   # 首页另列最近几天已经开球的比赛（看比分、看复盘）
   team_days_back: 60             # 球队页列最近多少天的赛程（联赛 + 杯赛、欧战）

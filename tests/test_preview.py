@@ -132,7 +132,7 @@ def test_model_version_changes_with_settings():
 @pytest.fixture
 def env(tmp_path):
     s = copy.deepcopy(load_settings())
-    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}, "asia": {}}
     con = connect(tmp_path / "t.db")
     create_tables(con)
     teams = [("Liverpool", "利物浦"), ("Arsenal", "阿森纳"), ("Man City", "曼城"), ("<b>Bad</b>", None)]

@@ -21,6 +21,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
+from src.common.config import expand_league_groups
 from src.features import FeatureStore
 from src.features.known_time import to_utc_text
 from src.models.registry import build_model, model_config
@@ -79,7 +80,8 @@ def run_shadow(fs: FeatureStore, con, settings: dict, stored_ids, models=None, c
     cutoff = cutoffs[0]
     now = parse_utc(cutoff)
     end = to_utc_text(now + timedelta(days=settings["preview"]["days_ahead"]))
-    leagues = list(settings["leagues"][settings["preview"]["leagues"]])
+    pcfg = settings["preview"]
+    leagues = list(expand_league_groups(pcfg["leagues"], settings, pcfg.get("skip_leagues")))
     n, dec = int(settings["market_odds"]["max_goals"]), int(settings["schedule"]["matrix_decimals"])
     created_text = to_utc_text(created or datetime.now(timezone.utc))
     names = list(models) if models is not None else list(cfg["models"])

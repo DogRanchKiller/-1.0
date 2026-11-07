@@ -302,7 +302,7 @@ def render(result: dict, settings: dict, now: datetime) -> str:
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 {VIEWPORT}
 <title>足球预测 预览版</title><style>{CSS}</style></head><body><div class="wrap">
-<h1>五大联赛未来 {result['days_ahead']} 天 · <span class="accent">预测预览版</span></h1>
+<h1>联赛未来 {result['days_ahead']} 天 · <span class="accent">预测预览版</span></h1>
 <p class="small">生成时间 {e(f"{now.astimezone(BEIJING):%Y-%m-%d %H:%M}")}（北京时间）。
 共 {len(rows)} 场：模型算出概率 {n_model} 场，有赔率 {n_market} 场，已融合 {n_fused} 场，差距大 {n_gap} 场。
 这一页只是本机的一个文件，不连网，不会自动刷新；要看最新的，重新双击“查看预测预览.bat”。</p>

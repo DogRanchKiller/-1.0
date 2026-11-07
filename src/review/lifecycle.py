@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from src.common.config import resolve_path, season_role
+from src.common.config import expand_league_groups, resolve_path, season_role
 from src.common.markets import result_probs
 from src.features import FeatureAccessError, FeatureStore
 from src.features.known_time import compute_known_times
@@ -461,7 +461,8 @@ def _build_report(con: sqlite3.Connection, settings: dict, now) -> dict:
             raise ValueError("网站最近/未来天数必须非负且范围非空")
         name = settings["preview"]["model"]
         scope = {"model": name, "model_version": model_version(name, model_config(name, settings)),
-                 "leagues": list(settings["leagues"][settings["preview"]["leagues"]]),
+                 "leagues": list(expand_league_groups(settings["preview"]["leagues"], settings,
+                                                       settings["preview"].get("skip_leagues"))),
                  "enabled_since_utc": _text(enabled), "grace_minutes": grace,
                   "start_utc": _text(now - pd.Timedelta(days=back)),
                   "end_utc": _text(now + pd.Timedelta(days=ahead))}

@@ -43,7 +43,7 @@ MATCHES = [  # match_id, 联赛, 赛季, 主, 客, 开球（UTC）, 比分（没
 @pytest.fixture(scope="module")
 def settings():
     s = copy.deepcopy(load_settings())
-    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}, "asia": {}}
     return s
 
 

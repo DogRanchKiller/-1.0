@@ -288,18 +288,19 @@ def test_calendar_and_cross_year_leagues_cannot_mix(settings):
         season_targets(window_store(settings), ["JPN", "E0"], 2022, 2023)
 
 
-def test_asia_leagues_do_not_change_model_fingerprints():
-    """加了 leagues.asia 以后，所有模型的设置（模型版本指纹）和没有 asia 时完全一样：上线的 gb_l7 不会变成新版本。"""
-    from src.models.registry import available, model_config
+def test_asia_leagues_are_in_gbdt_encoding():
+    """2026-11-08 起 gbdt_league_groups 含 asia：日职、中超、韩K 进联赛编号，指纹和只编 top、second 时不一样。"""
+    from src.models.registry import model_config
     from src.predict.preview import model_version
     s = load_settings()
-    without = copy.deepcopy(s)
-    without["leagues"].pop("asia")
-    for name in available(s):
-        assert model_config(name, s) == model_config(name, without), name
     cfg = model_config("gb_l7", s)
-    assert "JPN" not in cfg["leagues"] and "CHN" not in cfg["leagues"]
-    assert model_version("gb_l7", cfg) == model_version("gb_l7", model_config("gb_l7", without))
+    assert {"JPN", "CHN", "KOR"} <= set(cfg["leagues"])
+    without = copy.deepcopy(s)
+    without["models"]["gbdt_league_groups"] = ["top", "second"]
+    cfg0 = model_config("gb_l7", without)
+    assert "JPN" not in cfg0["leagues"] and "CHN" not in cfg0["leagues"] and "KOR" not in cfg0["leagues"]
+    assert model_version("gb_l7", cfg) != model_version("gb_l7", cfg0)
+    assert model_version("gb_l7", cfg) == "gb_l7-1c589ce8"
 
 
 def test_rest_day_schedule_skips_other_season_system(settings):

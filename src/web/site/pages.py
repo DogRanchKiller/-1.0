@@ -9,6 +9,7 @@ from urllib.parse import quote
 import numpy as np
 import pandas as pd
 
+from src.common.config import expand_league_groups
 from src.features.known_time import to_utc_text
 from src.review.reports import EXTRA_NAMES, coverage_cells, coverage_for_reviews, extra_text, group_cells, live_metrics, metric_text
 from src.web.site.common import (NOT_ADVICE, STATUS_TAGS, TeamFiles, bar_html, bj_text, day_title, details,
@@ -179,6 +180,7 @@ def index_lists(data: SiteData) -> tuple[list[dict], list[dict]]:
 
 def render_index(data: SiteData, teams: TeamFiles) -> str:
     cfg = data.settings["site"]
+    league_names = "、".join(expand_league_groups(cfg["leagues"], data.settings, cfg.get("skip_leagues")).values())
     upcoming, recent = index_lists(data)
     n_pred = sum(1 for m in upcoming if m["match_id"] in data.preds)
     stats = (f"<div class='stats'><div class='stat hi'><b>{len(upcoming)}</b><span>未来 {cfg['days_ahead']} 天的比赛</span></div>"
@@ -198,7 +200,7 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
         blocks = "".join(f"<h2>{e(title)}</h2>" + table(["时间", "联赛", "比赛", "最新一版的结论", ""], rows, "list", attrs)
                          for _, (title, rows, attrs) in sorted(groups.items()))
     else:
-        blocks = "<h2>即将开赛</h2>" + placeholder(f"未来 {cfg['days_ahead']} 天没有{'、'.join(data.settings['leagues'][cfg['leagues']].values())}的比赛")
+        blocks = "<h2>即将开赛</h2>" + placeholder(f"未来 {cfg['days_ahead']} 天没有{league_names}的比赛")
     rec_rows, rec_attrs = [], []
     for m in recent:
         mid = m["match_id"]
@@ -211,7 +213,7 @@ def render_index(data: SiteData, teams: TeamFiles) -> str:
            else placeholder(f"最近 {cfg['days_back']} 天没有踢完的比赛"))
     notes = "".join(f"<li>{e(n)}</li>" for n in data.notes[:10])
     body = (f"<h1>足球预测 <span class='accent'>即将开赛</span></h1><p class='muted'>"
-            f"{e('、'.join(data.settings['leagues'][cfg['leagues']].values()))}，时间都是北京时间。点比赛看各版本对比、比分概率和赔率变动。</p>"
+            f"{e(league_names)}，时间都是北京时间。点比赛看各版本对比、比分概率和赔率变动。</p>"
             f"{stats}<div class='note'>{NOT_ADVICE}</div>{index_guide(data.settings)}{blocks}"
             f"<h2>最近踢完的</h2>{rec}"
             + (f"<h2>读数据时的提示</h2><ul class='points small muted'>{notes}</ul>" if notes else ""))

@@ -52,3 +52,20 @@ def season_role(season_start_year: int, settings: dict | None = None) -> str:
     if season_start_year <= s["dev_last"]:
         return "dev"
     raise ValueError(f"赛季 {season_start_year} 不属于任何用途，检查 settings.yaml 的 seasons 配置")
+
+
+def expand_league_groups(spec, settings: dict, skip=None) -> dict[str, str]:
+    """组名（top）或组名列表（[top, second, asia]）→ {联赛代码: 中文名}。
+
+    skip：不要的联赛代码。每日预测和网页用它去掉意乙 I2、法乙 F2（懂球帝赛程空，第 1 节不加）。
+    写法跟 lottery_value.leagues 一样：一个组名或几个组名。
+    """
+    groups = [spec] if isinstance(spec, str) else list(spec)
+    out: dict[str, str] = {}
+    for g in groups:
+        if g not in settings["leagues"]:
+            raise KeyError(f"settings.yaml 的 leagues 里没有组「{g}」")
+        out.update(settings["leagues"][g])
+    for c in skip or ():
+        out.pop(c, None)
+    return out

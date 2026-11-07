@@ -1,7 +1,7 @@
 """xG 研究第 2 段（需求文档第 4 节“xG 研究第 2 段怎么做”）的自动检查：
 
   - gbdt 的 xg_source = match_stats：用比赛统计的 home_xg / away_xg 更新 dyn，A版输入能用；和 Understat 版喂同样的数结果一样；
-  - 登记表：gb_xg 的设置对，gb_l7、gb_xg_r 的模型版本指纹没变；
+  - 登记表：gb_xg 的设置对，gb_l7 指纹随 asia 进联赛编号更新（gb_l7-1c589ce8），gb_xg_r 仍没有 xg_source；
   - 定时预测入口：存了 T-24 才出影子预测，截止时间和正式那行一样，不进 predictions；再跑一次不重复存；
     影子模型出错时定时任务照样成功、正式预测照常；正式模型换成假模型又没给影子模型时不出；shadow.enabled = false 时不出；
   - 对比报告：配对、分数和手算的一样，场数不够只列数。
@@ -51,8 +51,8 @@ def test_registry_gb_xg_and_fingerprints_unchanged():
     assert x["xg_mix"] == 0.5 and x["xg_source"] == "match_stats" and "usage" not in x
     m = build_model("gb_xg")
     assert m.usage == "A版输入" and m.xg_cols == ["home_xg", "away_xg"]
-    # 上线的 gb_l7、第 1 段的 gb_xg_r：设置一个数都没变（指纹和合并前一样）
-    assert model_version("gb_l7", base) == "gb_l7-f62b5466"
+    # gb_l7 指纹随 gbdt_league_groups 含 asia 更新（2026-11-08）；gb_xg_r 仍没有 xg_source
+    assert model_version("gb_l7", base) == "gb_l7-1c589ce8"
     assert "xg_source" not in model_config("gb_xg_r")
 
 

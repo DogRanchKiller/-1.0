@@ -7,13 +7,30 @@ from datetime import date
 
 import pytest
 
-from src.common.config import load_settings, resolve_path, season_role
+from src.common.config import expand_league_groups, load_settings, resolve_path, season_role
 from src.jobs.backup import backup_database, backup_raw
 
 
 def test_settings_load():
     s = load_settings()
     assert set(s["leagues"]["top"]) == {"E0", "SP1", "D1", "I1", "F1"}
+
+
+def test_expand_league_groups_daily_scope():
+    """每日预测和网页：五大 + 英冠西乙德乙 + 日职中超韩K；意乙法乙去掉。"""
+    s = load_settings()
+    want = {"E0", "SP1", "D1", "I1", "F1", "E1", "SP2", "D2", "JPN", "CHN", "KOR"}
+    for key in ("preview", "site"):
+        got = expand_league_groups(s[key]["leagues"], s, s[key].get("skip_leagues"))
+        assert set(got) == want
+        assert "I2" not in got and "F2" not in got
+        assert got["E1"] == "英冠" and got["JPN"] == "日职"
+    # 训练：梯度提升树联赛编号含 asia，意乙法乙仍在 second 里
+    train = expand_league_groups(s["models"]["gbdt_league_groups"], s)
+    assert want <= set(train)
+    assert {"I2", "F2"} <= set(train)
+    # 一个组名也能展开（旧写法）
+    assert set(expand_league_groups("top", s)) == set(s["leagues"]["top"])
 
 
 @pytest.mark.parametrize("season, role", [

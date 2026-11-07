@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from src.clean.schema import create_tables
-from src.common.config import load_settings, resolve_path
+from src.common.config import expand_league_groups, load_settings, resolve_path
 from src.common.db import connect
 from src.common.markets import asian_handicap, over_under, result_probs
 from src.common.odds import devig
@@ -287,7 +287,7 @@ def compute_predictions(fs: FeatureStore, settings: dict, now: datetime, model=N
     cfg = settings["preview"]
     cutoff = to_utc_text(now)
     end = to_utc_text(now + timedelta(days=cfg["days_ahead"]))
-    leagues = settings["leagues"][cfg["leagues"]]
+    leagues = expand_league_groups(cfg["leagues"], settings, cfg.get("skip_leagues"))
     name = cfg["model"]
     mcfg = model_config(name, settings)
     model = model or build_model(name, settings)

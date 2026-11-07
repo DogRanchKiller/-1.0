@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.common.config import expand_league_groups
 from src.features import FeatureStore
 from src.features.errors import FeatureAccessError
 from src.features.known_time import to_utc_text
@@ -295,7 +296,7 @@ def load(con, settings: dict, now: datetime) -> SiteData:
         start = min(start, pd.Timestamp(min(kicks)).tz_localize("UTC").to_pydatetime() - timedelta(days=1))
     end = now + timedelta(days=max(cfg["days_ahead"], cfg["team_days_ahead"]))
     targets = fs.prediction_targets(start, end, "显示")
-    site_leagues = set(settings["leagues"][cfg["leagues"]])
+    site_leagues = set(expand_league_groups(cfg["leagues"], settings, cfg.get("skip_leagues")))
     for t in targets.to_dict("records"):
         mid = int(t["match_id"])
         kick = t.get("kickoff_utc") if isinstance(t.get("kickoff_utc"), str) else None

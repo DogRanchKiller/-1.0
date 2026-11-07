@@ -1,7 +1,7 @@
 """定时出 T-24 / T-6 / T-1 预测（需求文档第 9 节“完整链路的分工和接口”接口 1、第 9 节“定时出 T-24 / T-6 / T-1 预测”）。
 
 做什么（每 15 分钟由 src/jobs/scheduled_predict.py 调用一次）：
-1. 通过取数层拿“现在”起、最长时点（24 小时）以内开球的五大联赛比赛。
+1. 通过取数层拿“现在”起、最长时点（24 小时）以内开球的联赛比赛（settings.yaml 的 preview.leagues）。
 2. 每场比赛、每个时点（settings.yaml 的 schedule.horizons：24、6、1 小时）算“计划时间” = 开球时间 − 几小时。
    计划时间已经到了、这一版还没出过的，就是“到点了还没出”。规则：
    - 已经开球的不出（开球以后再出就是偷看了比赛过程）。
@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.common.config import resolve_path
+from src.common.config import expand_league_groups, resolve_path
 from src.common.markets import check_score_matrix
 from src.features import FeatureStore
 from src.features.known_time import to_utc_text
@@ -158,7 +158,8 @@ def run_scheduled(fs: FeatureStore, con, settings: dict, now: datetime, model=No
         raise ValueError("settings.yaml 的 preview.days_ahead 比最早的时点还短，定时预测拿不到要出的比赛")
     cutoff = to_utc_text(now)
     now = parse_utc(cutoff)                      # 秒以下舍掉，和截止时间一致
-    leagues = list(settings["leagues"][settings["preview"]["leagues"]])
+    pcfg = settings["preview"]
+    leagues = list(expand_league_groups(pcfg["leagues"], settings, pcfg.get("skip_leagues")))
     # 最早时点那么久以内开球的比赛（多看 1 秒：正好在 24 小时整开球的也算到点）
     end = to_utc_text(now + timedelta(hours=hs[0], seconds=1))
     targets = fs.prediction_targets(cutoff, end, "A版输入", competition=leagues)

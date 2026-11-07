@@ -2,7 +2,7 @@
 
 - 预测页（定时预测、网站新出的预测）、四本账用同一个模型：gb_xg；
 - gb_l7 反过来当影子模型并排出 T-24，影子模型不能和正式模型一样（一样就会同一个模型存两遍）；
-- gb_xg 和 gb_l7 只差 dyn 用不用 xG 更新，树的设置一样；gb_l7 的指纹没变（2026-11-07 以前的存档都是这个版本）；
+- gb_xg 和 gb_l7 只差 dyn 用不用 xG 更新，树的设置一样；联赛编号含 asia 以后指纹换成 gb_l7-1c589ce8 / gb_xg-f1ceca4f（2026-11-07 以前的存档仍是旧指纹）；
 - 融合、倾向、信心等级没重选：fusion.model 还记着 w 当初是用 gb_l7 选的。
 """
 from src.common.config import load_settings
@@ -24,11 +24,13 @@ def test_gb_l7_runs_as_shadow_not_the_live_model():
     assert S["preview"]["model"] not in S["shadow"]["models"]
 
 
-def test_gb_xg_is_gb_l7_plus_xg_and_fingerprints_unchanged():
+def test_gb_xg_is_gb_l7_plus_xg_and_fingerprints():
+    """gb_xg 只比 gb_l7 多 xG；联赛编号含 asia 以后指纹是新的（2026-11-08 六联赛接入）。"""
     base, x = model_config("gb_l7", S), model_config("gb_xg", S)
     assert {k: v for k, v in x.items() if k not in ("xg_mix", "xg_source")} == base
-    assert model_version("gb_l7", base) == "gb_l7-f62b5466"
-    assert model_version("gb_xg", x) == "gb_xg-3fa7829e"
+    assert "JPN" in base["leagues"] and "CHN" in base["leagues"] and "KOR" in base["leagues"]
+    assert model_version("gb_l7", base) == "gb_l7-1c589ce8"
+    assert model_version("gb_xg", x) == "gb_xg-f1ceca4f"
 
 
 def test_fusion_lean_confidence_not_reselected():

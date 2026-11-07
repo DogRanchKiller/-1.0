@@ -54,7 +54,7 @@ def scheduled_detail(hours, late=0, fused=True) -> dict:
 @pytest.fixture
 def env(tmp_path):
     s = copy.deepcopy(load_settings())
-    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}, "asia": {}}
     s["site"]["review_dir"] = str(tmp_path / "review")
     s["picks"]["reference_dir"] = str(tmp_path / "picks_reference")   # 不读真的历史参考
     s["site"]["bots_dir"] = str(tmp_path / "bots_v1")                  # 不读真的机器人回测结果（这里没有，页面写“还没有”）

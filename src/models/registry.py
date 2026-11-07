@@ -67,7 +67,7 @@ def model_config(name: str, settings: dict | None = None) -> dict:
         g["dyn"] = model_config(dyn_name, full)
         g["elo"] = model_config(elo_name, full)
         # “联赛”特征只给 models.gbdt_league_groups 里的联赛组编号（不写就是全部组，和以前一样）。
-        # 第 11 阶段加了日职、中超（leagues.asia），只编 top、second，五大联赛的编号和模型版本指纹都不变
+        # 第 11 阶段只编 top、second，五大联赛指纹不变；2026-11-08 起加 asia（日职、中超、韩K），编号和指纹会变
         lg = full["leagues"]
         groups = s.get("gbdt_league_groups") or list(lg)
         return {**g, "leagues": sorted({c for grp in groups for c in lg[grp]}), "min_matches": s["min_matches"],

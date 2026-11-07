@@ -172,7 +172,7 @@ def job_env(tmp_path):
     from src.common.db import connect
 
     s = copy.deepcopy(load_settings())
-    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}, "asia": {}}
     s["schedule"]["lock_file"] = str(tmp_path / "jobs" / "scheduled_predict.lock")
     db = tmp_path / "t.db"
     con = connect(db)
