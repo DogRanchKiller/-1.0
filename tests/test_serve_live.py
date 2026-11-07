@@ -194,7 +194,7 @@ def test_dynamic_pages_csp_script_no_advice(world):
         team = next(iter(snap.team_by_file))
         refresh = int(s["site"]["refresh_minutes"]) * 60
         for path in ("/", "/index.html", "/match/1.html", "/match/10.html", f"/team/{team}", "/record.html",
-                     "/lifecycle.html", "/bots.html", "/odds_lead.html"):
+                     "/lifecycle.html", "/odds_lead.html"):
             r, body = srv.req("GET", path, h)
             html = body.decode("utf-8")
             assert r.status == 200, path
@@ -459,7 +459,7 @@ def test_meta_refresh_switch_off(world):
     s["live"]["meta_refresh"] = False
     with LiveRunning(s, tmp) as srv:
         h = srv.cookie()
-        for path in ("/", "/match/10.html", "/record.html", "/bots.html", "/lifecycle.html", "/odds_lead.html"):
+        for path in ("/", "/match/10.html", "/record.html", "/lifecycle.html", "/odds_lead.html"):
             html = srv.req("GET", path, h)[1].decode("utf-8")
             assert "http-equiv" not in html and '<script src="/static/site.js" defer></script>' in html, path
 

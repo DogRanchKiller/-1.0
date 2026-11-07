@@ -36,7 +36,7 @@ def test_main_writes_files_and_heartbeat(env, tmp_path, monkeypatch):
     assert (tmp_path / "ledger" / "ledger_matches.csv").exists() and (tmp_path / "ledger" / "ledger_summary.csv").exists()
     hb = read_state("ledger", tmp_path / "jobs")
     assert hb["成功"] is True and hb["摘要"]["对上账的预测"] == 3
-    assert hb["摘要"]["竞彩偏离"] == "正式计数 0 注"                         # 造的数据没有竞彩价格
+    assert "竞彩偏离" not in hb["摘要"]                                      # 2026-11-08 起每天不再记竞彩偏离
     assert len(hb["摘要"]) <= 6
 
 

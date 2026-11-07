@@ -328,6 +328,8 @@ def test_empty_profit_season_not_nan(site):
     assert html.count("<svg") == 4 and "格式不对" not in html
 
 
-def test_nav_links_to_bots_page():
-    assert "href='bots.html'" in page("x", "", "", NOW, 15)
-    assert "href='../bots.html'" in page("x", "", "../", NOW, 15)
+def test_nav_does_not_link_to_bots_page():
+    """2026-11-08 起网站不再展示虚拟投注页，导航里不能再有 bots.html（否则点开会 404）。"""
+    assert "bots.html" not in page("x", "", "", NOW, 15)
+    assert "bots.html" not in page("x", "", "../", NOW, 15)
+    assert "虚拟投注" not in page("x", "", "", NOW, 15)

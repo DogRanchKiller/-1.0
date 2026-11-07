@@ -8,6 +8,8 @@
 - “模型自己”一列：不分档，大小球和预测那列同一条主盘口，让球、大小球标“写高了”，页面上只写方向。
 - 页面：单场页表里有把握和历史命中率、让球写不分档；首页那一格有“把握”一行、行上有 data-tier-*（值只有 high / mid / low）；
   没有脚本时页面照样完整；全站没有“推荐”。
+- 单场页「多家平均」「分歧」（2026-11-08）：市场一侧必须用存档「赔率概率」（懂球帝多家平均），不能用「融合概率」（有平博时那是平博）；
+  差 ≥ site.disagree_gap（6%）标分歧；没有多家平均写「没有市场价」。
 - picks_v2 的结果不变（match_picks / model_picks 和以前一样，不带档），战绩页照旧；/api 原有字段不变，只多了 picks_v3、latest.tiers。
 - 冻结的设置块没动：加 picks_v3 不改期末考试记下的设置。
 """
@@ -274,6 +276,9 @@ def test_match_page_table_shows_tiers():
     assert "只写方向：模型写的胜算历史上偏高（高档写 61.1%，实际 49.9%）" in t
     assert "（高档写 57.4%，实际 50.6%）" in t
     assert "固定 2.5 球" in t and "不说明赔率划算" in t and "推荐" not in t
+    assert "多家平均" in t and "分歧" in t
+    assert "没有市场价" in t                                      # row_of 没存「赔率概率」
+    assert "懂球帝各家" in t and "6 个百分点" in t
     page = render_match(data, 10, TeamFiles(data.team_zh))
     assert "<script" not in page.lower() and "推荐" not in page
     # 存档没存主盘口：写“按概率推出来的线”
@@ -306,6 +311,7 @@ def test_whole_site_pages(env):
     out, _ = build(env)
     page = read(out, "match/1.html")
     assert "把握（历史命中）" in page and "大小球（主盘口）" in page
+    assert "多家平均" in page and "分歧" in page                  # 2026-11-08 单场页新两列
     idx = read(out, "index.html")
     assert set(re.findall(r"data-tier-[a-z0-9]+='([^']*)'", idx)) <= set(pk.TIERS)
     for f in all_pages(out):
@@ -368,3 +374,136 @@ def test_js_index_has_tier_select_and_reset():
     assert 'tier: "", sort: "time"' in JS
     assert 'fields[4].input.value = ""; fields[5].input.value = "time"; fields[6].input.value = "";' in JS
     assert 'r.getAttribute("data-tier-1x2")' in JS and "innerHTML" not in JS and "推荐" not in JS
+
+
+# ---------- 单场页「模型自己」vs「多家平均」分歧（需求文档第 1 节、第 12 节第 1 步） ----------
+def disagree_row(*, p=(0.50, 0.30, 0.20), market=(0.44, 0.30, 0.26), fusion_p=(0.99, 0.005, 0.005),
+                 ah_line=-0.5, ah_odds=(1.80, 2.00), model_ah=None,
+                 ou_line=2.5, ou_over=0.55, model_ou=None, model=False, extra=None):
+    """造一版专门查分歧的存档。融合概率故意和市场、模型都不一样，用来证明市场一侧不用融合概率。"""
+    r = row_of(fused=False, main=ou_line, ou=(ou_line, ou_over), model=model, fp=fusion_p)
+    r["p_home"], r["p_draw"], r["p_away"] = (float(x) for x in p)
+    d = r["detail"]
+    d["赔率概率"] = [float(x) for x in market]
+    d["融合概率"] = [float(x) for x in fusion_p]
+    d["亚盘主盘口"] = ah_line
+    d["融合"]["亚盘"] = {"line": ah_line, "home": ah_odds[0], "away": ah_odds[1], "n_books": 3}
+    if model_ah is not None:
+        d["模型亚盘主队胜算"] = model_ah
+    if model_ou is not None:
+        d["模型大球胜算"] = model_ou
+    if extra:
+        d.update(extra)
+    return r
+
+
+def test_disagree_gap_matches_study_settings():
+    """门槛和检验二最高一组、信心等级「分歧大」、分歧研究「强分歧」是同一个 6%。site 不在期末考试冻结块里。"""
+    assert S["site"]["disagree_gap"] == 0.06
+    assert S["site"]["disagree_gap"] == S["confidence_study"]["gap"] == S["disagree_study"]["disagree_strong"]
+    assert pk.disagree_gap(S) == 0.06
+    assert "site" not in fe.FROZEN
+
+
+def test_match_disagree_1x2_uses_max_of_three():
+    """胜平负：三项里差得最多的那一项 ≥ 6% 才标分歧；正好 6% 算过门槛。"""
+    r = disagree_row(p=(0.50, 0.30, 0.20), market=(0.44, 0.30, 0.26))   # 主胜差正好 6%
+    got = pk.match_disagree(r, S)["1x2"]
+    assert got["no_market"] is False and got["no_model"] is False
+    assert got["disagree"] is True and got["index"] == 0
+    assert got["diff"] == pytest.approx(0.06)
+    assert got["market"] == [0.44, 0.30, 0.26]
+    just_under = disagree_row(p=(0.50, 0.30, 0.20), market=(0.441, 0.30, 0.259))
+    assert pk.match_disagree(just_under, S)["1x2"]["disagree"] is False
+
+
+def test_match_disagree_does_not_use_fusion_probs():
+    """市场一侧必须用「赔率概率」。融合概率故意写成和模型一样（差 0），若误用融合概率就不会标分歧。"""
+    r = disagree_row(p=(0.50, 0.30, 0.20), market=(0.40, 0.30, 0.30), fusion_p=(0.50, 0.30, 0.20))
+    assert pk.market_avg_1x2(r) == [0.40, 0.30, 0.30]
+    got = pk.match_disagree(r, S)["1x2"]
+    assert got["disagree"] is True and got["market"] == [0.40, 0.30, 0.30]
+    assert got["diff"] == pytest.approx(0.10)
+
+
+def test_match_disagree_missing_market_and_html():
+    """没有多家平均：这一格写「没有市场价」，分歧格写「—」，不标分歧。赔率里有 0 也当没有。"""
+    r = row_of()                                                   # 没存「赔率概率」
+    got = pk.match_disagree(r, S)["1x2"]
+    assert got["no_market"] is True and got["disagree"] is False
+    assert "没有市场价" in pk.avg_html("1x2", got, "主", "客")
+    assert pk.disagree_html("1x2", got) == "—"
+    zero = disagree_row(market=(0.5, 0.5, 0.0))
+    assert pk.market_avg_1x2(zero) is None
+    assert pk.match_disagree(zero, S)["1x2"]["no_market"] is True
+
+
+def test_match_disagree_ah_and_ou_on_main_line():
+    """亚盘、大小球：主盘口上模型胜算和多家平均去水后胜算差 ≥ 6%；线和主盘口对不上当没有市场价。
+
+    过门槛那一侧用 7 个百分点，不卡正好 6%：去水后再 float 一圈，share+0.06 可能略低于门槛。
+    """
+    from src.common.odds import devig
+
+    share = float(devig([1.80, 2.00])[0])
+    over = disagree_row(model=False, model_ah=share + 0.07, ah_odds=(1.80, 2.00))
+    got = pk.match_disagree(over, S)["ah"]
+    assert got["no_market"] is False and got["disagree"] is True
+    assert got["line"] == -0.5 and abs(got["diff"]) >= 0.06
+    under = disagree_row(model=False, model_ah=share + 0.05, ah_odds=(1.80, 2.00))
+    assert pk.match_disagree(under, S)["ah"]["disagree"] is False
+    mismatch = disagree_row(model=False, model_ah=0.70, extra={"亚盘主盘口": -0.25})
+    assert pk.match_disagree(mismatch, S)["ah"]["no_market"] is True   # 融合.亚盘还是 -0.5
+
+    ou_over = disagree_row(model=False, ou_line=2.5, ou_over=0.50, model_ou=0.57)
+    got = pk.match_disagree(ou_over, S)["ou"]
+    assert got["disagree"] is True and got["line"] == 2.5 and abs(got["diff"]) >= 0.06
+    ou_under = disagree_row(model=False, ou_line=2.5, ou_over=0.50, model_ou=0.55)
+    assert pk.match_disagree(ou_under, S)["ou"]["disagree"] is False
+    ou_miss = disagree_row(model=False, ou_line=2.75, ou_over=0.50, model_ou=0.70)
+    # row_of 的 大小球主盘口是 2.75，融合.大小球也被写成 2.75；改成线和主盘口故意错开
+    ou_miss["detail"]["融合"]["大小球"] = {"line": 2.5, "p_over": 0.50, "n_books": 3}
+    assert pk.match_disagree(ou_miss, S)["ou"]["no_market"] is True
+
+
+def test_match_disagree_score_top_or_gap():
+    """比分：两边最可能的那个比分不一样，或同一个比分上概率差 ≥ 6%，都标分歧。"""
+    p, line, p_over = (0.45, 0.28, 0.27), 2.5, 0.52
+    km = np.array(pk._rebuild(p, line, p_over, int(S["market_odds"]["max_goals"])))
+    n = int(S["market_odds"]["max_goals"]) + 1
+    assert km.shape == (n, n)
+
+    # 1. 最可能的比分不一样：把市场矩阵里最大的两格对调，当模型矩阵
+    swapped = km.copy()
+    order = np.argsort(-swapped, axis=None, kind="stable")
+    a0, a1 = np.unravel_index(int(order[0]), swapped.shape), np.unravel_index(int(order[1]), swapped.shape)
+    swapped[a0], swapped[a1] = swapped[a1], swapped[a0]
+    r = disagree_row(p=(0.40, 0.30, 0.30), market=p, ou_line=line, ou_over=p_over, model=False)
+    r["detail"]["模型比分矩阵"] = np.round(swapped, 6).tolist()
+    got = pk.match_disagree(r, S)["score"]
+    assert got["no_market"] is False and got["same_top"] is False and got["disagree"] is True
+
+    # 2. 同一个比分，模型那一格比市场高 7 个百分点
+    boosted = km.copy()
+    h, a, kp = pk._top_score(km)
+    rest = boosted.copy()
+    rest[h, a] = 0.0
+    s = float(rest.sum())
+    boosted = rest * ((s - 0.07) / s)
+    boosted[h, a] = kp + 0.07
+    r["detail"]["模型比分矩阵"] = np.round(boosted, 6).tolist()
+    got = pk.match_disagree(r, S)["score"]
+    assert got["same_top"] is True and got["disagree"] is True
+    assert abs(got["diff"]) >= 0.06
+
+
+def test_match_page_flags_disagree_on_1x2():
+    """单场页：胜平负差 ≥ 6% 时「分歧」那一格带标签；市场格不写「没有市场价」。"""
+    data, row = page_data(fused=False, main=2.75)
+    row["p_home"], row["p_draw"], row["p_away"] = 0.50, 0.30, 0.20
+    row["detail"]["赔率概率"] = [0.40, 0.30, 0.30]
+    row["detail"]["融合概率"] = [0.50, 0.30, 0.20]                 # 若误用融合概率，差是 0，不会标分歧
+    html = picks_html(data, 10, row)
+    assert "tag disagree" in html and "主胜 模型" in html
+    assert "没有市场价" in html                                     # 亚盘 / 大小球 / 比分这版没存市场价，照样写
+    assert "推荐" not in html

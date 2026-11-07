@@ -73,7 +73,7 @@ def test_site_js_comments_are_chinese():
 
 # ---------- 2. 生成出来的网页 ----------
 
-PAGES = ("/", "/match/1.html", "/match/10.html", "/record.html", "/lifecycle.html", "/bots.html", "/odds_lead.html")
+PAGES = ("/", "/match/1.html", "/match/10.html", "/record.html", "/lifecycle.html", "/odds_lead.html")
 
 
 def test_live_pages_only_reference_site_js(world):

@@ -31,7 +31,7 @@ import numpy as np
 
 from src.common.config import resolve_path
 from src.common.settlement import settle_asian_handicap, settle_over_under
-from src.web.site.common import pct0
+from src.web.site.common import pct0, pct1
 from src.web.site.data import matrix
 
 RULE = "picks_v2"
@@ -608,6 +608,242 @@ def model_picks_v3(row: dict, settings: dict, ou_line: float | None) -> dict:
             if k in ("ah", "ou"):
                 out[k]["overstated"] = True
     return out
+
+
+# ======================= 单场页「模型自己」vs「多家平均」分歧（需求文档第 1 节、第 12 节第 1 步） =======================
+# 只给单场页用，不改存档、不改融合、不推送。市场一侧必须是懂球帝多家平均，不能用融合概率（胜平负可能是平博）。
+# 门槛 site.disagree_gap（6%），和 confidence_study.gap、disagree_study.disagree_strong 同一个数。
+OUTCOMES_ZH = ("主胜", "平", "客胜")
+
+
+def disagree_gap(settings: dict) -> float:
+    """标「分歧」的门槛（绝对值，单位是概率）。写在 settings.yaml site.disagree_gap。"""
+    return float(settings["site"]["disagree_gap"])
+
+
+def _probs3(x) -> list[float] | None:
+    """三个概率：都是有限正数才用。"""
+    if isinstance(x, list) and len(x) == 3 and all(_num(v) is not None and float(v) > 0 for v in x):
+        return [float(v) for v in x]
+    return None
+
+
+def market_avg_1x2(row: dict) -> list[float] | None:
+    """多家平均胜平负去水概率：存档「赔率概率」。不用「融合概率」（有平博时那是平博）。"""
+    return _probs3((row.get("detail") or {}).get("赔率概率"))
+
+
+def _top_score(m: np.ndarray) -> tuple[int, int, float]:
+    """矩阵里最可能的一个比分（和 best_scores 同一个稳定排序：一样大时取前面的）。"""
+    m = np.asarray(m, dtype=float)
+    i = int(np.argsort(-m, axis=None, kind="stable")[0])
+    h, a = np.unravel_index(i, m.shape)
+    return int(h), int(a), float(m[h, a])
+
+
+def _ah_market_home(row: dict) -> tuple[float, float] | None:
+    """主盘口上多家平均去水后的主队胜算：(线, 主队胜算)。
+
+    线用存档「亚盘主盘口」（出这一版时开的公司最多的那条）。去水用融合.亚盘里存的两边平均赔率
+    （fusion_odds 的亚盘就是这条主盘口上各家平均，不是平博；两边赔率要在 1.5–2.7 才存）。
+    没存主盘口、没存两边赔率、或者融合.亚盘的线和主盘口对不上 → None。
+    """
+    d = row.get("detail") or {}
+    line = _num(d.get("亚盘主盘口"))
+    ah = _fusion(row).get("亚盘")
+    if line is None or not isinstance(ah, dict):
+        return None
+    ah_line, home, away = _num(ah.get("line")), _num(ah.get("home")), _num(ah.get("away"))
+    if ah_line is None or home is None or away is None or abs(ah_line - line) > 1e-9:
+        return None
+    if home <= 1 or away <= 1:
+        return None
+    from src.common.odds import devig
+    return line, float(devig([home, away])[0])
+
+
+def _ou_market_over(row: dict, line: float | None) -> float | None:
+    """主盘口上多家平均去水后的大球胜算。融合.大小球必须就是这条主盘口（它存的是去水后的 p_over）。"""
+    if line is None:
+        return None
+    ou = _fusion(row).get("大小球")
+    if not isinstance(ou, dict):
+        return None
+    ou_line, p_over = _num(ou.get("line")), _num(ou.get("p_over"))
+    if ou_line is None or p_over is None or abs(ou_line - line) > 1e-9 or not 0 < float(p_over) < 1:
+        return None
+    return float(p_over)
+
+
+def _model_ah_home(row: dict, settings: dict, line: float | None) -> float | None:
+    """模型在亚盘主盘口上的主队胜算：有比分矩阵就现场算，没有就用存档「模型亚盘主队胜算」（必须是同一条线）。"""
+    if line is None:
+        return None
+    d = row.get("detail") or {}
+    m = matrix(d, "模型比分矩阵", settings["site"]["matrix_sum_tol"])
+    if m is not None:
+        from src.common.markets import asian_handicap
+        return _num(asian_handicap(m, line, "home")["win_share"])
+    if abs(line - (_num(d.get("亚盘主盘口")) or math.nan)) < 1e-9:
+        return _num(d.get("模型亚盘主队胜算"))
+    return None
+
+
+def _model_ou_over(row: dict, settings: dict, line: float | None) -> float | None:
+    """模型在大小球主盘口上的大球胜算。"""
+    if line is None:
+        return None
+    d = row.get("detail") or {}
+    m = matrix(d, "模型比分矩阵", settings["site"]["matrix_sum_tol"])
+    if m is not None:
+        return _over_share(m, line)
+    if good_line(d.get("大小球主盘口"), settings) == line:
+        return _num(d.get("模型大球胜算"))
+    return None
+
+
+def _market_score_matrix(row: dict, settings: dict) -> np.ndarray | None:
+    """多家平均的比分矩阵：用存档「赔率概率」+ 融合.大小球，按出预测时同一个方法反推。
+
+    不用存档「融合比分矩阵」：那是融合用的胜平负（有平博时是平博）反推的，不是多家平均。
+    赔率概率或大小球缺了、反推失败 → None（这一玩法写「没有市场价」）。
+    """
+    p = market_avg_1x2(row)
+    ou = _fusion(row).get("大小球")
+    if p is None or not isinstance(ou, dict):
+        return None
+    line, p_over = _num(ou.get("line")), _num(ou.get("p_over"))
+    if line is None or p_over is None or not 0 < float(p_over) < 1:
+        return None
+    try:
+        m = _rebuild(tuple(p), float(line), float(p_over), int(settings["market_odds"]["max_goals"]))
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError):
+        return None
+    return m if np.isfinite(m).all() else None
+
+
+def _blank(no_market: bool, no_model: bool) -> dict:
+    return {"no_market": no_market, "no_model": no_model, "disagree": False, "diff": None}
+
+
+def match_disagree(row: dict, settings: dict) -> dict:
+    """四个玩法各自：模型和多家平均差多少、过不过门槛。
+
+    每项是一个字典：
+      no_market / no_model：缺哪一边（缺市场 → 页面写「没有市场价」，不标分歧）；
+      disagree：两边都有、且差 ≥ site.disagree_gap；
+      其余键给页面写「模型多少、市场多少、差多少」。
+    """
+    gap = disagree_gap(settings)
+    d = row.get("detail") or {}
+    out: dict = {}
+
+    mp = [_num(row.get(k)) for k in ("p_home", "p_draw", "p_away")]
+    mk = market_avg_1x2(row)
+    if any(x is None for x in mp):
+        out["1x2"] = _blank(True, True) if mk is None else {**_blank(False, True), "market": mk}
+    elif mk is None:
+        out["1x2"] = _blank(True, False)
+    else:
+        diffs = [float(mp[i]) - mk[i] for i in range(3)]
+        i = int(np.argmax([abs(x) for x in diffs]))
+        out["1x2"] = {"no_market": False, "no_model": False, "disagree": abs(diffs[i]) >= gap,
+                      "diff": diffs[i], "index": i, "model": [float(x) for x in mp], "market": mk}
+
+    ah_line = _num(d.get("亚盘主盘口"))
+    ah_m = _model_ah_home(row, settings, ah_line)
+    ah_k = _ah_market_home(row)
+    if ah_k is None:
+        out["ah"] = _blank(True, ah_m is None)
+    elif ah_m is None:
+        out["ah"] = {**_blank(False, True), "line": ah_k[0], "market": ah_k[1]}
+    else:
+        diff = float(ah_m) - ah_k[1]
+        out["ah"] = {"no_market": False, "no_model": False, "disagree": abs(diff) >= gap, "diff": diff,
+                     "line": ah_k[0], "model": float(ah_m), "market": ah_k[1]}
+
+    ou_line = good_line(d.get("大小球主盘口"), settings)
+    ou_m = _model_ou_over(row, settings, ou_line)
+    ou_k = _ou_market_over(row, ou_line)
+    if ou_k is None:
+        out["ou"] = _blank(True, ou_m is None)
+    elif ou_m is None:
+        out["ou"] = {**_blank(False, True), "line": ou_line, "market": ou_k}
+    else:
+        diff = float(ou_m) - ou_k
+        out["ou"] = {"no_market": False, "no_model": False, "disagree": abs(diff) >= gap, "diff": diff,
+                     "line": ou_line, "model": float(ou_m), "market": ou_k}
+
+    mm = matrix(d, "模型比分矩阵", settings["site"]["matrix_sum_tol"])
+    km = _market_score_matrix(row, settings)
+    if km is None:
+        out["score"] = _blank(True, mm is None)
+    elif mm is None:
+        th, ta, tp = _top_score(km)
+        out["score"] = {**_blank(False, True), "market_top": (th, ta), "market_p": tp}
+    else:
+        mh, ma, mp_ = _top_score(mm)
+        kh, ka, kp = _top_score(km)
+        same = (mh, ma) == (kh, ka)
+        diff = float(mm[mh, ma]) - float(km[mh, ma])
+        out["score"] = {"no_market": False, "no_model": False,
+                        "disagree": (not same) or abs(diff) >= gap, "diff": diff,
+                        "model_top": (mh, ma), "market_top": (kh, ka),
+                        "model_p": mp_, "market_p": kp, "same_top": same}
+    return out
+
+
+def avg_html(market: str, info: dict | None, home: str, away: str) -> str:
+    """单场页「多家平均」那一格。没有市场价就写这两个字；有就写最可能的那边和胜算。"""
+    if info is None or info.get("no_market"):
+        return "<span class='muted'>没有市场价</span>"
+    if market == "1x2":
+        p = info["market"]
+        side = int(np.argmax(p))
+        pick = {"side": side, "p": p[side]}
+    elif market == "ah":
+        share = info["market"]
+        home_side = share >= 0.5
+        pick = {"side": "home" if home_side else "away", "line": info["line"],
+                "p": share if home_side else 1 - share}
+    elif market == "ou":
+        over = info["market"]
+        side = "over" if over >= 0.5 else "under"
+        pick = {"side": side, "line": info["line"], "p": over if side == "over" else 1 - over}
+    else:
+        h, a = info["market_top"]
+        pick = {"scores": [(h, a)], "p": info["market_p"]}
+    return f"{e_pick_text(market, pick, home, away)} <span class='small muted'>{pct0(pick['p'])}</span>"
+
+
+def e_pick_text(market: str, pick: dict, home: str, away: str) -> str:
+    """pick_text 再转义，给直接拼进 HTML 的格子用。"""
+    from src.web.site.common import e
+    return e(pick_text(market, pick, home, away))
+
+
+def disagree_html(market: str, info: dict | None) -> str:
+    """单场页「分歧」那一格：写模型多少、市场多少、差多少；过门槛标「分歧」。没有市场价这一格写「—」。"""
+    from src.web.site.common import e
+    if info is None or info.get("no_market") or info.get("no_model"):
+        return "—"
+    tag = " <span class='tag disagree'>分歧</span>" if info.get("disagree") else ""
+    if market == "1x2":
+        i = info["index"]
+        body = (f"{OUTCOMES_ZH[i]} 模型 {pct1(info['model'][i])}，市场 {pct1(info['market'][i])}，"
+                f"差 {pct1(abs(info['diff']))}")
+    elif market == "ah":
+        body = f"主队胜算 模型 {pct1(info['model'])}，市场 {pct1(info['market'])}，差 {pct1(abs(info['diff']))}"
+    elif market == "ou":
+        body = f"大球胜算 模型 {pct1(info['model'])}，市场 {pct1(info['market'])}，差 {pct1(abs(info['diff']))}"
+    elif info.get("same_top"):
+        h, a = info["model_top"]
+        body = f"{h}–{a} 模型 {pct1(info['model_p'])}，市场 {pct1(info['market_p'])}，差 {pct1(abs(info['diff']))}"
+    else:
+        mh, ma = info["model_top"]
+        kh, ka = info["market_top"]
+        body = f"模型最可能 {mh}–{ma}，市场最可能 {kh}–{ka}"
+    return f"<span class='small'>{e(body)}</span>{tag}"
 
 
 # ---------- picks_v3 页面上的写法 ----------

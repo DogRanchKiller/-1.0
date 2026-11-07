@@ -631,6 +631,7 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
     从上到下按 pk.DISPLAY_ORDER 排（2026-11-05 起亚盘排第一，只是显示顺序；算命中率、接口还是 pk.MARKETS 的顺序）。
     “把握”一列：胜平负、大小球、比分写高 / 中 / 低和这一档的历史命中率（settings.yaml picks_v3）；让球不分档，写总的历史命中率。
     “模型自己”一列不分档；让球、大小球只写方向（模型在这两个玩法上写的胜算历史上偏高）。
+    “多家平均”和“分歧”：模型概率和懂球帝多家平均去水概率并排，差 ≥ site.disagree_gap（6%）标分歧（需求文档第 1 节）。
     踢完了写中没中；“预测”只是哪个更可能，不是值得买。战绩页的命中率照旧按 picks_v2 算（大小球固定 2.5 球），表下写明。"""
     from src.web.site import picks as pk
 
@@ -649,9 +650,10 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
     else:
         late = "这一版是开球以后才出的，不算进战绩页的命中率。"
     over = s["picks_v3"]["model_overstated"]
+    dg = pk.match_disagree(row, s)
     rows = []
     for k in pk.DISPLAY_ORDER:
-        q, mk = mine[k], ps[k]
+        q, mk, info = mine[k], ps[k], dg[k]
         if q is None:
             own = "—"
         elif q.get("overstated"):
@@ -668,7 +670,9 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
         if k in ("ou", "score") and mk is not None and mk.get("matrix") == "重算":
             what += " <span class='small muted'>按存的赔率概率重算</span>"
         rows.append([e(pk.MARKET_NAMES_V3[k]), what, pk.prob_html(k, mk), pk.tier_html(k, mk, s),
-                     pk.outcome_html(pk.settle(k, mk, score)) if score else "<span class='muted'>还没踢</span>", own])
+                     pk.outcome_html(pk.settle(k, mk, score)) if score else "<span class='muted'>还没踢</span>",
+                     own, pk.avg_html(k, info, home, away), pk.disagree_html(k, info)])
+    gap_pct = f"{pk.disagree_gap(s) * 100:.0f}"
     note = ("<p class='small muted'>每个玩法写最可能的那一边，踢完记中没中。"
             "让球：-0.5 = 要赢 1 球以上才算中，+0.5 = 不输就算中；四分之一球会有赢半、输半，整数球打平会走盘。"
             "大小球看开的公司最多的那条主盘口（出这一版时存下的），不再固定 2.5 球。"
@@ -676,10 +680,12 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
             f"“把握”：同样这么写的预测，历史上（{e(pk.test_seasons_text(s))}、{int(s['picks_v3']['test_n']):,} 场）这一档中了几成；"
             "只说明以前中了几成，不说明赔率划算。让球分不开，不分档。"
             "“模型自己”是只用我们自己的模型、不看赔率时的预测（有赔率时前面的预测用赔率算出来的概率，历史上赔率更准；这一版没用上赔率时两列一样），两列不一样时可以对比着看。"
+            "“多家平均”是懂球帝各家公司去水后再平均的概率，不是平博、也不是某一家；这一玩法没有多家平均就写“没有市场价”。"
+            f"“分歧”：模型和多家平均在同一个结果上差 {gap_pct} 个百分点及以上就标出来，页面写两边各是多少、差多少。买不买你自己看。"
             "<a href='../record.html'>战绩页</a>的命中率照旧按原来的规则算（大小球固定 2.5 球），和这里的主盘口不一定是同一条线。</p>")
     if late:
         note = f"<p class='note'>{late}</p>" + note
-    return table(["玩法", "预测", "可能性", "把握（历史命中）", "结果", "模型自己"], rows, "picks") + note
+    return table(["玩法", "预测", "可能性", "把握（历史命中）", "结果", "模型自己", "多家平均", "分歧"], rows, "picks") + note
 
 
 def tech_line(row: dict) -> str:
