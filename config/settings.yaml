@@ -50,6 +50,11 @@ leagues:                     # 第一阶段的联赛（football-data 的联赛�
   # 第 11 阶段（2026-11-05，工作树 INA）：国家队比赛（martj42），所有国家队一个代码、一个评分池；赛季 = 比赛日期那一年。
   # 不进 top / second：现有按 top、second 跑的下载、导入、预测、网页都不受影响（和 asia 一样）。只做开发回测，没接实时预测
   intl: {INT: 国际赛}
+  # 2026-11-07（v1.28）：竞彩也卖的另外五个联赛，只给“竞彩价格偏离虚拟实盘”多攒注（第 14 节）。
+  # 比赛直接用懂球帝赛程建（src/clean/dongqiudi_jc_import.py，来源 dongqiudi-jc），只有上线赛季、没有历史，
+  # 不进 top / second：模型、预测、网页、积分榜都不碰。代码 N1、P1、SC0 和 football-data 的写法一样；
+  # 以后要是从 football-data 导这几个联赛，得先改成像五大联赛那样“投票对上”，不能直接导（队名写法不一样，会重复）
+  jc: {N1: 荷甲, P1: 葡超, SC0: 苏超, AUS: 澳超, BRA: 巴甲}
 
 football_data:
   timezone: Europe/London    # football-data 的开球时间是英国当地时间（已核对，见需求文档 6.1）
@@ -199,6 +204,27 @@ dongqiudi:
     show_played_minutes: 300   # 踢完的比赛开球后几分钟内还显示（约等于踢完以后再留 3 小时）
     idle_check_minutes: 10     # 后台线程最多隔几分钟醒来看一次（数据库可能刚导入了新的开球时间）
     output: data/live/scores.json  # 写到哪个文件（先写临时文件再改名，网站不会读到写了一半的）
+
+# 竞彩联赛（leagues.jc，需求文档 6.2“竞彩联赛”、第 14 节“竞彩价格偏离虚拟实盘”）。2026-11-07（v1.28）加。
+# 每小时任务（src/jobs/refresh_data.py）在五大联赛那一套采集、导入做完以后再做这一段：
+# 采集用同一个采集程序（同一个 5 秒请求时钟、403/429 就停），导入是 src/clean/dongqiudi_jc_import.py。
+# 这几个联赛数据库里本来没有比赛：比赛、球队都按懂球帝赛程建，球队编号 = 懂球帝最近的中文写法（不编英文名）。
+# 只导上线赛季（season_role = live），不做历史回补
+dongqiudi_jc:
+  db_source: dongqiudi-jc    # 数据库里的来源名（和五大联赛的 dongqiudi、韩K 的 dongqiudi-kor 分开）
+  # 采集用的设置：没写的照搬上面 dongqiudi 段
+  collect:
+    # 懂球帝联赛编号，从已存的懂球帝页面里读到；2026-11-07 每个联赛先请求一次赛程、抽 4 场赔率核对过
+    # （五个联赛都有赛程，赔率表里有平博亚盘、大小球，抽到的场里有竞彩价格的：荷甲 1/4、葡超 1/4、苏超 0/4、澳超 1/4、巴甲 0/4）
+    league_ids: {N1: 1, P1: 52, SC0: 36, AUS: 257, BRA: 19}
+    upcoming_ahead_days: 3     # 竞彩一般开球前一两天才开卖，往后看 3 天够了
+    # 快照只抓开球前 48 小时以内（决定时间是开球前 6 小时左右、最早开球前十几个小时），省请求
+    odds_snapshot_rules: [[6, 1], [48, 3]]
+    details: false             # 不抓比赛详情页（xG 这些用不上）
+    lineups: false             # 不抓首发页
+  calendar_year: [BRA]       # 一年一个赛季的联赛（赛季 = 开球那年）；别的按 7 月起算新赛季（澳超 10 月开始，2026 = 2026/27）
+  country: {N1: 荷兰, P1: 葡萄牙, SC0: 苏格兰, AUS: 澳大利亚, BRA: 巴西}   # teams 表的国家（澳超的惠灵顿凤凰、奥克兰FC 其实是新西兰队，按联赛记）
+  report_file: 竞彩联赛_导入报告.md   # 导入报告（放 paths.reports 里）
 
 # 韩K（K联赛 1 级）历史回补和导入（需求文档第 4 节“第 11 阶段：韩K 回补和开发回测”）。工作树 KR 里做，没接定时任务。
 # 采集 src/collect/dongqiudi_kor.py（用懂球帝采集程序的低频、停止规则），导入 src/clean/dongqiudi_kor_import.py。
@@ -1221,7 +1247,7 @@ site:
   team_form_matches: 6           # 近期状态列最近几场联赛（Elo 那张表也列这几场）
   team_h2h_matches: 10           # 历史交锋列两队最近几场联赛交锋（对手 = 接下来第一场联赛的对手）
   team_elo_matches: 38           # Elo 折线图画现在这个联赛最近几场（38 ≈ 英超一个赛季）
-  team_skip_league_groups: [intl] # 球队页四块不读这些联赛组（国际赛：国家队不在网站上，读了只会变慢）
+  team_skip_league_groups: [intl, jc] # 球队页四块不读这些联赛组（国际赛：国家队不在网站上；竞彩联赛只给虚拟实盘用。读了只会变慢）
   versions: [T-24, T-6, T-1, preview]   # 单场页对比哪几个版本（predictions 表的 kind），按这个顺序排
   heatmap_goals: 5               # 比分热力图显示 0–5 球（第 3 节：0-0 到 5-5）；更多的并进“6+”
   top_scores: 5                  # 列最可能的几个比分
@@ -1647,10 +1673,10 @@ ledger:                       # 开发顺序第 2 步“四本账”（需求文
 lottery_value:                 # 竞彩价格偏离虚拟实盘 src/evaluate/lottery_value.py（需求文档第 14 节“竞彩价格偏离虚拟实盘”，跑之前写下）
   # 运行：python -m src.evaluate.lottery_value；每天 09:40 跟四本账一起跑（src/jobs/ledger_daily.py）。只读打开数据库
   output_dir: data/backtest/lottery_value   # candidates / bets / skipped / summary / decisions_log（data/ 不进 Git）
-  # 联赛（leagues 段里的组名，可以写几个）。2026-11-07 加 second：规则一点没改，只是多了比赛。
-  # 懂球帝现在只抓得到英冠、西乙、德乙（dongqiudi.league_ids），快照 11-07 起才有；
-  # 意乙、法乙和更早的场都会记成“决定时间之前没有竞彩价格”
-  leagues: [top, second]
+  # 联赛（leagues 段里的组名，可以写几个）。2026-11-07 加 second、jc：规则一点没改，只是多了比赛。
+  # 次级联赛懂球帝只抓得到英冠、西乙、德乙（dongqiudi.league_ids），快照 11-07 起才有；
+  # 意乙、法乙和更早的场都会记成“决定时间之前没有竞彩价格”。jc 五个联赛 11-07 起才有比赛
+  leagues: [top, second, jc]
   first_kickoff_utc: "2026-10-30 00:00:00"  # 从这天起开球的比赛（懂球帝每小时快照 2026-10-30 起才有竞彩赛前价格）
   count_from_utc: "2026-11-07 00:00:00"     # 决定时间在这之后的注才“正式计数”（规则写下以后）；之前的只看看
   hours_before: 6              # 决定时间 = 开球前几小时

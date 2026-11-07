@@ -31,7 +31,7 @@ NOW = "2026-11-10 12:00:00"
 @pytest.fixture
 def env(tmp_path):
     s = copy.deepcopy(load_settings())
-    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}, "jc": {}}   # 竞彩联赛这组空着
     s["lottery_value"]["output_dir"] = str(tmp_path / "lv")
     s["lottery_value"]["count_from_utc"] = "2026-11-01 00:00:00"
     con = connect(tmp_path / "t.db")

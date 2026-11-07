@@ -2,6 +2,8 @@
 
 运行：.venv\\Scripts\\python -m src.jobs.refresh_data
 复用现有采集器的低频限制、共享请求间隔、内容检查和导入程序，不另写一套取数逻辑。
+五大联赛那一套做完以后，settings.yaml 有 dongqiudi_jc 段时，再用同一个采集器抓、导竞彩联赛（leagues.jc，
+src/clean/dongqiudi_jc_import.py）。顺序固定在后面：竞彩联赛出问题时，五大联赛这一小时的数据已经导进去了。
 每次写 refresh_data 心跳；采集或导入失败照常抛出，任务计划程序能看到失败。
 """
 from __future__ import annotations
@@ -9,7 +11,8 @@ from __future__ import annotations
 import logging
 
 from src.clean.dongqiudi_import import run as import_raw
-from src.collect.dongqiudi import Collector, setup_logging
+from src.clean.dongqiudi_jc_import import run as import_jc
+from src.collect.dongqiudi import Collector, jc_config, setup_logging
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
 from src.jobs.data_lock import data_write_lock, source_refresh_lock
@@ -58,6 +61,8 @@ def run_refresh(settings: dict | None = None) -> dict:
             with data_write_lock(settings):
                 result = import_raw(con, raw, resolve_path(settings["paths"]["reports"]), settings)
             run.summary["写入"] = result["counts"]
+            if "dongqiudi_jc" in settings:
+                run_jc(con, raw, settings, run.summary)
             run.summary["阶段"] = "完成"
         finally:
             try:
@@ -66,6 +71,22 @@ def run_refresh(settings: dict | None = None) -> dict:
             finally:
                 con.close()
     return dict(run.summary)
+
+
+def run_jc(con, raw, settings: dict, summary: dict) -> None:
+    """竞彩联赛：同一套“采集成功才导入”。采集失败、导入失败照常抛出（整次任务记失败），五大联赛已经导好的不受影响。"""
+    summary["阶段"] = "竞彩联赛采集"
+    cfg = jc_config(settings)
+    collector = RefreshCollector(con, raw, cfg)
+    try:
+        collector.upcoming(list(cfg["league_ids"]))
+    finally:
+        summary["竞彩联赛采集请求"] = dict(collector.counts)
+        collector.session.close()
+    summary["阶段"] = "竞彩联赛导入"
+    with data_write_lock(settings):
+        result = import_jc(con, raw, resolve_path(settings["paths"]["reports"]), settings)
+    summary["竞彩联赛写入"] = result["counts"]
 
 
 def main() -> dict:

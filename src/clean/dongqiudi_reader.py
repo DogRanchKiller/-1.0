@@ -289,6 +289,8 @@ class Fixture:
     home_goals: int | None
     away_goals: int | None
     gameweek: str
+    home_id: str = ""             # 懂球帝球队编号（team_A_id / team_B_id）。竞彩联赛导入用它认球队；别的导入不用
+    away_id: str = ""
 
 
 def parse_fixtures(data: dict) -> list[Fixture]:
@@ -302,7 +304,7 @@ def parse_fixtures(data: dict) -> list[Fixture]:
         hg, ag = m.get("fs_A"), m.get("fs_B")
         out.append(Fixture(int(m["match_id"]), ko, m.get("status", ""), m.get("team_A_name", ""), m.get("team_B_name", ""),
                            int(hg) if str(hg).isdigit() else None, int(ag) if str(ag).isdigit() else None,
-                           str(m.get("gameweek", ""))))
+                           str(m.get("gameweek", "")), str(m.get("team_A_id") or ""), str(m.get("team_B_id") or "")))
     return out
 
 

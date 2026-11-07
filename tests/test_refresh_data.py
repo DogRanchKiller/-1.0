@@ -74,6 +74,41 @@ def test_collect_then_import_and_success_heartbeat(env):
     assert summary["写入"] == {"新增比赛": 2}
 
 
+def test_jc_leagues_collected_and_imported_after_top_leagues(env, monkeypatch):
+    """有 dongqiudi_jc 设置时：五大联赛导完，再用竞彩联赛的设置采集一次、导入一次；两次的请求数分开记。"""
+    job, settings, calls, _, _tmp = env
+    settings["dongqiudi"]["min_interval_seconds"] = 5
+    settings["dongqiudi_jc"] = {"collect": {"league_ids": {"N1": 1, "BRA": 19}, "details": False, "lineups": False}}
+    seen = []
+
+    class TwoCollectors:
+        def __init__(self, con, raw, cfg):
+            self.cfg, self.counts = cfg, {}
+            self.session = SimpleNamespace(close=lambda: calls.append("close_session"))
+
+        def upcoming(self, leagues):
+            seen.append((leagues, self.cfg))
+            calls.append("collect")
+            self.counts = {"saved": len(leagues)}
+
+    def fake_jc(con, raw, reports, s):
+        assert s is settings and reports == Path(settings["paths"]["reports"])
+        calls.append("import_jc")
+        return {"counts": {"比赛": 3}}
+
+    monkeypatch.setattr(job, "RefreshCollector", TwoCollectors)
+    monkeypatch.setattr(job, "import_jc", fake_jc)
+    summary = job.run_refresh(settings)
+    assert calls == ["collect", "import", "collect", "close_session", "import_jc", "close_session"]
+    assert seen[0][0] == ["E0", "SP1"]
+    jc_leagues, jc_cfg = seen[1]
+    # 竞彩联赛的设置 = 懂球帝的通用设置（请求间隔等）+ 自己的联赛编号、不抓详情页和首发页
+    assert jc_leagues == ["N1", "BRA"] and jc_cfg["min_interval_seconds"] == 5
+    assert jc_cfg["details"] is False and jc_cfg["lineups"] is False
+    assert summary["竞彩联赛采集请求"] == {"saved": 2} and summary["竞彩联赛写入"] == {"比赛": 3}
+    assert summary["阶段"] == "完成"
+
+
 def test_busy_import_does_not_block_collection_or_write_partial_database(env, monkeypatch):
     from contextlib import contextmanager
 

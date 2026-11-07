@@ -387,9 +387,12 @@ class Collector:
         if f.status == "Played" and f.kickoff_utc and \
                 self.now() - f.kickoff_utc >= timedelta(hours=self.cfg["final_after_hours"]):
             self.odds_final(league, season, f.match_id)
+            # 竞彩联赛（dongqiudi_jc）只要赔率：details、lineups 写 false 就不抓详情页、首发页（省请求）
             if self.now() - f.kickoff_utc >= timedelta(hours=self.cfg["detail_after_hours"]):
-                self.match_detail(league, season, f.match_id)
-                self.lineup_final(league, season, f.match_id)
+                if self.cfg.get("details", True):
+                    self.match_detail(league, season, f.match_id)
+                if self.cfg.get("lineups", True):
+                    self.lineup_final(league, season, f.match_id)
             return True
         return False
 
@@ -416,7 +419,7 @@ class Collector:
                     self.odds_live(lg, f.match_id)
                     n_live += 1
                 # 首发页：开球前 lineup_hours_before 小时以内，每 lineup_every_hours 小时看一次（“还没出”也算看过）
-                if hours <= self.cfg["lineup_hours_before"] and self._due(
+                if self.cfg.get("lineups", True) and hours <= self.cfg["lineup_hours_before"] and self._due(
                         LINEUP_URL.format(match_id=f.match_id), self.cfg["lineup_every_hours"], "lineup_live",
                         ("saved", "unchanged", "not_found")):
                     lineup_due.append(f.match_id)
@@ -534,6 +537,13 @@ class Collector:
 
 STATUS_NAMES = {"saved": "已保存", "unchanged": "没变化", "not_found": "网站没有", "suspicious": "内容可疑",
                 "failed": "失败", "skipped": "已有，跳过"}
+
+
+def jc_config(settings: dict) -> dict:
+    """竞彩联赛（settings.yaml 的 dongqiudi_jc）给采集程序用的设置：
+    懂球帝五大联赛那一套（限速、停止规则、翻页上限……）照搬，只换 dongqiudi_jc.collect 里写的几项
+    （联赛编号、快照间隔、不抓详情页和首发页）。请求间隔和 403/429 停下的规矩完全一样，还是共用同一个请求时钟。"""
+    return {**settings["dongqiudi"], **settings["dongqiudi_jc"]["collect"]}
 
 
 def setup_logging(log_dir: Path):

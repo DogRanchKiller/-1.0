@@ -40,7 +40,7 @@ FUSED_M = _matrix(1.5, 1.1)
 @pytest.fixture
 def env(tmp_path):
     s = copy.deepcopy(load_settings())
-    s["leagues"] = {"top": {"E0": "英超"}, "second": {}}
+    s["leagues"] = {"top": {"E0": "英超"}, "second": {}, "jc": {}}   # 竞彩联赛这组空着
     s["ledger"]["min_matches"] = 1000
     con = connect(tmp_path / "t.db")
     create_tables(con)

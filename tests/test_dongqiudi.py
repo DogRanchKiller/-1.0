@@ -361,6 +361,23 @@ def test_upcoming_fetches_detail_after_hours(env):
     assert [u for u in site.requests if "matchDetail" in u] == [DETAIL_URL.format(match_id=2), LINEUP_URL.format(match_id=2)]
 
 
+def test_upcoming_without_details_and_lineups(env, tmp_path):
+    """竞彩联赛（details、lineups 写 false）：只抓赛程和赔率，不抓详情页、首发页。"""
+    con, site, clock, _c, out = env
+    c = Collector(con, tmp_path / "raw", {**CFG, "details": False, "lineups": False},
+                  session=site, sleep=lambda s: None, now=lambda: clock.t)
+    now = clock.t
+    site.pages[fixtures_url("2026-10-27 00:00:00")] = (200, {"list": [
+        fixture_item(1, now - timedelta(hours=20), "Played"),   # 踢完：只要最终赔率
+        fixture_item(2, now + timedelta(hours=2)),              # 快开球：赔率快照，不看首发页
+    ], "nextDate": ""})
+    for mid in (1, 2):
+        site.pages[ODDS_URL.format(match_id=mid)] = (200, odds_json(mid))
+    c.upcoming(["E0"])
+    assert not [u for u in site.requests if "matchDetail" in u]
+    assert (out / "odds_final/E0/2026/1.json.gz").exists() and (out / "odds_live/E0/2").exists()
+
+
 def test_detail_backfill_since_and_stop(env):
     """补详情页：只要 since 以后踢完的（赛季页的“月-日”按赛季推年份），从近往远；连着 3 场可疑就停。"""
     con, site, clock, c, out = env
