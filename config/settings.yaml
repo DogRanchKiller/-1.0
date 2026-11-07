@@ -158,8 +158,14 @@ understat_mirror:
 # 懂球帝（赔率来源，需求文档 6.2）。采集程序 src/collect/dongqiudi.py，只存原始层，暂不进数据库
 dongqiudi:
   min_interval_seconds: 5    # 两次请求至少隔几秒
-  # 懂球帝自己的联赛编号（从它的网页上查到的）。乙级联赛的编号还没找到，暂时只采五大联赛
-  league_ids: {E0: 4, SP1: 3, D1: 5, I1: 9, F1: 12}
+  # 懂球帝自己的联赛编号（从它的网页上查到的）。每小时任务、导入都看这里。
+  # 2026-11-07 加三个次级联赛（竞彩也卖，给竞彩价格偏离虚拟实盘多攒注）：编号从已存的懂球帝页面里读到
+  # （英冠 59、西乙 8 在历届赛季页的联赛菜单里；德乙 7 在比赛详情页的 competition 里），下载后核对过历届赛季页的联赛名。
+  # 意乙（10）、法乙（13）历届赛季页是对的，但赛程接口返回空列表（2026-11-07 试了两次），没法每小时抓，没加
+  league_ids: {E0: 4, SP1: 3, D1: 5, I1: 9, F1: 12, E1: 59, SP2: 8, D2: 7}
+  # 哪些联赛要做历史回补（回补程序、回补进度、数据状态页的“历史回补”都只看这些）。
+  # 次级联赛只抓当前赛季（赛前快照 + 踢完的最终赔率），不往回补：2018 起八个赛季一个联赛要几千次请求，现在用不上
+  history_leagues: [E0, SP1, D1, I1, F1]
   # 赛程接口一次返回约 40~50 场；“即将开赛”模式往回看几天（补抓刚踢完比赛的最终赔率）、往后看几天
   upcoming_lookback_days: 3
   upcoming_ahead_days: 8
@@ -1641,7 +1647,10 @@ ledger:                       # 开发顺序第 2 步“四本账”（需求文
 lottery_value:                 # 竞彩价格偏离虚拟实盘 src/evaluate/lottery_value.py（需求文档第 14 节“竞彩价格偏离虚拟实盘”，跑之前写下）
   # 运行：python -m src.evaluate.lottery_value；每天 09:40 跟四本账一起跑（src/jobs/ledger_daily.py）。只读打开数据库
   output_dir: data/backtest/lottery_value   # candidates / bets / skipped / summary / decisions_log（data/ 不进 Git）
-  leagues: top                 # 五大联赛（leagues 段里的组名）
+  # 联赛（leagues 段里的组名，可以写几个）。2026-11-07 加 second：规则一点没改，只是多了比赛。
+  # 懂球帝现在只抓得到英冠、西乙、德乙（dongqiudi.league_ids），快照 11-07 起才有；
+  # 意乙、法乙和更早的场都会记成“决定时间之前没有竞彩价格”
+  leagues: [top, second]
   first_kickoff_utc: "2026-10-30 00:00:00"  # 从这天起开球的比赛（懂球帝每小时快照 2026-10-30 起才有竞彩赛前价格）
   count_from_utc: "2026-11-07 00:00:00"     # 决定时间在这之后的注才“正式计数”（规则写下以后）；之前的只看看
   hours_before: 6              # 决定时间 = 开球前几小时

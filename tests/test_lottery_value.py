@@ -173,3 +173,13 @@ def test_lottery_usage_rules(env):
     assert len(fs.lottery_odds(1, "2026-11-08 09:00:00", "机器人下注")) == 2     # 决定时间以前的两条
     with pytest.raises(UsageNotAllowedError):
         fs.lottery_odds(1, "2026-11-08 09:00:00", "B版输入")                     # 竞彩价格不能当模型输入
+
+
+def test_leagues_can_be_several_groups(env):
+    # leagues 写几个组名：几个组里的联赛都算（2026-11-07 加次级联赛）
+    con, s = env
+    s["leagues"] = {"top": {"SP1": "西甲"}, "second": {"E0": "英超"}}
+    s["lottery_value"]["leagues"] = "top"
+    assert run(env)[0].empty                                               # 只看 top：这里没有 E0 的比赛
+    s["lottery_value"]["leagues"] = ["top", "second"]
+    assert sorted(run(env)[0]["match_id"].unique()) == [1]

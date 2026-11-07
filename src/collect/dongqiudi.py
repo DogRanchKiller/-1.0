@@ -547,7 +547,7 @@ def setup_logging(log_dir: Path):
 def main():
     parser = argparse.ArgumentParser(description="懂球帝采集（只存原始层）")
     parser.add_argument("mode", choices=["upcoming", "probe", "backfill", "detail_backfill"])
-    parser.add_argument("--leagues", nargs="*", help="联赛代码，例如 E0 SP1；不写就是全部五大联赛")
+    parser.add_argument("--leagues", nargs="*", help="联赛代码，例如 E0 SP1；不写：即将开赛是全部，回补是要回补的那几个")
     parser.add_argument("--from", dest="first", type=int, help="从哪个赛季开始（开始年份）")
     parser.add_argument("--to", dest="last", type=int, help="到哪个赛季为止（开始年份），不写就是到当前赛季")
     parser.add_argument("--retry-bad", action="store_true", help="以前“网站没有”“内容可疑”的也重新试一次")
@@ -558,7 +558,9 @@ def main():
     s = load_settings()
     cfg = s["dongqiudi"]
     setup_logging(resolve_path(s["paths"]["logs"]))
-    leagues = args.leagues or list(cfg["league_ids"])
+    # 不写 --leagues：即将开赛看 league_ids 里的全部；回补、试验、补详情页只看要做历史回补的（dongqiudi.history_leagues）
+    default = cfg["league_ids"] if args.mode == "upcoming" else (cfg.get("history_leagues") or cfg["league_ids"])
+    leagues = args.leagues or list(default)
     unknown = [lg for lg in leagues if lg not in cfg["league_ids"]]
     if unknown:
         parser.error(f"这些联赛还没有懂球帝编号：{unknown}（在 settings.yaml 的 dongqiudi.league_ids 里加）")

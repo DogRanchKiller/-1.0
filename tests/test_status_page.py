@@ -226,3 +226,10 @@ def test_listing_escapes_outside_text(env):
     p.feed(sp.render_html(checks, today, day, problems, rows, NOW, lists))
     assert "script" not in p.tags and "b" not in p.tags
     assert "<script>x</script>" in p.text and "<b>主</b> 对 客" in p.text
+
+
+def test_history_leagues_default_and_subset():
+    # 没写 history_leagues：回补看 league_ids 全部；写了就只看写的那几个（次级联赛只抓当前赛季，不算“还没补”）
+    from src.jobs.dongqiudi_progress import history_leagues
+    assert history_leagues({"league_ids": {"E0": 4, "E1": 59}}) == ["E0", "E1"]
+    assert history_leagues({"league_ids": {"E0": 4, "E1": 59}, "history_leagues": ["E0"]}) == ["E0"]

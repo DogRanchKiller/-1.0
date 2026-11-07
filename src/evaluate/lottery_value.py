@@ -6,7 +6,8 @@
   只是虚拟记录，不连任何真实账户，不是推荐下注。
 
 一、数据（都经过取数层 src/features，按数据字典检查用途）
-  - 比赛：五大联赛、上线赛季（实时模式），用途「机器人下注」。
+  - 比赛：settings.yaml lottery_value.leagues 里的联赛（2026-11-07 起五大联赛 + 五个次级联赛）、上线赛季（实时模式），
+    用途「机器人下注」。
   - 竞彩价格：lottery_odds，决定时间之前已经抓到的最后一组（用途「机器人下注」）。北单是赛后定的浮动奖金，不算。
   - 公道价：odds_changes 里变盘时间、我们存到的时间都不晚于决定时间的价格（用途「机器人下注」）。
     懂球帝快照里平博只有亚盘、大小球，没有胜平负，所以用 平博亚盘主队胜算 + 平博大小球胜算 + 各家胜平负去水后的平局概率
@@ -178,8 +179,10 @@ def build(fs: FeatureStore, settings: dict, now=None) -> tuple[pd.DataFrame, pd.
     """
     st = settings["lottery_value"]
     now = to_utc_text(now or datetime.now(timezone.utc))
-    leagues = list(settings["leagues"][st["leagues"]])
-    end = to_utc_text(pd.Timestamp(now) + pd.Timedelta(days=2))   # 决定时间最多比开球早一天多
+    # leagues 可以写一个组名（top），也可以写几个（[top, second]）
+    groups = [st["leagues"]] if isinstance(st["leagues"], str) else list(st["leagues"])
+    leagues = [code for g in groups for code in settings["leagues"][g]]
+    end =to_utc_text(pd.Timestamp(now) + pd.Timedelta(days=2))   # 决定时间最多比开球早一天多
     targets = fs.prediction_targets(st["first_kickoff_utc"], end, BET_USAGE, competition=leagues)
     rows, skipped = [], []
     for t in targets.itertuples(index=False):

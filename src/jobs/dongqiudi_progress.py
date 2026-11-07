@@ -24,6 +24,14 @@ from src.common.db import connect
 RUNNING_MINUTES = 3  # 最近几分钟内还有新的抓取记录，就认为回补程序还在跑
 
 
+def history_leagues(dq_cfg: dict) -> list[str]:
+    """要做历史回补的联赛（settings.yaml 的 dongqiudi.history_leagues）。没写就是 league_ids 里的全部。
+
+    次级联赛（2026-11-07 加）只抓当前赛季，不往回补，回补进度和数据状态页就不该把它们算成“还没补”。
+    """
+    return list(dq_cfg.get("history_leagues") or dq_cfg["league_ids"])
+
+
 def season_ids(raw: Path, league: str, season: int) -> set[int] | None:
     """已结束赛季：赛季页上的全部比赛编号。赛季页还没抓到就返回 None。"""
     page = raw / "season" / league / f"{season}.html.gz"
@@ -132,7 +140,7 @@ def main():
     now = datetime.now(timezone.utc)
     con = connect()
     try:
-        rows = season_rows(con, resolve_path(s["paths"]["raw"]) / SOURCE, list(cfg["league_ids"]),
+        rows = season_rows(con, resolve_path(s["paths"]["raw"]) / SOURCE, history_leagues(cfg),
                            cfg["backfill_first_season"], now)
         state, last = run_state(con, now)
     finally:

@@ -30,7 +30,7 @@ from src.clean.dongqiudi_reader import BEIJING
 from src.common.config import load_secrets, load_settings, resolve_path
 from src.features.store import open_readonly
 from src.jobs.data_health import Check, build_checks, database_check
-from src.jobs.dongqiudi_progress import run_state, season_rows
+from src.jobs.dongqiudi_progress import history_leagues, run_state, season_rows
 from src.jobs.heartbeat import read_state
 from src.notify.send import get_token
 from src.notify.watch import job_status
@@ -125,7 +125,7 @@ def check_failures(con, now: datetime, cfg: dict) -> Check:
 
 def check_backfill(con, raw: Path, dq_cfg: dict, now: datetime) -> tuple[Check, list[dict]]:
     """历史回补：还剩多少、程序还在不在跑（复用 dongqiudi_progress 的统计）。"""
-    rows = season_rows(con, raw, list(dq_cfg["league_ids"]), dq_cfg["backfill_first_season"], now)
+    rows = season_rows(con, raw, history_leagues(dq_cfg), dq_cfg["backfill_first_season"], now)
     state, _ = run_state(con, now)
     left = sum(r["应有"] - r["已抓"] for r in rows if r["应有"] is not None)
     unknown = sum(r["应有"] is None and not r["进行中"] and not r["懂球帝没有"] for r in rows)
@@ -233,8 +233,8 @@ def blank_chinese_names(path: Path) -> tuple[list[dict] | None, str | None]:
 
 
 def recent_top_teams(con, dq_cfg: dict) -> set[str]:
-    """懂球帝要抓的联赛里，回补起始赛季以来出场过的球队。这些球队没有中文名，网页上就只能显示英文。"""
-    leagues = list(dq_cfg["league_ids"])
+    """懂球帝要回补的联赛里，回补起始赛季以来出场过的球队。这些球队没有中文名，网页上就只能显示英文。"""
+    leagues = history_leagues(dq_cfg)
     ph = ",".join("?" * len(leagues))
     args = [*leagues, int(dq_cfg["backfill_first_season"])]
     try:
