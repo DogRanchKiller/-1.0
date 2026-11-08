@@ -51,11 +51,14 @@ class DbMatch:
 
 
 def load_db_matches(con, competition: str) -> dict[int, list[DbMatch]]:
-    """数据库里一个联赛的全部比赛（带比分），按赛季分组。"""
+    """数据库里一个联赛的全部比赛（带比分），按赛季分组。
+    比分用 football-data 的；日职、中超在 football-data 的“新联赛”文件里，来源名是 football-data-new，也算
+    （一个联赛只会有其中一种，同一场不会两行）。"""
     out = defaultdict(list)
     rows = con.execute(
         "select m.match_id, m.season, m.match_date, m.kickoff_utc, m.home_team, m.away_team, s.home_goals, s.away_goals"
-        " from matches m left join match_stats s on s.match_id = m.match_id and s.source = 'football-data'"
+        " from matches m left join match_stats s on s.match_id = m.match_id"
+        " and s.source in ('football-data', 'football-data-new')"
         " where m.competition = ?", (competition,))
     for mid, season, mdate, ko, home, away, hg, ag in rows:
         if ko:

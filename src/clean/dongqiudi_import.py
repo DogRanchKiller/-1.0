@@ -53,7 +53,7 @@ from src.clean.dongqiudi_reader import (DETAIL_STATS, Lineup, MatchDetail, Seaso
 from src.clean.schema import create_tables
 from src.clean.source_lifecycle import (delete_replaced_results, new_match_ids, reconcile_source_lifecycle,
                                         snapshot_prediction_sources)
-from src.collect.dongqiudi import current_season
+from src.collect.dongqiudi import league_season
 from src.common.config import PROJECT_ROOT, load_settings, resolve_path
 from src.common.db import connect
 
@@ -137,8 +137,9 @@ class Seen:
     fetched_at: str
 
 
-def load_fixtures(raw: Path, leagues: list[str], fetched: dict) -> dict[int, Seen]:
-    """原始层里全部赛程文件 → {懂球帝比赛编号: 最后一次看到的样子}（按抓取时间先后读，后面的覆盖前面的）。"""
+def load_fixtures(raw: Path, leagues: list[str], fetched: dict, calendar_leagues=()) -> dict[int, Seen]:
+    """原始层里全部赛程文件 → {懂球帝比赛编号: 最后一次看到的样子}（按抓取时间先后读，后面的覆盖前面的）。
+    calendar_leagues：一年一个赛季的联赛（中超），赛季 = 开球那年；别的 7 月起算新赛季。"""
     files = []
     for lg in leagues:
         folder = raw / "dongqiudi" / "fixtures" / lg
@@ -148,9 +149,9 @@ def load_fixtures(raw: Path, leagues: list[str], fetched: dict) -> dict[int, See
     out = {}
     for t, lg, f in sorted(files):
         for fx in parse_fixtures(read_json(f)):
-            # 赛季按开球时间算（7 月起算新赛季）；没有开球时间的按抓取时间算
+            # 赛季按开球时间算（7 月起算新赛季，中超按自然年）；没有开球时间的按抓取时间算
             when = fx.kickoff_utc or datetime.strptime(t, TIME_FORMAT).replace(tzinfo=timezone.utc)
-            out[fx.match_id] = Seen(lg, current_season(when), fx, rel(f), t)
+            out[fx.match_id] = Seen(lg, league_season(lg, when, calendar_leagues), fx, rel(f), t)
     return out
 
 
@@ -217,8 +218,9 @@ class Link:
     result: str
 
 
-def link_matches(cands: list[Candidate], db: dict, mapping: dict, season_now: int) -> list[Link]:
-    """第 2 步：按（联赛、赛季、主队、客队）对比赛。每场懂球帝比赛返回一个 Link（结果写在 result 里）。"""
+def link_matches(cands: list[Candidate], db: dict, mapping: dict, season_now: dict[str, int]) -> list[Link]:
+    """第 2 步：按（联赛、赛季、主队、客队）对比赛。每场懂球帝比赛返回一个 Link（结果写在 result 里）。
+    season_now：{联赛: 当前赛季}（中超按自然年，别的 7 月起算），只有当前赛季的比赛能新增。"""
     idx = {(lg, m.season, m.home, m.away): m for lg, by_season in db.items()
            for ms in by_season.values() for m in ms}
     groups, out = defaultdict(list), []
@@ -230,7 +232,7 @@ def link_matches(cands: list[Candidate], db: dict, mapping: dict, season_now: in
             groups[(c.league, c.season, home, away)].append(c)
     for key, cs in groups.items():
         m = idx.get(key)
-        if m is None and not (key[1] == season_now and any(c.seen for c in cs)):
+        if m is None and not (key[1] == season_now.get(key[0]) and any(c.seen for c in cs)):
             out += [Link(c, None, "数据库里没有这场") for c in cs]
             continue
         # 同一场比赛懂球帝有两个编号时（很少见，例如重赛）：先挑比分一样的，再挑最近看到的，其余不导入
@@ -745,10 +747,12 @@ def run(con, raw: Path, reports: Path, s: dict, now: datetime | None = None, tea
     con.commit()
     fetched = load_fetch_times(con)
     pages = {lg: load_dqd_seasons(raw, lg) for lg in leagues}
-    seen = load_fixtures(raw, leagues, fetched)
+    calendar = dq.get("calendar_year_leagues") or ()
+    seen = load_fixtures(raw, leagues, fetched, calendar)
     log.info("赛季页 %d 个赛季，赛程里 %d 场", sum(len(v) for v in pages.values()), len(seen))
     mapping, table, db = team_mapping(con, pages, seen, leagues)
-    links = link_matches(candidates(raw, pages, seen, fetched), db, mapping, current_season(now))
+    season_now = {lg: league_season(lg, now, calendar) for lg in leagues}
+    links = link_matches(candidates(raw, pages, seen, fetched), db, mapping, season_now)
     refs = kickoff_refs(links, db, back_days, tz)
     files = odds_files(raw, leagues, fetched)
     log.info("队名定下 %d 个；要导入的比赛 %d 场；赔率文件 %d 个", len(mapping), len(refs), len(files))

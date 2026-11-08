@@ -64,6 +64,14 @@ def current_season(now: datetime) -> int:
     return now.year if now.month >= 7 else now.year - 1
 
 
+def league_season(league: str, when: datetime, calendar_leagues=()) -> int:
+    """某个联赛在 when 那天属于哪个赛季（开始年份）。
+    一年一个赛季的联赛（settings.yaml 的 dongqiudi.calendar_year_leagues，例如中超）= 那一年；
+    别的（五大联赛、次级联赛、2026 起秋春制的日职）还是 7 月起算新赛季。
+    中超 2027 年 3 月的比赛按 7 月规则会算成 2026 赛季，和刚踢完的 2026 赛季混在一起，所以要分开算。"""
+    return when.year if league in calendar_leagues else current_season(when)
+
+
 def stamp(now: datetime) -> str:
     """文件名用的时间（标准时间），例如 20261030T0805Z。"""
     return now.astimezone(timezone.utc).strftime("%Y%m%dT%H%MZ")
@@ -400,9 +408,10 @@ class Collector:
     def upcoming(self, leagues: list[str]):
         """即将开赛：抓赛程；快开球的比赛按“离开球越近越勤”抓赔率快照；刚踢完的抓一次最终赔率和详情页。"""
         now = self.now()
-        season = current_season(now)
         rules = self.cfg["odds_snapshot_rules"]
+        calendar = self.cfg.get("calendar_year_leagues") or ()
         for lg in leagues:
+            season = league_season(lg, now, calendar)   # 最终赔率、详情页按赛季分文件夹
             games = self.fixtures(lg, now - timedelta(days=self.cfg["upcoming_lookback_days"]),
                                   now + timedelta(days=self.cfg["upcoming_ahead_days"]))
             n_live = n_final = 0

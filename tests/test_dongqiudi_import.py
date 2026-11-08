@@ -353,3 +353,49 @@ def test_lineup_back_and_forth_keeps_each_change(env):
     out = go(env)
     assert out["counts"]["首发名单（份）"] == 4
     assert con.execute("select count(distinct fetched_at_utc) from lineups").fetchone()[0] == 4
+
+
+def test_league_season_calendar_year():
+    """中超一年一个赛季（按自然年）；日职 2026 起秋春制、英超都是 7 月起算。"""
+    from src.collect.dongqiudi import league_season
+    march, august = datetime(2027, 3, 5, tzinfo=UTC), datetime(2026, 8, 20, tzinfo=UTC)
+    assert league_season("CHN", march, ["CHN"]) == 2027
+    assert league_season("CHN", august, ["CHN"]) == 2026
+    assert league_season("JPN", march, ["CHN"]) == 2026
+    assert league_season("E0", march, ["CHN"]) == 2026
+
+
+def test_chinese_league_calendar_season_and_new_source(tmp_path):
+    """中超：数据库里的比分来自 football-data-new（不是 football-data），也能投票定队名；
+    2027 年 3 月看到的新赛程按自然年记 2027 赛季、新增进去，不会被当成 2026 赛季。"""
+    chn = [("上海海港", "Shanghai Port"), ("山东泰山", "Shandong Taishan"), ("成都蓉城", "Chengdu Rongcheng"),
+           ("北京国安", "Beijing Guoan")]
+    s = copy.deepcopy(load_settings())
+    s["dongqiudi"]["league_ids"] = {"CHN": 43}
+    s["dongqiudi"]["calendar_year_leagues"] = ["CHN"]
+    con = connect(tmp_path / "t.db")
+    create_tables(con)
+    con.executemany("insert into teams (team_id, country) values (?, '中国')", [(en,) for _zh, en in chn])
+    raw = tmp_path / "raw"
+    played, k = [], 0
+    for i, (zh_h, en_h) in enumerate(chn):
+        for j, (zh_a, en_a) in enumerate(chn):
+            if i == j:
+                continue
+            k += 1
+            d = date(2026, 3, 7) + timedelta(days=7 * k)   # 2026 年 3 月到 5 月：7 月规则会错算成 2025 赛季
+            con.execute("insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc,"
+                        " status) values (?, 'CHN', 2026, ?, ?, ?, ?, 'finished')", (k, en_h, en_a, d.isoformat(), f"{d} 11:00"))
+            con.execute("insert into match_sources values (?, 'football-data-new', ?, 'CHN.csv', '2026-11-03 00:00:00')",
+                        (k, f"CHN|{d}|{en_h}|{en_a}"))
+            con.execute("insert into match_stats (match_id, source, home_goals, away_goals) values (?, 'football-data-new', ?, ?)",
+                        (k, k % 5, k // 5))
+            played.append(fx(2000 + k, zh_h, zh_a, f"{d} 19:00:00", "Played", (str(k % 5), str(k // 5))))
+    con.commit()
+    gz(raw / "dongqiudi" / "fixtures" / "CHN" / "20270305T0000Z_1.json.gz",
+       {"list": played + [fx(3001, "上海海港", "山东泰山", "2027-03-08 19:30:00")]})
+    out = run(con, raw, tmp_path / "reports", s, now=datetime(2027, 3, 5, 12, 0, tzinfo=UTC))
+    assert out["mapping"] == dict(chn)
+    assert con.execute("select count(*) from match_sources where source = 'dongqiudi' and match_id <= 12").fetchone()[0] == 12
+    new = con.execute("select season, home_team, away_team, status from matches where match_id > 12").fetchall()
+    assert new == [(2027, "Shanghai Port", "Shandong Taishan", "scheduled")]
