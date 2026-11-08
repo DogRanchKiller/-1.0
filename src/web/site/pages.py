@@ -47,7 +47,8 @@ def row_attrs(data: SiteData, m: dict) -> str:
     data-pred = 有没有预测（1 / 0）；data-level = 信心等级 1 / 2 / 3（没有就不写；site.show_confidence 是 false 时也不写）；
     data-p = 最新一版最后的概率“主胜,平,客胜”（三位小数，按概率排序用；没有预测就不写）；
     data-tier-1x2 / data-tier-ou / data-tier-score = 最新一版这三个玩法的把握等级 high / mid / low（picks_v3，“只看高把握”筛选用；
-    不分档、不是赔率算的就不写）。值都转义过。"""
+    不分档、不是赔率算的就不写）；
+    data-disagree = 模型和多家平均至少有一个玩法差 ≥ site.disagree_gap 时写 1（筛选用；没有就不写）。值都转义过。"""
     mid = m["match_id"]
     out = (match_attrs(m) + f" data-league-name='{e(data.comp(m['competition']))}'"
            f" data-teams='{e(m['home_team'] + ' ' + m['away_team'])}'")
@@ -65,6 +66,8 @@ def row_attrs(data: SiteData, m: dict) -> str:
     for k, v in pk.tier_codes(pk.match_picks_v3(row, data.settings)).items():
         if v in pk.TIERS:
             out += f" data-tier-{k}='{e(v)}'"
+    if pk.disagree_markets(pk.match_disagree(row, data.settings)):
+        out += " data-disagree='1'"
     return out
 
 
@@ -93,6 +96,7 @@ def latest_cell(data: SiteData, mid: int) -> str:
     # 有亚盘那一句时，下面的倾向行不再重复亚盘（skip_ah），只写胜平负、平局风险、大小球、双方进球。
     # 再下面一行淡字写“把握”（picks_v3）：胜平负、大小球（主盘口）、比分各是哪一档、这一档的历史命中率，让球不分档；
     #   这一版不是赔率算的（没有赔率、接融合以前的旧版）写“不分档”。
+    # 模型和多家平均差 ≥ site.disagree_gap 时标「分歧」并写哪几个玩法（需求文档第 1 节，列表页同样标）；差多少去单场页看。
     # 模型版本、归档状态这些技术信息只放在鼠标悬停的提示里（title），点进单场页的“技术细节”能看到全部。
     p, _ = final_probs(row)
     info = data.matches[mid]
@@ -101,8 +105,10 @@ def latest_cell(data: SiteData, mid: int) -> str:
     tip = f"{identity_text(row)}，{archive_name(row.get('archive_status'))}，{bj_text(row['cutoff_utc'])} 截止"
     tiers = pk.tier_line(pk.match_picks_v3(row, data.settings), data.settings,
                          data.zh(info["home_team"]), data.zh(info["away_team"])) or "把握：这一版不是赔率算的，不分档"
+    flag = pk.index_disagree_html(pk.match_disagree(row, data.settings))
     return (f"<div title='{e(tip)}'>{lead}{bar_html(p)}{conclusion_html(row, skip_ah=bool(ah), show=show_level(data.settings))}"
             f"<span class='small muted tierline'>{e(tiers)}</span>"
+            f"{flag}"
             f"<span class='small muted'>{e(version_name(kind))}这一版</span></div>")
 
 
@@ -120,6 +126,11 @@ def index_guide(settings: dict) -> str:
     conf = settings.get("confidence") or {}
     tiers = tier_guide(settings)
     tier_li = f"<li>{e(tiers)}</li>" if tiers else ""
+    gap = (settings.get("site") or {}).get("disagree_gap")
+    disagree_li = (
+        f"<li>“分歧”：模型自己和懂球帝多家平均在同一个玩法上差 {float(gap) * 100:.0f} 个百分点及以上就标出来，"
+        "旁边写哪几个玩法；差多少点进单场页看。买不买你自己看。</li>"
+        if gap is not None else "")
     if conf.get("downgrade_factors"):
         level = "按规则碰上提醒因素会降级，规则在单场页“结论是怎么得出来的”最后一步。"
     else:
@@ -137,6 +148,7 @@ def index_guide(settings: dict) -> str:
             + (f"<li>●●● 高 / ●●○ 中 / ●○○ 低 是信心等级。{e(level)}</li>" if show_level(settings) else
                "<li>三个数后面的小标签写这几个数从哪来，例如“概率来自去水赔率”（博彩公司的赔率去掉抽水）；"
                "没用上赔率的写“只有模型（没和赔率融合）”。</li>")
+            + disagree_li
             + "<li>点比赛名字，看“结论是怎么得出来的”和四块分析。</li></ul></div>")
 
 

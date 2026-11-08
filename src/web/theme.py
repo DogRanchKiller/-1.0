@@ -76,7 +76,7 @@ tbody tr:hover { background: rgba(52, 211, 153, .05); }
 .tag.temp { color: var(--amber); border-color: rgba(251, 191, 36, .4); background: rgba(251, 191, 36, .08); }
 .tag.warn { color: var(--red); border-color: rgba(248, 113, 113, .4); background: rgba(248, 113, 113, .08); }
 .tag.live { color: var(--lime); border-color: rgba(190, 242, 100, .45); background: rgba(190, 242, 100, .08); }   /* 即时比分（只在服务器现读现出的页面上有） */
-.tag.disagree { color: var(--amber); border-color: rgba(251, 191, 36, .45); background: rgba(251, 191, 36, .10); }  /* 单场页：模型和多家平均差 ≥ 6% */
+.tag.disagree { color: var(--amber); border-color: rgba(251, 191, 36, .45); background: rgba(251, 191, 36, .10); }  /* 单场页、列表页：模型和多家平均差 ≥ 6% */
 
 /* 顶部的几个数字 */
 .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0 6px; }

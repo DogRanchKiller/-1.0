@@ -11,6 +11,8 @@
   没有脚本时页面照样完整；全站没有“推荐”。
 - 单场页「多家平均」「分歧」（2026-11-08）：市场一侧必须用存档「赔率概率」（懂球帝多家平均），不能用「融合概率」（有平博时那是平博）；
   差 ≥ site.disagree_gap（6%）标分歧；没有多家平均写「没有市场价」。
+- 列表页「分歧」（2026-11-08）：同一套 match_disagree，格子里标「分歧」和玩法短名（数字去单场页看）；
+  行上 data-disagree='1'；筛选「只看有分歧」。没有多家平均不标、不写这个属性。
 - picks_v2 的结果不变（match_picks / model_picks 和以前一样，不带档），战绩页照旧；/api 原有字段不变，只多了 picks_v3、latest.tiers。
 - 冻结的设置块没动：加 picks_v3 不改期末考试记下的设置。
 """
@@ -302,11 +304,13 @@ def test_index_cell_and_row_attrs():
     assert "data-tier-1x2='high'" in attrs
     assert f"data-tier-ou='{ps['ou']['tier']}'" in attrs and f"data-tier-score='{ps['score']['tier']}'" in attrs
     assert set(re.findall(r"data-tier-[a-z0-9]+='([^']*)'", attrs)) <= set(pk.TIERS)
+    assert "data-disagree" not in attrs and "分歧" not in cell     # 这版没存「赔率概率」，不标
     data, row = page_data(status="无赔率，未融合")
     assert "data-tier-" not in row_attrs(data, data.matches[10])
     assert "把握：这一版不是赔率算的，不分档" in text_of(latest_cell(data, 10))
     guide = text_of(index_guide(S))
     assert "把握 高 / 中 / 低" in guide and "2020/21–2023/24" in guide and "7,228 场" in guide and "推荐" not in guide
+    assert "分歧" in guide and "6 个百分点" in guide and "买不买你自己看" in guide
 
 
 def test_whole_site_pages(env):
@@ -373,11 +377,29 @@ def test_js_tier_filter():
 
 
 def test_js_index_has_tier_select_and_reset():
-    """首页工具栏多了“把握”下拉框；“全部显示”把它也清掉（字段顺序：联赛、日期、预测、信心、把握、排序、搜索）。"""
+    """首页工具栏：联赛、日期、预测、信心、把握、分歧、排序、搜索。“全部显示”把分歧也清掉。"""
     assert '"index-tier"' in JS and "只看高把握" in JS
-    assert 'tier: "", sort: "time"' in JS
-    assert 'fields[4].input.value = ""; fields[5].input.value = "time"; fields[6].input.value = "";' in JS
-    assert 'r.getAttribute("data-tier-1x2")' in JS and "innerHTML" not in JS and "推荐" not in JS
+    assert '"index-disagree"' in JS and "只看有分歧" in JS
+    assert 'disagree: "", sort: "time"' in JS
+    assert 'fields[4].input.value = ""; fields[5].input.value = "";' in JS
+    assert 'fields[6].input.value = "time"; fields[7].input.value = "";' in JS
+    assert 'r.getAttribute("data-tier-1x2")' in JS and 'r.getAttribute("data-disagree")' in JS
+    assert "innerHTML" not in JS and "推荐" not in JS
+
+
+@pytest.mark.skipif(NODE is None, reason="这台电脑上没有 node（不是项目依赖），跳过脚本逻辑的检查")
+def test_js_disagree_filter():
+    """只看有分歧：行上 data-disagree='1' 才留下；没写这个属性的不算。空条件照旧全留下。"""
+    got = run_node(
+        "const yes = {league:'E0', pred:'1', level:'3', text:'x', disagree:'1'};"
+        "const no = {league:'E0', pred:'1', level:'3', text:'x', disagree:''};"
+        "const missing = {league:'E0', pred:'1', level:'3', text:'x'};"
+        "console.log(JSON.stringify({"
+        "  all: [S.rowMatches(yes, {}), S.rowMatches(no, {}), S.rowMatches(missing, {})],"
+        "  only: [S.rowMatches(yes, {disagree:'1'}), S.rowMatches(no, {disagree:'1'}),"
+        "         S.rowMatches(missing, {disagree:'1'})]}));")
+    assert got["all"] == [True, True, True]
+    assert got["only"] == [True, False, False]
 
 
 # ---------- 单场页「模型自己」vs「多家平均」分歧（需求文档第 1 节、第 12 节第 1 步） ----------
@@ -511,3 +533,21 @@ def test_match_page_flags_disagree_on_1x2():
     assert "tag disagree" in html and "主胜 模型" in html
     assert "没有市场价" in html                                     # 亚盘 / 大小球 / 比分这版没存市场价，照样写
     assert "推荐" not in html
+
+
+def test_index_cell_flags_disagree():
+    """首页：同一套门槛，格子里标「分歧」和玩法短名，行上 data-disagree='1'；市场一侧不用融合概率。"""
+    data, row = page_data(fused=False, main=2.75)
+    row["p_home"], row["p_draw"], row["p_away"] = 0.50, 0.30, 0.20
+    row["detail"]["赔率概率"] = [0.40, 0.30, 0.30]
+    row["detail"]["融合概率"] = [0.50, 0.30, 0.20]                 # 若误用融合概率，差是 0，不会标分歧
+    html = latest_cell(data, 10)
+    assert "tag disagree" in html
+    t = text_of(html)
+    assert "分歧" in t and "胜平负" in t and "点进单场页看差多少" in t
+    assert "推荐" not in t
+    assert "data-disagree='1'" in row_attrs(data, data.matches[10])
+    # 没有多家平均：不标、不写这个属性（和上面 test_index_cell_and_row_attrs 同一套造法）
+    data2, _ = page_data(fused=False, main=2.75)
+    assert "tag disagree" not in latest_cell(data2, 10)
+    assert "data-disagree" not in row_attrs(data2, data2.matches[10])

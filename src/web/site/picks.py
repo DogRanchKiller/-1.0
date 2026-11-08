@@ -31,7 +31,7 @@ import numpy as np
 
 from src.common.config import resolve_path
 from src.common.settlement import settle_asian_handicap, settle_over_under
-from src.web.site.common import pct0, pct1
+from src.web.site.common import e, pct0, pct1
 from src.web.site.data import matrix
 
 RULE = "picks_v2"
@@ -610,8 +610,8 @@ def model_picks_v3(row: dict, settings: dict, ou_line: float | None) -> dict:
     return out
 
 
-# ======================= 单场页「模型自己」vs「多家平均」分歧（需求文档第 1 节、第 12 节第 1 步） =======================
-# 只给单场页用，不改存档、不改融合、不推送。市场一侧必须是懂球帝多家平均，不能用融合概率（胜平负可能是平博）。
+# ======================= 「模型自己」vs「多家平均」分歧（需求文档第 1 节、第 12 节第 1 步） =======================
+# 单场页写数字，列表页只标玩法名。不改存档、不改融合、不推送。市场一侧必须是懂球帝多家平均，不能用融合概率（胜平负可能是平博）。
 # 门槛 site.disagree_gap（6%），和 confidence_study.gap、disagree_study.disagree_strong 同一个数。
 OUTCOMES_ZH = ("主胜", "平", "客胜")
 
@@ -791,6 +791,24 @@ def match_disagree(row: dict, settings: dict) -> dict:
                         "model_top": (mh, ma), "market_top": (kh, ka),
                         "model_p": mp_, "market_p": kp, "same_top": same}
     return out
+
+
+# 列表页格子太窄，只写短名；差多少仍去单场页看
+DISAGREE_SHORT = {"ah": "让球", "1x2": "胜平负", "ou": "大小球", "score": "比分"}
+
+
+def disagree_markets(dg: dict) -> list[str]:
+    """过了门槛的玩法，顺序和单场页表一样（让球、胜平负、大小球、比分）。"""
+    return [k for k in DISPLAY_ORDER if (dg.get(k) or {}).get("disagree")]
+
+
+def index_disagree_html(dg: dict) -> str:
+    """首页每场一格：有分歧就标「分歧」并写哪几个玩法；没有就不写。数字去单场页看。"""
+    names = [DISAGREE_SHORT[k] for k in disagree_markets(dg)]
+    if not names:
+        return ""
+    return (f"<span class='tierline'><span class='tag disagree'>分歧</span>"
+            f" <span class='small muted'>{e('、'.join(names))}，点进单场页看差多少</span></span>")
 
 
 def avg_html(market: str, info: dict | None, home: str, away: str) -> str:
