@@ -102,7 +102,11 @@ def test_main_writes_report(tmp_path, settings, monkeypatch):
     path = _table(tmp_path / "pm.csv", n=400)
     settings["shrink_study"] = {**settings["shrink_study"], "per_match": str(path), "output_dir": str(tmp_path / "out")}
     monkeypatch.setattr(ss, "load_settings", lambda: settings)
-    ss.main()
+    ss.main([])
     text = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
     assert "## 结论（只看五大联赛）" in text and "亚盘" in text
+    assert "gb_l7 T-24" in text
     assert (tmp_path / "out" / "results.csv").exists()
+    settings["shrink_study"]["model"] = "gb_xg"
+    ss.main([])
+    assert "gb_xg T-24" in (tmp_path / "out" / "report.md").read_text(encoding="utf-8")

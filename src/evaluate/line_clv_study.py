@@ -12,7 +12,7 @@
   CLV = 赛前赔率 × 收盘时下的那一边的胜算 − 1（> 0 = 拿到了比收盘好的价格）。
 
 三、数据（全部经取数层，开发模式）
-  概率：data/backtest/<回测>/predictions.csv 和 matrices_gb_l7.npz，读进来先按赛季筛、再查全是开发赛季。
+  概率：data/backtest/<回测>/predictions.csv 和 matrices_<模型>.npz，读进来先按赛季筛、再查全是开发赛季。
   赛前价格：用途「机器人下注」，开球前 24 小时，每一行“能知道的时间”不晚于截止时间。
   收盘价格、比分：用途「机器人结算」，开球后 72 小时。
 
@@ -79,8 +79,19 @@ def load_group(name: str, g: dict, settings: dict, run_dir=None) -> tuple[pd.Dat
 
 
 def second_check(settings: dict, run_dir=None) -> dict:
-    '''次级联赛重跑的回测先和 L2 的数核对：gb_l7 T-24 和平博收盘同一批比赛，模型的胜平负 log loss 差不超过 tol。'''
-    c = settings["line_clv_study"]["second_check"]
+    '''次级联赛重跑的回测先和 L2 的数核对：gb_l7 T-24 和平博收盘同一批比赛，模型的胜平负 log loss 差不超过 tol。
+
+    没有 second_check 段、或当前模型不是核对用的那个（默认 gb_l7）时返回 None，不核对。
+    换模型再跑（例如 gb_xg）时 L2 的数对不上，不能走这条核对。
+    '''
+    sc = settings["line_clv_study"].get("second_check")
+    if not sc:
+        return None
+    model = settings["line_clv_study"]["model"]
+    expect = sc.get("model", "gb_l7")
+    if model != expect:
+        return None
+    c = sc
     d = resolve_path(settings["backtest"]["output_dir"]) / c["run"] if run_dir is None else run_dir
     pred = pd.read_csv(d / "predictions.csv", usecols=["match_id", "horizon", "model", "log_loss"])
     a = pred[(pred["model"] == settings["line_clv_study"]["model"]) & (pred["horizon"] == "T-24")].dropna()
@@ -88,7 +99,8 @@ def second_check(settings: dict, run_dir=None) -> dict:
     both = a.merge(b, on="match_id", suffixes=("", "_bench"))
     got = float(both["log_loss"].mean())
     ok = abs(got - float(c["log_loss"])) <= float(c["tol"])
-    info = {"重跑的 log loss": round(got, 5), "L2 的数": c["log_loss"], "场数": int(len(both)), "对得上": bool(ok)}
+    info = {"重跑的 log loss": round(got, 5), "L2 的数": c["log_loss"], "场数": int(len(both)), "对得上": bool(ok),
+            "模型": model}
     if not ok:
         raise ValueError(f"次级联赛重跑的回测和 L2 对不上：{info}，停下查")
     return info
@@ -525,11 +537,28 @@ def main():
     ap = argparse.ArgumentParser(description="亚盘、大小球收盘线研究（需求文档第 14 节）")
     ap.add_argument("--db", default=None, help="数据库文件（不写就用 settings.yaml 的 paths.database）")
     ap.add_argument("--out", default=None, help="结果文件夹（不写就用 settings.yaml 的 line_clv_study.output_dir）")
+    ap.add_argument("--model", default=None, help="覆盖 line_clv_study.model（例如 gb_xg）；不是 gb_l7 时跳过次级联赛 L2 核对")
+    ap.add_argument("--runs", nargs="*", default=None,
+                    help="覆盖 groups 的回测文件夹：组名=文件夹，例如 五大联赛=tc_fix_gb_xg 次级联赛=lc_second_gb_xg")
     a = ap.parse_args()
     settings = load_settings()
     c = settings["line_clv_study"]
+    if a.model:
+        c["model"] = a.model
+    if a.out:
+        c["output_dir"] = a.out
+    for item in a.runs or ():
+        if "=" not in item:
+            raise ValueError(f"--runs 要写成 组名=文件夹，收到 {item!r}")
+        name, run = item.split("=", 1)
+        if name not in c["groups"]:
+            raise KeyError(f"line_clv_study.groups 里没有「{name}」")
+        c["groups"][name]["run"] = run
     check = second_check(settings)
-    print("次级联赛回测核对：", check)
+    if check is not None:
+        print("次级联赛回测核对：", check)
+    else:
+        print(f"次级联赛回测核对：跳过（模型 {c['model']}）")
     fs = FeatureStore(open_readonly(a.db), "开发", settings)
     tables, info = study(fs, settings)
     info = {"次级联赛回测核对": check, "取数": info, "设置": c}

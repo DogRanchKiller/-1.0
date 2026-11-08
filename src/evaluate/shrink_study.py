@@ -21,6 +21,7 @@
 '''
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -172,8 +173,9 @@ def fmt(v, lo, hi, item):
 
 def report(res: pd.DataFrame, verd: dict, settings: dict) -> str:
     s = settings["shrink_study"]
+    model = s.get("model", "gb_l7")
     lines = ["# 复盘问题回测：模型是不是把强弱差距、进球数估小了", "",
-             "gb_l7 T-24，平博赛前亚盘线、大小球 2.5，2019–2023 开发赛季。规则见需求文档第 15 节“复盘问题回测”。", "",
+             f"{model} T-24，平博赛前亚盘线、大小球 2.5，2019–2023 开发赛季。规则见需求文档第 15 节“复盘问题回测”。", "",
              f"## 结论（只看{s['main_group']}）", ""]
     lines += [f"- {k}：{v}" for k, v in verd.items()]
     live = s["live_dog_share"]
@@ -185,9 +187,20 @@ def report(res: pd.DataFrame, verd: dict, settings: dict) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description="复盘问题回测（需求文档第 15 节）")
+    ap.add_argument("--model", default=None, help="覆盖 shrink_study.model（报告抬头，例如 gb_xg）")
+    ap.add_argument("--per-match", default=None, help="覆盖 shrink_study.per_match（收盘线研究的每场表）")
+    ap.add_argument("--out", default=None, help="覆盖 shrink_study.output_dir")
+    a = ap.parse_args(argv)
     settings = load_settings()
     s = settings["shrink_study"]
+    if a.model:
+        s["model"] = a.model
+    if a.per_match:
+        s["per_match"] = a.per_match
+    if a.out:
+        s["output_dir"] = a.out
     d = load_rows(resolve_path(s["per_match"]), settings)
     res = analyze(d, settings)
     verd = verdicts(res, s["main_group"])
@@ -196,7 +209,11 @@ def main() -> None:
     res.to_csv(out / "results.csv", index=False, encoding="utf-8-sig")
     (out / "report.md").write_text(report(res, verd, settings), encoding="utf-8")
     (out / "verdict.json").write_text(json.dumps(verd, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(report(res, verd, settings))
+    text = report(res, verd, settings)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.replace("−", "-"))
 
 
 if __name__ == "__main__":

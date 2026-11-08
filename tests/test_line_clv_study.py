@@ -271,6 +271,11 @@ def test_second_check(settings, tmp_path):
     settings["line_clv_study"]["second_check"]["log_loss"] = 1.1
     with pytest.raises(ValueError):
         lc.second_check(settings, d)
+    settings["line_clv_study"]["model"] = "gb_xg"     # 换模型：L2 的数是 gb_l7 的，不核对
+    assert lc.second_check(settings, d) is None
+    settings["line_clv_study"]["model"] = "gb_l7"
+    settings["line_clv_study"]["second_check"] = {}
+    assert lc.second_check(settings, d) is None
 
 
 def test_collect_and_study(settings, tmp_path):

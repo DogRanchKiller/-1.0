@@ -329,7 +329,8 @@ preview:
                              # 2026-11-07 你决定从 gb_l7 换成 gb_xg（需求文档第 4 节“换成 gb_xg 上线”）；想退回：这里、ledger.model 写回 gb_l7，shadow.models 写回 [gb_xg]
   # 页面上关于模型的说明，换模型时一起改。回测成绩：五大联赛 2014–2023 有平博收盘赔率的 18,083 场，T-24，胜平负 log loss
   # （越小越准）；出处是进度记录“步骤 6”的结果目录 s6_eval 的 summary_vs_benchmark.csv（gb_l7 0.97888，平博收盘 0.96429）
-  # 换成 gb_xg 后回测成绩照用 gb_l7 的：懂球帝 xG 2025-12 起才有，2014–2023 每场都没有 xG，gb_xg 在这些年按代码就是用进球更新（推断，没重跑回测）
+  # 换成 gb_xg 后回测成绩照用 gb_l7 的：懂球帝 xG 2025-12 起才有，2014–2023 每场都没有 xG，gb_xg 在这些年按代码用进球更新。
+  # v1.34 已重跑：tc_fix_gb_xg 34,519 场、lc_second_gb_xg 20,989 场，整张比分矩阵和 gb_l7 完全一样（推断得到证实）
   model_info:
     label: 梯度提升树 gb_xg
     desc: 把动态实力评分、Elo、pi-rating、近期状态、射正、休息天数等一起交给一种“很多棵小决策树”的模型，先猜两队各进几球，再算胜平负；动态实力评分每场赛后用一半实际进球、一半 xG 更新（有 xG 的比赛，2025 年 12 月起）
@@ -1545,7 +1546,8 @@ line_clv_study:               # 亚盘、大小球收盘线研究 src/evaluate/l
   random_seed: 20261104         # 随机对照的种子：每场用（种子, match_id）定
 
 shrink_study:                 # 复盘问题回测：模型是不是把强弱差距、进球数估小了 src/evaluate/shrink_study.py（需求文档第 15 节，跑之前写下）
-  per_match: data/backtest/line_clv_tc/per_match.csv   # 收盘线研究算好的每场表（gb_l7 T-24，平博赛前线）
+  model: gb_l7                  # 报告抬头用的模型名。gb_xg 那次用命令行覆盖，结果在 shrink_study_gb_xg/（v1.34）；这里仍指向 gb_l7
+  per_match: data/backtest/line_clv_tc/per_match.csv   # 收盘线研究算好的每场表（gb_l7 T-24，平博赛前线）；gb_xg 的在 line_clv_gb_xg/
   output_dir: data/backtest/shrink_study               # 结果放这里（data/ 不进 Git）
   main_group: 五大联赛          # 下结论只看这一组；别的组只列出来看看
   clip: [0.01, 0.99]            # 胜算先截到这个范围再取 logit，免得 0 和 1 算不出来
