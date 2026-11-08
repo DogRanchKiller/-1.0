@@ -631,6 +631,7 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
     从上到下按 pk.DISPLAY_ORDER 排（2026-11-05 起亚盘排第一，只是显示顺序；算命中率、接口还是 pk.MARKETS 的顺序）。
     “把握”一列：胜平负、大小球、比分写高 / 中 / 低和这一档的历史命中率（settings.yaml picks_v3）；让球不分档，写总的历史命中率。
     “模型自己”一列不分档；让球、大小球只写方向（模型在这两个玩法上写的胜算历史上偏高）。
+    让球再写一句“历史上偏向受让一方”（shrink_study，不改模型，需求文档第 18 节第 12 条 (a)）。
     “多家平均”和“分歧”：模型概率和懂球帝多家平均去水概率并排，差 ≥ site.disagree_gap（6%）标分歧（需求文档第 1 节）。
     踢完了写中没中；“预测”只是哪个更可能，不是值得买。战绩页的命中率照旧按 picks_v2 算（大小球固定 2.5 球），表下写明。"""
     from src.web.site import picks as pk
@@ -660,6 +661,11 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
             # 让球、大小球：只写方向，不写胜算（SEL：模型高档写 61% / 57%，实际五五开左右）
             own = (f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>只写方向：模型写的胜算历史上偏高"
                    f"（高档写 {pk.rate1(over[k]['written'])}，实际 {pk.rate1(over[k]['actual'])}）</span>")
+            if k == "ah":
+                # 第 18 节第 12 条 (a)：不改模型，只写明让球历史上偏向受让一方（shrink_study 五大联赛 −2.8%）
+                bias = s["picks_v3"]["model_ah_dog_bias"]
+                own += (f" <span class='small muted'>历史上偏向受让一方"
+                        f"（弱队那边实际比模型低 {abs(float(bias['all'])) * 100:.1f} 个百分点）</span>")
         else:
             own = f"{e(pk.pick_text(k, q, home, away))} <span class='small muted'>{pct0(q['p'])}</span>"
         if q is not None and score:
@@ -680,6 +686,9 @@ def picks_html(data: SiteData, mid: int, row: dict) -> str:
             f"“把握”：同样这么写的预测，历史上（{e(pk.test_seasons_text(s))}、{int(s['picks_v3']['test_n']):,} 场）这一档中了几成；"
             "只说明以前中了几成，不说明赔率划算。让球分不开，不分档。"
             "“模型自己”是只用我们自己的模型、不看赔率时的预测（有赔率时前面的预测用赔率算出来的概率，历史上赔率更准；这一版没用上赔率时两列一样），两列不一样时可以对比着看。"
+            "让球这一列历史上偏向受让一方：五大联赛开发赛季弱队那边实际赢的比例比模型说的低 "
+            f"{abs(float(s['picks_v3']['model_ah_dog_bias']['all'])) * 100:.1f} 个百分点"
+            f"（平博同样偏低 {abs(float(s['picks_v3']['model_ah_dog_bias']['pinnacle'])) * 100:.1f} 个百分点），没改模型，只是写明。"
             "“多家平均”是懂球帝各家公司去水后再平均的概率，不是平博、也不是某一家；这一玩法没有多家平均就写“没有市场价”。"
             f"“分歧”：模型和多家平均在同一个结果上差 {gap_pct} 个百分点及以上就标出来，页面写两边各是多少、差多少。买不买你自己看。"
             "<a href='../record.html'>战绩页</a>的命中率照旧按原来的规则算（大小球固定 2.5 球），和这里的主盘口不一定是同一条线。</p>")

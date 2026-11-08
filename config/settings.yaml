@@ -1322,6 +1322,9 @@ picks_v3:
   model_overstated:              # “模型自己”一列让球、大小球写高了（模型自己高档：写的胜算 → 实际命中率），页面上只写方向，旁边写这两个数
     ah: {written: 0.6106, actual: 0.4988}
     ou: {written: 0.5740, actual: 0.5058}
+  model_ah_dog_bias:             # “模型自己”让球历史上偏向受让一方（shrink_study v1.30/v1.34，五大联赛 2019–2023 开发赛季，平博赛前线）；只写在单场页，不改模型
+    all: -0.028                  # 弱队那边整体：实际赢的比例 − 模型胜算
+    pinnacle: -0.014             # 同样一批上平博的参照
 
 # 局域网网站：带登录的网站服务器 src/web/serve.py（需求文档第 8 节“局域网网站”、第 16 节“安全”，工作树 W1）
 # live.dynamic 是 true 时登录后的网页现读现出（只读方式读数据库，见下面 live:）；false 时只发 site.output_dir 里生成好的网页。
