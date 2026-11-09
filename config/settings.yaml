@@ -169,11 +169,15 @@ dongqiudi:
   # 意乙（10）、法乙（13）历届赛季页是对的，但赛程接口返回空列表（2026-11-07 试了两次），没法每小时抓，没加
   # 2026-11-09（v1.37）加日职 97、中超 43：编号从已存的历届赛季页联赛菜单里读到（“日职联冠军”“中超冠军”）。
   # 比赛、球队还是以 football-data 新联赛文件为准（来源 football-data-new），懂球帝只对照、补赔率和刚踢完的比分。
-  # 韩K（117）不在这里：数据库里韩K 只有到 2023 年，当前赛季对不上队名，见需求文档第 12 节
-  league_ids: {E0: 4, SP1: 3, D1: 5, I1: 9, F1: 12, E1: 59, SP2: 8, D2: 7, JPN: 97, CHN: 43}
+  # 2026-11-09（v1.38）加韩K 117：韩K 没有 football-data，比赛、球队以懂球帝自己为准（韩K 导入程序
+  # src/clean/dongqiudi_kor_import.py 写，来源 dongqiudi-kor），见下面 id_linked_leagues
+  league_ids: {E0: 4, SP1: 3, D1: 5, I1: 9, F1: 12, E1: 59, SP2: 8, D2: 7, JPN: 97, CHN: 43, KOR: 117}
   # 一年一个赛季的联赛：赛季 = 开球那年（中超 2027 年 3 月的比赛算 2027 赛季）。别的 7 月起算新赛季；
   # 日职 2026 起改成秋春制（football-data 写“2026/2027”，8 月开赛），所以不在这里
-  calendar_year_leagues: [CHN]
+  calendar_year_leagues: [CHN, KOR]
+  # 按懂球帝比赛编号对比赛的联赛：{联赛: 数据库里的来源名}。这些联赛的比赛由别的导入程序按懂球帝编号写进数据库
+  # （match_sources 里记着懂球帝编号），懂球帝导入不投票定队名，直接按编号对上，只补赔率、详情、首发
+  id_linked_leagues: {KOR: dongqiudi-kor}
   # 哪些联赛要做历史回补（回补程序、回补进度、数据状态页的“历史回补”都只看这些）。
   # 次级联赛只抓当前赛季（赛前快照 + 踢完的最终赔率），不往回补：2018 起八个赛季一个联赛要几千次请求，现在用不上
   history_leagues: [E0, SP1, D1, I1, F1]
@@ -232,9 +236,10 @@ dongqiudi_jc:
   country: {N1: 荷兰, P1: 葡萄牙, SC0: 苏格兰, AUS: 澳大利亚, BRA: 巴西}   # teams 表的国家（澳超的惠灵顿凤凰、奥克兰FC 其实是新西兰队，按联赛记）
   report_file: 竞彩联赛_导入报告.md   # 导入报告（放 paths.reports 里）
 
-# 韩K（K联赛 1 级）历史回补和导入（需求文档第 4 节“第 11 阶段：韩K 回补和开发回测”）。工作树 KR 里做，没接定时任务。
+# 韩K（K联赛 1 级）历史回补和导入（需求文档第 4 节“第 11 阶段：韩K 回补和开发回测”）。
 # 采集 src/collect/dongqiudi_kor.py（用懂球帝采集程序的低频、停止规则），导入 src/clean/dongqiudi_kor_import.py。
-# 不放进上面 dongqiudi.league_ids：每小时的懂球帝任务、懂球帝导入、数据状态页都只看那里，碰不到韩K
+# 2026-11-09（v1.38）起韩K 也在上面 dongqiudi.league_ids 里：每小时懂球帝任务抓当前赛季赛程、赔率，
+# 抓完后 src/jobs/refresh_data.py 再跑一次韩K 导入（往届赛季页 + 当前赛季赛程），比赛表才有当前赛季的韩K
 dongqiudi_kor:
   league: KOR                # 我们的联赛代码（leagues.asia 里登记）
   league_ids: {KOR: 117}     # 懂球帝的联赛编号（历届赛季页 https://m.dongqiudi.com/zhanbao/lishi/117）
@@ -242,7 +247,12 @@ dongqiudi_kor:
   min_interval_seconds: 10   # 两次请求至少隔几秒（比五大联赛的 5 秒慢一倍）
   first_season: 2010         # 赛季页从哪年下（2010–2016 只当热身历史）
   odds_first_season: 2017    # 赔率从哪年下（2015 没有赔率；2017 起胜平负 2–3 家，见需求文档 6.1）
-  last_season: 2023          # 到哪年为止：只下开发赛季（考试赛季 2024、2025 不下，程序里还会按 season_role 再查）
+  # 赛季页下到哪年。2026-11-09（v1.38）从 2023 改成 2025：考试赛季 2024、2025 的比赛和比分当热身历史，
+  # 让当前赛季开得出预测（取数层照样按 season_role 管用途，开发模式拿不到考试赛季）
+  last_season: 2025
+  odds_last_season: 2023     # 历史赔率只下、只导开发赛季（考试赛季的赔率不下，程序里还会按 season_role 再查）
+  # 当前赛季（season_role = 上线后，2026 起）不用赛季页：比赛、比分、赛程都从每小时懂球帝任务存的赛程文件读
+  # （fixtures/KOR/），赔率由懂球帝导入按编号补上
   db_source: dongqiudi-kor   # 数据库里的来源名（和五大联赛的 dongqiudi 分开）
   country: 韩国              # teams 表的国家
   local_timezone: Asia/Seoul # 韩国时间：导入时查英国、北京、韩国三个日期是不是一样

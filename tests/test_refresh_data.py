@@ -109,6 +109,40 @@ def test_jc_leagues_collected_and_imported_after_top_leagues(env, monkeypatch):
     assert summary["阶段"] == "完成"
 
 
+def test_kor_imported_last_without_extra_requests(env, monkeypatch):
+    """韩K 在懂球帝联赛里时：懂球帝导完以后再跑一次韩K 导入（不另外采集），结果记进摘要；
+    韩K 不在懂球帝联赛里就不跑。"""
+    job, settings, calls, _, _tmp = env
+    settings["dongqiudi_kor"] = {"league": "KOR"}
+
+    def fake_kor(con, s, raw):
+        assert s is settings and raw == Path(settings["paths"]["raw"])
+        calls.append("import_kor")
+        return {"matches": 10, "live": {(2026, "scheduled"): 3}}
+
+    monkeypatch.setattr(job, "import_kor", fake_kor)
+    job.run_refresh(settings)
+    assert calls == ["collect", "import", "close_session"]               # 韩K 不在 league_ids：不跑
+    calls.clear()
+    settings["paths"]["database"] = str(_tmp / "second.db")             # 假导入会建表：第二次换个空库
+    settings["dongqiudi"]["league_ids"]["KOR"] = 117
+
+    class Collector3:
+        def __init__(self, con, raw, cfg):
+            self.counts = {}
+            self.session = SimpleNamespace(close=lambda: calls.append("close_session"))
+
+        def upcoming(self, leagues):
+            assert leagues == ["E0", "SP1", "KOR"]
+            calls.append("collect")
+
+    monkeypatch.setattr(job, "RefreshCollector", Collector3)
+    summary = job.run_refresh(settings)
+    assert calls == ["collect", "import", "import_kor", "close_session"]
+    assert summary["韩K写入"] == {"比赛": 10, "当前赛季": {"2026 scheduled": 3}}
+    assert summary["阶段"] == "完成"
+
+
 def test_busy_import_does_not_block_collection_or_write_partial_database(env, monkeypatch):
     from contextlib import contextmanager
 

@@ -251,6 +251,28 @@ def link_matches(cands: list[Candidate], db: dict, mapping: dict, season_now: di
     return out
 
 
+def link_by_id(con, seen: dict[int, Seen], id_linked: dict[str, str]) -> list[Link]:
+    """按懂球帝比赛编号对比赛的联赛（settings 的 dongqiudi.id_linked_leagues，例如韩K）。
+
+    这些联赛的比赛是别的导入程序按懂球帝编号写进数据库的（match_sources 里来源 = 那个程序的来源名、
+    source_key = 懂球帝比赛编号），这里直接按编号对上，不投票定队名、不新增比赛。
+    对上的比赛走“别的来源也有”那条路：只补赔率、详情页统计、首发，不改比赛表。
+    """
+    out = []
+    for lg, source in id_linked.items():
+        by_key = {key: mid for key, mid in con.execute(
+            "select s.source_key, s.match_id from match_sources s join matches m on m.match_id = s.match_id"
+            " where s.source = ? and m.competition = ?", (source, lg))}
+        for dqd_id, s in seen.items():
+            if s.league != lg:
+                continue
+            c = Candidate(dqd_id, lg, s.season, s.fx.home, s.fx.away, s.fx.home_goals, s.fx.away_goals,
+                          s.raw_file, s.fetched_at, s)
+            mid = by_key.get(str(dqd_id))
+            out.append(Link(c, mid, "对上" if mid is not None else "数据库里没有这场"))
+    return out
+
+
 def fixture_fields(fx, back_days: int, tz: ZoneInfo) -> tuple[str, str | None, str, str]:
     """赛程里的一场 → matches 表的（日期, 开球时间, 状态, 日期精度）。
 
@@ -507,7 +529,9 @@ def chinese_names(links: list[Link], mapping: dict) -> dict[str, str]:
             continue
         c = ln.cand
         for zh in (c.home_zh, c.away_zh):
-            en = mapping[zh]
+            en = mapping.get(zh)
+            if en is None:
+                continue   # 按编号对上的联赛（韩K）不投票定队名，球队编号本来就是中文名
             if en not in latest or (c.season, c.fetched_at) > latest[en][0]:
                 latest[en] = ((c.season, c.fetched_at), zh)
     return {en: zh for en, (_k, zh) in latest.items()}
@@ -746,15 +770,23 @@ def run(con, raw: Path, reports: Path, s: dict, now: datetime | None = None, tea
     create_tables(con)
     con.commit()
     fetched = load_fetch_times(con)
-    pages = {lg: load_dqd_seasons(raw, lg) for lg in leagues}
+    # 按懂球帝编号对比赛的联赛（韩K）：不读赛季页、不投票定队名，比赛由它自己的导入程序写进数据库
+    id_linked = {lg: src for lg, src in (dq.get("id_linked_leagues") or {}).items() if lg in leagues}
+    named = [lg for lg in leagues if lg not in id_linked]
+    pages = {lg: load_dqd_seasons(raw, lg) for lg in named}
     calendar = dq.get("calendar_year_leagues") or ()
     seen = load_fixtures(raw, leagues, fetched, calendar)
+    seen_named = {i: s for i, s in seen.items() if s.league not in id_linked}
     log.info("赛季页 %d 个赛季，赛程里 %d 场", sum(len(v) for v in pages.values()), len(seen))
-    mapping, table, db = team_mapping(con, pages, seen, leagues)
-    season_now = {lg: league_season(lg, now, calendar) for lg in leagues}
-    links = link_matches(candidates(raw, pages, seen, fetched), db, mapping, season_now)
+    mapping, table, db = team_mapping(con, pages, seen_named, named)
+    season_now = {lg: league_season(lg, now, calendar) for lg in named}
+    links = link_matches(candidates(raw, pages, seen_named, fetched), db, mapping, season_now)
+    links += link_by_id(con, seen, id_linked)
     refs = kickoff_refs(links, db, back_days, tz)
-    files = odds_files(raw, leagues, fetched)
+    # 韩K 往届的赔率文件（韩K 回补程序下的 2017–2023）由韩K 导入管，这里不读
+    live_first = int(s["seasons"]["live_first"])
+    files = [f for f in odds_files(raw, leagues, fetched)
+             if not (f.kind == "final" and f.path.parent.parent.name in id_linked and int(f.path.parent.name) < live_first)]
     log.info("队名定下 %d 个；要导入的比赛 %d 场；赔率文件 %d 个", len(mapping), len(refs), len(files))
     changes, lottery, stats, unknown = build_odds(files, refs, books, products, q)
     zh_names = chinese_names(links, mapping)

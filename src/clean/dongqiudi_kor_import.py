@@ -7,6 +7,12 @@ r"""韩K（KOR）从懂球帝原始文件清洗后导入数据库（需求文档
 读的原始文件（下载程序 src/collect/dongqiudi_kor.py 存的）：
   data/raw/dongqiudi/season/KOR/<年>.html.gz           赛季页（页面数据里有轮次、北京时间开球时刻、两队编号、比分）
   data/raw/dongqiudi/odds_final/KOR/<年>/<比赛编号>.json.gz   每场赔率（胜平负、让球、大小球的初盘和“最新”）
+  data/raw/dongqiudi/fixtures/KOR/*.json.gz             当前赛季的赛程（每小时懂球帝任务存的，2026-11-09 起）
+
+赛季页读 first_season–last_season（开发 + 考试赛季，考试赛季只当热身历史）；当前赛季（上线后）不读赛季页，
+从赛程文件读（没踢的比赛也进比赛表，状态 scheduled，这样每日预测才看得到）。
+历史赔率只导开发赛季（odds_first_season–odds_last_season）；当前赛季的赔率由懂球帝导入（来源 dongqiudi）按编号补。
+每小时任务 src/jobs/refresh_data.py 在懂球帝导入以后跑一次这个导入。
 
 做的事：
 1. 只要联赛比赛：轮次名字是“<联赛前缀> 第N轮”（settings 的 dongqiudi_kor.league_round_prefixes）；
@@ -31,12 +37,13 @@ import sqlite3
 import statistics
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from src.clean.dongqiudi_import import (TIME_FORMAT, file_time, load_bookmakers, load_fetch_times, overround_ok,
-                                        price_ok, rel, result_letter, utc_text)
+from src.clean.dongqiudi_import import (TIME_FORMAT, Seen, file_time, fixture_fields, load_bookmakers,
+                                        load_fetch_times, load_fixtures, overround_ok, price_ok, rel, result_letter,
+                                        utc_text)
 from src.clean.dongqiudi_reader import parse_odds, parse_season_state, read_json, read_text, resolve_ts, round_kind
 from src.clean.schema import create_tables
 from src.clean.source_lifecycle import (delete_replaced_results, new_match_ids, reconcile_source_lifecycle,
@@ -64,19 +71,22 @@ class Game:
     match_date: str           # 英国日期
     kickoff_utc: str | None   # 'YYYY-MM-DD HH:MM'（UTC）；赛季页只有日期时是 None
     kickoff_cmp: str | None   # 和赔率变盘时间比的写法（TIME_FORMAT，带秒）
-    home_goals: int
-    away_goals: int
+    home_goals: int | None    # 没踢完的（当前赛季赛程里的）是 None
+    away_goals: int | None
     raw_file: str
     fetched_at: str
+    status: str = "finished"        # matches.status：往届都是 finished；当前赛季按赛程（scheduled、postponed……）
+    date_precision: str = "day"     # 时间待定的比赛是 round（日期只是“这一轮大概哪天”）
 
 
 def season_files(raw: Path, league: str, first: int, last: int, settings: dict) -> dict[int, Path]:
-    """first–last 每季的赛季页。只读开发赛季：哪一季不是开发赛季就报错（考试赛季锁住）。"""
+    """first–last 每季的赛季页。开发、考试赛季都读（考试赛季的比分只当热身历史，取数层照样管用途）；
+    当前赛季（上线后）不读赛季页，报错（当前赛季从赛程文件读，见 live_fixtures）。"""
     out = {}
     for y in range(first, last + 1):
         role = season_role(y, settings)
-        if role != "dev":
-            raise ValueError(f"{y} 赛季是“{role}”，不是开发赛季：考试赛季锁住，不导入")
+        if role == "live":
+            raise ValueError(f"{y} 赛季是“上线后”：当前赛季不读赛季页（从赛程文件读），last_season 写错了")
         p = raw / "dongqiudi" / "season" / league / f"{y}.html.gz"
         if p.exists():
             out[y] = p
@@ -106,6 +116,33 @@ def classify(files: dict[int, Path], cfg: dict, report: dict) -> dict[int, list]
                 keep.append(g)
         out[y] = keep
     return out
+
+
+def live_fixtures(raw: Path, cfg: dict, settings: dict, fetched: dict, report: dict) -> dict[int, list[Seen]]:
+    """当前赛季（season_role = 上线后）：每小时懂球帝任务存的赛程文件 → {赛季: [每场最后一次看到的样子]}。
+
+    赛程文件按抓取时间先后读，后面的覆盖前面的（延期、改时间、踢完都以最后一次为准）。
+    往届赛季的比赛不从这里读（以赛季页为准）。
+    只要联赛比赛：赛程里的“第几轮”（gameweek）是数字才算；不是数字的（附加赛之类）不导入，记进报告。
+    当前赛季靠懂球帝球队编号认队：赛程里没有球队编号就报错（不猜）。
+    """
+    league = cfg["league"]
+    calendar = [league] if cfg.get("calendar_year") else []
+    out = defaultdict(list)
+    for s in load_fixtures(raw, [league], fetched, calendar).values():
+        if season_role(s.season, settings) != "live":
+            continue
+        fx = s.fx
+        if not str(fx.gameweek or "").isdigit():
+            day = (fx.kickoff_utc + timedelta(hours=8)).date().isoformat() if fx.kickoff_utc else ""
+            report["playoffs"].append((s.season, day, f"赛程“第 {fx.gameweek} 轮”", fx.home, fx.home_goals,
+                                       fx.away_goals, fx.away))
+            continue
+        if not (fx.home_id and fx.away_id):
+            raise ValueError(f"赛程里比赛 {fx.match_id}（{fx.home} - {fx.away}）没有球队编号（{s.raw_file}），"
+                             "当前赛季靠编号认队，不猜")
+        out[s.season].append(s)
+    return dict(out)
 
 
 # ---------- 球队编号 ----------
@@ -152,9 +189,12 @@ def team_mapping(league_games: dict[int, list], report: dict) -> tuple[dict[str,
 
 
 def check_participation(games: list[Game], min_share: float) -> dict[int, int]:
-    """每季每队出场次数都要 ≥ 本季中位数 × min_share（附加赛球队只踢 1–2 场）。返回每季球队数；不对就报错。"""
+    """每季每队出场次数都要 ≥ 本季中位数 × min_share（附加赛球队只踢 1–2 场）。返回每季球队数；不对就报错。
+    只数踢完的（当前赛季还没踢的不算）。"""
     per = defaultdict(Counter)
     for g in games:
+        if g.status != "finished":
+            continue
         per[g.season][g.home] += 1
         per[g.season][g.away] += 1
     out = {}
@@ -200,6 +240,40 @@ def build_games(league_games: dict[int, list], files: dict[int, Path], by_id: di
     return out
 
 
+def build_live_games(live: dict[int, list[Seen]], by_id: dict, settings: dict, report: dict) -> list[Game]:
+    """当前赛季赛程 → Game。round = 赛程里的“第几轮”（和往届赛季页的轮次号一样，1–33 是常规赛，34–38 是分组赛）。
+
+    日期、开球时间、状态和懂球帝导入一样算（dongqiudi_import.fixture_fields）：时间待定的不写开球时间，
+    日期往前挪几天、精度记 round。踢完、有比分的才有比分；英国、北京、韩国日期不一样就报错。
+    """
+    cfg = settings["dongqiudi_kor"]
+    london = ZoneInfo(settings["features"]["date_only_timezone"])
+    local = ZoneInfo(cfg["local_timezone"])
+    back_days = int(settings["dongqiudi"]["uncertain_back_days"])
+    out, keys = [], {}
+    for y in sorted(live):
+        for s in sorted(live[y], key=lambda s: (int(s.fx.gameweek), s.fx.match_id)):
+            fx = s.fx
+            mdate, kickoff, status, precision = fixture_fields(fx, back_days, london)
+            if kickoff is not None:
+                days = {mdate, (fx.kickoff_utc + timedelta(hours=8)).date().isoformat(),
+                        fx.kickoff_utc.astimezone(local).date().isoformat()}
+                if len(days) != 1:
+                    raise ValueError(f"比赛 {fx.match_id}（{fx.home} - {fx.away}）英国、北京、韩国日期不一样："
+                                     f"{sorted(days)}；需求文档说的是一样，先查清楚再导")
+            home, away, rn = by_id[fx.home_id], by_id[fx.away_id], int(fx.gameweek)
+            key = (y, home, away, rn)
+            if key in keys:
+                raise ValueError(f"{y} 赛季赛程第 {rn} 轮 {home} - {away} 出现两次（懂球帝编号 {keys[key]}、{fx.match_id}）")
+            keys[key] = fx.match_id
+            goals = (fx.home_goals, fx.away_goals) if status == "finished" else (None, None)
+            out.append(Game(fx.match_id, y, rn, f"第{rn}轮", home, away, mdate, kickoff,
+                            utc_text(fx.kickoff_utc) if kickoff else None, *goals, s.raw_file, s.fetched_at,
+                            status, precision))
+            report["live"][(y, status)] += 1
+    return out
+
+
 # ---------- 赔率 ----------
 def build_odds(games: list[Game], raw: Path, settings: dict, report: dict) -> list[tuple]:
     """每场的胜平负收盘 → odds 表的行 (懂球帝比赛编号, 公司, 主, 平, 客)。
@@ -213,8 +287,11 @@ def build_odds(games: list[Game], raw: Path, settings: dict, report: dict) -> li
     skip_cids = set(products) | LOTTERY_CIDS
     min_books = int(cfg["min_books_average"])
     st = report["odds"]
+    odds_last = int(cfg["odds_last_season"])
     rows = []
     for g in games:
+        if g.season > odds_last or season_role(g.season, settings) != "dev":
+            continue   # 历史赔率只导开发赛季；当前赛季的赔率由懂球帝导入（来源 dongqiudi）按编号补上
         p = raw / "dongqiudi" / "odds_final" / cfg["league"] / str(g.season) / f"{g.dqd_id}.json.gz"
         if not p.exists():
             st["没有赔率文件"] += 1
@@ -310,15 +387,17 @@ def write_db(con: sqlite3.Connection, cfg: dict, games: list[Game], name_rows: l
         con.execute("delete from team_names where source = ?", (source,))
         con.executemany("insert into team_names (source, name, team_id) values (?, ?, ?)",
                         [(source, n, t) for n, t in name_rows])
-        # 比赛：有就更新（编号不变），没有才新增。round = 第几个轮次，leg = 0
+        # 比赛：有就更新（编号不变），没有才新增。round = 第几个轮次，leg = 0。
+        # 当前赛季的比赛按最新赛程更新日期、开球时间、状态、日期精度（没踢的 → 踢完）
         new_ids = new_match_ids(con)
         con.executemany(
             "insert into matches (match_id, competition, season, home_team, away_team, match_date, kickoff_utc, status, "
-            "round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, 'finished', ?, 0, 'day') "
+            "round, leg, date_precision) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?) "
             "on conflict(competition, season, home_team, away_team, round, leg) do update set "
-            "match_date = excluded.match_date, kickoff_utc = excluded.kickoff_utc, status = excluded.status",
-            [(next(new_ids), league, g.season, g.home, g.away, g.match_date, g.kickoff_utc, str(g.round_no))
-             for g in games])
+            "match_date = excluded.match_date, kickoff_utc = excluded.kickoff_utc, status = excluded.status, "
+            "date_precision = excluded.date_precision",
+            [(next(new_ids), league, g.season, g.home, g.away, g.match_date, g.kickoff_utc, g.status, str(g.round_no),
+              g.date_precision) for g in games])
         ids = {(s, h, a, r): mid for mid, s, h, a, r in con.execute(
             "select match_id, season, home_team, away_team, round from matches where competition = ?", (league,))}
         dqd_to_id = {g.dqd_id: ids[(g.season, g.home, g.away, str(g.round_no))] for g in games}
@@ -331,7 +410,7 @@ def write_db(con: sqlite3.Connection, cfg: dict, games: list[Game], name_rows: l
         con.execute("delete from odds where source = ?", (source,))
         con.executemany("insert into match_stats (match_id, source, home_goals, away_goals, result) values (?, ?, ?, ?, ?)",
                         [(dqd_to_id[g.dqd_id], source, g.home_goals, g.away_goals,
-                          result_letter(g.home_goals, g.away_goals)) for g in games])
+                          result_letter(g.home_goals, g.away_goals)) for g in games if g.home_goals is not None])
         con.executemany("insert into odds (source, match_id, bookmaker, market, timing, line, home, draw, away, over, under) "
                         "values (?, ?, ?, '1x2', 'close', null, ?, ?, ?, null, null)",
                         [(source, dqd_to_id[mid], b, h, d, a) for mid, b, h, d, a in odds])
@@ -343,7 +422,7 @@ def write_db(con: sqlite3.Connection, cfg: dict, games: list[Game], name_rows: l
 def new_report() -> dict:
     return {"page_games": {}, "playoffs": [], "not_played": [], "ambiguous_names": [], "no_team_id": {},
             "teams": {}, "no_kickoff": Counter(), "odds": Counter(), "unknown_books": Counter(), "books": Counter(),
-            "books_per_avg": defaultdict(list)}
+            "books_per_avg": defaultdict(list), "live": Counter()}
 
 
 def run(con: sqlite3.Connection, settings: dict, raw: Path | None = None) -> dict:
@@ -361,8 +440,12 @@ def run(con: sqlite3.Connection, settings: dict, raw: Path | None = None) -> dic
     create_tables(con)
     fetched = load_fetch_times(con)
     league_games = classify(files, cfg, report)
-    by_id, by_name, name_rows = team_mapping(league_games, report)
+    live = live_fixtures(raw, cfg, settings, fetched, report)
+    # 认球队时当前赛季赛程也算进去（赛程和赛季页的球队编号是同一套）：新升上来的队、改名都按最近一季的写法
+    by_id, by_name, name_rows = team_mapping({**league_games, **{y: [s.fx for s in ss] for y, ss in live.items()}},
+                                             report)
     games = build_games(league_games, files, by_id, by_name, settings, fetched, report)
+    games += build_live_games(live, by_id, settings, report)
     report["teams_per_season"] = check_participation(games, float(cfg["league_team_min_share"]))
     odds = build_odds(games, raw, settings, report)
     report["matches"] = write_db(con, cfg, games, name_rows, odds)
@@ -408,8 +491,12 @@ def content_digest(con: sqlite3.Connection, cfg: dict) -> str:
 def report_markdown(rep: dict, cfg: dict, digests: list[str]) -> str:
     """导入报告（中文）。"""
     lines = ["# 韩K（KOR）懂球帝导入报告（自动生成）", "",
-             f"来源名 {cfg['db_source']}，共 {rep['matches']} 场联赛比赛。只读开发赛季 "
-             f"{cfg['first_season']}–{cfg['last_season']}；赔率从 {cfg['odds_first_season']} 起才下。", ""]
+             f"来源名 {cfg['db_source']}，共 {rep['matches']} 场联赛比赛。赛季页读 "
+             f"{cfg['first_season']}–{cfg['last_season']}（考试赛季只当热身历史）；当前赛季读每小时任务的赛程文件；"
+             f"历史赔率只导开发赛季 {cfg['odds_first_season']}–{cfg['odds_last_season']}。", ""]
+    if rep["live"]:
+        lines += ["当前赛季（赛程文件）：" + "，".join(f"{y} 赛季 {s} {n} 场" for (y, s), n in sorted(rep["live"].items())),
+                  ""]
     if digests:
         same = "一样" if len(set(digests)) == 1 else "不一样（有问题）"
         lines += [f"重跑核对：同一批原始文件连着导 {len(digests)} 次，内容指纹{same}：{digests[-1][:16]}…", ""]

@@ -4,6 +4,7 @@
 复用现有采集器的低频限制、共享请求间隔、内容检查和导入程序，不另写一套取数逻辑。
 五大联赛那一套做完以后，settings.yaml 有 dongqiudi_jc 段时，再用同一个采集器抓、导竞彩联赛（leagues.jc，
 src/clean/dongqiudi_jc_import.py）。顺序固定在后面：竞彩联赛出问题时，五大联赛这一小时的数据已经导进去了。
+最后跑韩K 导入（src/clean/dongqiudi_kor_import.py，不发请求，只读上面抓好的韩K 赛程），韩K 当前赛季的比赛才进比赛表。
 每次写 refresh_data 心跳；采集或导入失败照常抛出，任务计划程序能看到失败。
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ import logging
 
 from src.clean.dongqiudi_import import run as import_raw
 from src.clean.dongqiudi_jc_import import run as import_jc
+from src.clean.dongqiudi_kor_import import run as import_kor
 from src.collect.dongqiudi import Collector, jc_config, setup_logging
 from src.common.config import load_settings, resolve_path
 from src.common.db import connect
@@ -63,6 +65,8 @@ def run_refresh(settings: dict | None = None) -> dict:
             run.summary["写入"] = result["counts"]
             if "dongqiudi_jc" in settings:
                 run_jc(con, raw, settings, run.summary)
+            if "dongqiudi_kor" in settings and settings["dongqiudi_kor"]["league"] in settings["dongqiudi"]["league_ids"]:
+                run_kor(con, raw, settings, run.summary)
             run.summary["阶段"] = "完成"
         finally:
             try:
@@ -87,6 +91,16 @@ def run_jc(con, raw, settings: dict, summary: dict) -> None:
     with data_write_lock(settings):
         result = import_jc(con, raw, resolve_path(settings["paths"]["reports"]), settings)
     summary["竞彩联赛写入"] = result["counts"]
+
+
+def run_kor(con, raw, settings: dict, summary: dict) -> None:
+    """韩K：比赛表由韩K 导入写（往届赛季页 + 当前赛季赛程，来源 dongqiudi-kor）。赛程在上面懂球帝那一轮已经抓好，
+    这里不再发请求，只导入。出错照常抛出（整次任务记失败），前面已经导好的不受影响。
+    新出现的韩K 比赛在这里才进比赛表，所以它的赔率要到下一小时懂球帝导入时才按编号补上（原始文件都在，不会丢）。"""
+    summary["阶段"] = "韩K导入"
+    with data_write_lock(settings):
+        rep = import_kor(con, settings, raw)
+    summary["韩K写入"] = {"比赛": rep["matches"], "当前赛季": {f"{y} {s}": n for (y, s), n in sorted(rep["live"].items())}}
 
 
 def main() -> dict:

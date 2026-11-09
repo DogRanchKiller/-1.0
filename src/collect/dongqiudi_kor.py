@@ -8,11 +8,13 @@ r"""韩K（K联赛 1 级）历史回补：只存原始层（需求文档第 4 �
 
 下什么：
 1. 历届赛季页 history/KOR/<日期>.html.gz（一天最多一次）；
-2. 赛季页 season/KOR/<年>.html.gz，first_season 到 last_season（2010–2023），每季一页。
+2. 赛季页 season/KOR/<年>.html.gz，first_season 到 last_season（2010–2025），每季一页。
    页面里藏着的数据（window.__INITIAL_STATE__）有每场的北京时间、两队编号、比分和轮次名字；
-3. 每场赔率 odds_final/KOR/<年>/<比赛编号>.json.gz：odds_first_season 到 last_season（2017–2023），
+   考试赛季 2024、2025 也下（2026-11-09 起，比分只当热身历史，让当前赛季开得出预测）；当前赛季不下赛季页
+   （season_role 是“上线后”就报错），当前赛季的比赛由每小时懂球帝任务的赛程接口抓；
+3. 每场赔率 odds_final/KOR/<年>/<比赛编号>.json.gz：odds_first_season 到 odds_last_season（2017–2023），
    只下联赛比赛（升降级附加赛不下），从近往远下。
-只下开发赛季：哪一季 season_role 不是“开发”就报错，不下（考试赛季 2024、2025 锁住）。
+   赔率只下开发赛季：哪一季 season_role 不是“开发”就报错，不下（考试赛季的赔率锁住）。
 
 可以中途停、下次接着来（已经有的文件跳过）。一次最多发 max_requests 次请求，到数就停（分段跑）。
 运行（在项目文件夹里，Claude 放后台跑）：
@@ -67,9 +69,16 @@ class KorCollector(Collector):
             raise Enough()
 
     def _dev_only(self, season: int):
+        """赔率：只下开发赛季（考试赛季的赔率锁住）。"""
         role = season_role(season, self.settings)
         if role != "dev":
-            raise ValueError(f"{season} 赛季是“{role}”，不是开发赛季：考试赛季锁住，不下载")
+            raise ValueError(f"{season} 赛季是“{role}”，不是开发赛季：考试赛季锁住，不下载赔率")
+
+    def _not_live(self, season: int):
+        """赛季页：开发、考试赛季都可以下（考试赛季的比分只当热身历史）；当前赛季不下（从每小时任务的赛程读）。"""
+        role = season_role(season, self.settings)
+        if role == "live":
+            raise ValueError(f"{season} 赛季是“上线后”：当前赛季不下赛季页，比赛从每小时懂球帝任务的赛程文件读")
 
     def season_state(self, season: int, season_id: int):
         """赛季页（只存一次）→ (赛季信息, 比赛列表)；没拿到返回 None。"""
@@ -104,9 +113,13 @@ class KorCollector(Collector):
             return bad_in_row
         return 0
 
-    def run(self, first: int, odds_first: int, last: int):
-        """先下全部赛季页（从近往远），再下赔率（从近往远）。"""
+    def run(self, first: int, odds_first: int, last: int, odds_last: int | None = None):
+        """先下全部赛季页（first–last，从近往远），再下赔率（odds_first–odds_last，从近往远）。
+        发请求前先把年份查一遍：赛季页不能有当前赛季，赔率只能是开发赛季。"""
+        odds_last = last if odds_last is None else min(odds_last, last)
         for y in range(first, last + 1):
+            self._not_live(y)
+        for y in range(odds_first, odds_last + 1):
             self._dev_only(y)
         seasons = self.history(self.league)
         states = {}
@@ -126,7 +139,7 @@ class KorCollector(Collector):
             log.info("%s %d：赛季页 %d 场", self.league, y, len(games))
         prefixes = list(self.cfg["league_round_prefixes"])
         non_league = list(self.cfg.get("non_league_rounds") or [])
-        for y in range(last, odds_first - 1, -1):
+        for y in range(odds_last, odds_first - 1, -1):
             if y not in states:
                 continue
             ids = [g.match_id for g in states[y] if g.status == "Played"
@@ -160,7 +173,8 @@ def main():
                      max_requests=args.max if args.max is not None else cfg["max_requests"])
     code = 0
     try:
-        c.run(int(cfg["first_season"]), int(cfg["odds_first_season"]), int(cfg["last_season"]))
+        c.run(int(cfg["first_season"]), int(cfg["odds_first_season"]), int(cfg["last_season"]),
+              int(cfg["odds_last_season"]))
         log.info("全部下完了")
     except Enough:
         log.info("这一段到了 %d 次请求，先停，下次接着来", c.max_requests)

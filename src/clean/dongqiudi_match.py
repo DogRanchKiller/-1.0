@@ -241,7 +241,9 @@ def main():
     raw, reports = resolve_path(s["paths"]["raw"]), resolve_path(s["paths"]["reports"])
     reports.mkdir(parents=True, exist_ok=True)
     con = connect()
-    leagues = list(s["dongqiudi"]["league_ids"])
+    # 按懂球帝编号对比赛的联赛（韩K）不投票定队名，见 settings 的 dongqiudi.id_linked_leagues
+    linked = s["dongqiudi"].get("id_linked_leagues") or {}
+    leagues = [lg for lg in s["dongqiudi"]["league_ids"] if lg not in linked]
     dqd = {lg: load_dqd_seasons(raw, lg) for lg in leagues}
     db = {lg: load_db_matches(con, lg) for lg in leagues}
 

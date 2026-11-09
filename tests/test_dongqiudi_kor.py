@@ -61,6 +61,40 @@ S2022 = [("联赛 第1轮", [g(101, "2022-03-01 18:00", "新A", "1", "B", "2", "
                            g(106, "2022-10-01 18:00", "C", "3", "D", "4", "", st="Fixture")]),
          ("保级组 第1轮", [g(107, "2022-10-02 18:00", "C", "3", "D", "4", "3-0")]),
          ("升降级附加赛", [g(108, "2022-12-01 18:00", "D", "4", "E", "5", "1-0")])]
+# 2024（考试赛季）：四个队各踢 2 场
+S2024 = [("联赛 第1轮", [g(301, "2024-03-01 18:00", "新A", "1", "B", "2", "1-0"),
+                         g(302, "2024-03-01 18:00", "C", "3", "D", "4", "2-2")]),
+         ("联赛 第2轮", [g(303, "2024-03-08 18:00", "B", "2", "C", "3", "0-1"),
+                         g(304, "2024-03-08 18:00", "D", "4", "新A", "1", "1-3")])]
+
+
+def kfx(mid, home, hid, away, aid, start, gw, status="Fixture", score=("", "")):
+    """赛程接口里的一场（字段名和懂球帝一样）。start 是标准时间。"""
+    return {"match_id": str(mid), "team_A_name": home, "team_A_id": hid, "team_B_name": away, "team_B_id": aid,
+            "start_play": start, "status": status, "fs_A": score[0], "fs_B": score[1], "gameweek": str(gw)}
+
+
+def write_fixtures(root, name, rows):
+    p = root / "dongqiudi" / "fixtures" / "KOR" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(gzip.compress(json.dumps({"list": rows}, ensure_ascii=False).encode("utf-8")))
+
+
+def write_live(root):
+    """2026（当前赛季）的两次赛程抓取：后一次覆盖前一次（403 踢完了，404 改了时间）。
+    405 和 401 是同一对队（第 34 轮，分组赛）；406 时间待定；407 不是数字轮次（附加赛，不导入）。"""
+    write_fixtures(root, "20260301T0000Z_1.json.gz", [
+        kfx(401, "新A", "1", "B", "2", "2026-03-01 05:00:00", 1, "Played", ("2", "0")),
+        kfx(402, "C", "3", "D", "4", "2026-03-01 05:00:00", 1, "Played", ("0", "0")),
+        kfx(403, "B", "2", "C", "3", "2026-03-08 05:00:00", 2),
+        kfx(404, "D", "4", "新A", "1", "2026-03-08 05:00:00", 2)])
+    write_fixtures(root, "20261109T0100Z_1.json.gz", [
+        kfx(403, "B", "2", "C", "3", "2026-03-08 05:00:00", 2, "Played", ("1", "1")),
+        kfx(404, "D", "4", "新A", "1", "2026-11-21 05:00:00", 2),
+        kfx(405, "新A", "1", "B", "2", "2026-11-22 05:00:00", 34),
+        kfx(406, "C", "3", "D", "4", "2026-11-29 05:00:00", 35, "Uncertain"),
+        kfx(407, "D", "4", "E", "5", "2026-12-10 05:00:00", "")])
+    return root
 
 
 def book(name, cid, home, draw, away, ts):
@@ -221,12 +255,21 @@ def test_collector_stops_on_block_pages(kenv, which):
         assert ODDS_URL.format(match_id=202) not in site.requests
 
 
-def test_collector_refuses_exam_seasons(kenv):
+def test_collector_exam_season_pages_only_odds_locked_live_refused(kenv):
+    """考试赛季：赛季页可以下（比分当热身历史），赔率锁住；当前赛季（上线后）连赛季页也不下。年份不对时一次也不请求。"""
     con, site, make, out = kenv
     serve_kor(site)
     with pytest.raises(ValueError, match="考试赛季锁住"):
-        make().run(2022, 2022, 2024)
+        make().run(2022, 2022, 2024)               # 没另写赔率到哪年 = 到 2024：考试赛季的赔率锁住
+    with pytest.raises(ValueError, match="上线后"):
+        make().run(2022, 2022, 2026, 2023)         # 赛季页不能有当前赛季
     assert site.requests == []                                         # 一次也没请求
+    site.pages[HISTORY_URL.format(league_id=117)] = (200, (HISTORY_KOR + '<a href="/zhanbao/saiji/22122">2024</a>').encode())
+    site.pages[SEASON_URL.format(season_id=22122)] = (200, state_html(2024, S2024).encode())
+    make().run(2022, 2022, 2024, 2023)
+    assert (out / "season/KOR/2024.html.gz").exists()
+    assert not (out / "odds_final/KOR/2024").exists()
+    assert not any(ODDS_URL.format(match_id=m) in site.requests for m in (301, 302, 303, 304))
 
 
 # ---------- 导入 ----------
@@ -345,13 +388,98 @@ def test_import_date_mismatch_stops(settings, tmp_path):
     con.close()
 
 
-def test_import_refuses_exam_seasons(settings, tmp_path):
-    s = copy.deepcopy(settings)
-    s["dongqiudi_kor"]["last_season"] = 2024
+def test_import_exam_season_scores_only_and_live_season_page_refused(settings, tmp_path):
+    """考试赛季 2024：比赛、比分照导（热身历史），赔率文件就算有也不导；last_season 写到当前赛季：报错，一行都不写。"""
+    raw = write_raw(tmp_path / "raw", {2022: S2022, 2024: S2024})
+    p = raw / "dongqiudi" / "odds_final" / "KOR" / "2024" / "301.json.gz"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(gzip.compress(json.dumps({"matchId": 301, "euro": ODDS[101], "asia": [], "size": []}).encode("utf-8")))
     con = connect(tmp_path / "x.db")
-    with pytest.raises(ValueError, match="考试赛季锁住"):
-        imp.run(con, s, write_raw(tmp_path / "raw"))
+    imp.run(con, settings, raw)
+    n = dict(con.execute("select season, count(*) from matches where competition = 'KOR' group by season").fetchall())
+    assert n == {2022: 6, 2024: 4}
+    assert con.execute("select count(*) from match_stats s join matches m using (match_id) "
+                       "where m.season = 2024 and s.source = 'dongqiudi-kor'").fetchone()[0] == 4
+    assert not any(m == "301" for m, _ in kor_odds(con))
+    s = copy.deepcopy(settings)
+    s["dongqiudi_kor"]["last_season"] = 2026
+    con2 = connect(tmp_path / "y.db")
+    with pytest.raises(ValueError, match="上线后"):
+        imp.run(con2, s, raw)
+    assert con2.execute("select count(*) from sqlite_master where name = 'matches'").fetchone()[0] == 0   # 连表都没建
     con.close()
+    con2.close()
+
+
+def live_rows(con):
+    return {k: r for k, *r in con.execute(
+        "select s.source_key, m.season, m.round, m.home_team, m.away_team, m.match_date, m.kickoff_utc, m.status, "
+        "m.date_precision from matches m join match_sources s on s.match_id = m.match_id and s.source = 'dongqiudi-kor' "
+        "where m.season = 2026")}
+
+
+def test_import_live_season_from_fixtures(settings, ienv):
+    """当前赛季 2026：从赛程文件读，最后一次看到的为准；没踢的也进比赛表（scheduled），每日预测才看得到。
+    round = 赛程里的第几轮（同一对队第 1 轮、第 34 轮两场都在）；时间待定的不写开球时间、精度 round；
+    不是数字轮次的（附加赛）不导入；当前赛季不导赔率（赔率由懂球帝导入按编号补）。"""
+    con, raw = ienv
+    write_live(raw)
+    rep = imp.run(con, settings, raw)
+    rows = live_rows(con)
+    assert set(rows) == {"401", "402", "403", "404", "405", "406"}
+    assert rows["401"] == [2026, "1", "新A", "B", "2026-03-01", "2026-03-01 05:00", "finished", "day"]
+    assert rows["403"][6] == "finished"                                  # 后一次抓取：踢完了
+    assert rows["404"][4:7] == ["2026-11-21", "2026-11-21 05:00", "scheduled"]   # 后一次抓取：改了时间
+    assert rows["405"][:4] == [2026, "34", "新A", "B"]
+    assert rows["406"][4:] == ["2026-11-26", None, "scheduled", "round"]
+    assert [(y, rn) for y, _d, rn, *_ in rep["playoffs"]][-1] == (2026, "赛程“第  轮”")
+    assert rep["live"] == {(2026, "finished"): 3, (2026, "scheduled"): 3}
+    assert rep["teams_per_season"][2026] == 4
+    stats = {k: (h, a) for k, h, a in con.execute(
+        "select s.source_key, t.home_goals, t.away_goals from match_stats t join match_sources s "
+        "on s.match_id = t.match_id and s.source = t.source join matches m on m.match_id = t.match_id where m.season = 2026")}
+    assert stats == {"401": (2, 0), "402": (0, 0), "403": (1, 1)}
+    assert not any(int(m) > 400 for m, _ in kor_odds(con))
+    assert "E" not in {t for (t,) in con.execute("select team_id from teams")}
+    # 下一小时：404 踢完了。比赛编号不变，状态、比分跟着变
+    ids = dict(con.execute("select s.source_key, s.match_id from match_sources s where s.source = 'dongqiudi-kor'"))
+    write_fixtures(raw, "20261121T0900Z_1.json.gz",
+                   [kfx(404, "D", "4", "新A", "1", "2026-11-21 05:00:00", 2, "Played", ("0", "1"))])
+    imp.run(con, settings, raw)
+    assert dict(con.execute("select s.source_key, s.match_id from match_sources s where s.source = 'dongqiudi-kor'")) == ids
+    assert live_rows(con)["404"][6] == "finished"
+    assert con.execute("select home_goals, away_goals from match_stats where match_id = ? and source = 'dongqiudi-kor'",
+                       (ids["404"],)).fetchone() == (0, 1)
+
+
+def test_hourly_import_links_kor_by_match_id(settings, ienv):
+    """懂球帝导入（每小时）：韩K 按懂球帝比赛编号对上韩K 导入写的比赛，不投票定队名、不新增比赛；
+    赛前快照进变盘记录；韩K 往届的赔率文件不读。之后再跑韩K 导入，懂球帝那边的对照还在。"""
+    from src.clean import dongqiudi_import as dq
+    con, raw = ienv
+    write_live(raw)
+    p = raw / "dongqiudi" / "odds_live" / "KOR" / "404" / "20261109T0200Z.json.gz"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(gzip.compress(json.dumps({"matchId": 404, "euro": [
+        book("Bet3**", "281", "2.50", "3.20", "2.80", "11-09 09:00")], "asia": [], "size": []}).encode("utf-8")))
+    imp.run(con, settings, raw)
+    n_matches = con.execute("select count(*) from matches").fetchone()[0]
+    s = copy.deepcopy(settings)
+    s["dongqiudi"]["league_ids"] = {"KOR": 117}
+    out = dq.run(con, raw, raw.parent / "reports", s, now=datetime(2026, 11, 9, 12, 0, tzinfo=UTC))
+    res = {ln.cand.dqd_id: ln.result for ln in out["links"]}
+    assert res == {401: "对上", 402: "对上", 403: "对上", 404: "对上", 405: "对上", 406: "对上", 407: "数据库里没有这场"}
+    assert out["mapping"] == {}
+    assert con.execute("select count(*) from matches").fetchone()[0] == n_matches
+    linked = dict(con.execute("select source_key, match_id from match_sources where source = 'dongqiudi'"))
+    kor = dict(con.execute("select source_key, match_id from match_sources where source = 'dongqiudi-kor'"))
+    assert linked == {k: kor[k] for k in ("401", "402", "403", "404", "405", "406")}
+    assert con.execute("select count(*) from odds_changes where source = 'dongqiudi' and match_id = ?",
+                       (kor["404"],)).fetchone()[0] == 1                 # 初盘和最新一样：去重后一行
+    assert out["stats"]["文件：比赛没对上，跳过"] == 0                    # 2022 的韩K 赔率文件没读
+    assert con.execute("select count(*) from match_stats where source = 'dongqiudi'").fetchone()[0] == 0
+    imp.run(con, settings, raw)
+    assert dict(con.execute("select source_key, match_id from match_sources where source = 'dongqiudi'")) == linked
 
 
 def test_cup_checks_skip_kor(settings, ienv):
